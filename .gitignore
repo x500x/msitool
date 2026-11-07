@@ -1,6 +1,28 @@
+# Build outputs
 build/
 build-cmake/
+out/
 _test/
+.vs/
+CMakeUserPresets.json
+
+# MSVC / CMake artifacts
 *.obj
 *.exe
+*.pdb
+*.ilk
+*.exp
+*.idb
+*.i64
+*.lib
+
+# Generated packages / table archives - never commit binaries
+*.msi
+*.msp
+*.cab
 *.idt
+
+# Editor / OS
+*.swp
+Thumbs.db
+Desktop.ini

@@ -32,8 +32,8 @@ struct Cli {
 };
 
 const wchar_t* kUsage = LR"(
-msitool - view and unpack Windows Installer (.msi/.msp) packages
-         built with the Windows Installer (Msi) API + FDI (cabinet.dll)
+msitool - view, unpack and build Windows Installer (.msi/.msp) packages
+         built with the Windows Installer (Msi) API + FDI/FCI (cabinet.dll)
 
 Usage:
   msitool <command> <package.msi> [arguments...] [options...]
