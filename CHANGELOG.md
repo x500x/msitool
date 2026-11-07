@@ -11,6 +11,12 @@
 - **查看**：`verify`（包预检报告 + `MsiVerifyPackageW`）、`info`、`tables`、`schema`、`query`、`list`、`cabs`、`export`。
 - **解包**：`extract`，支持内嵌 CAB（`_Streams`）、外部 CAB、未压缩 administrative layout；`--flat`、`--dry-run`、`--skip-existing`、`--source-layout`、`--keep-temp`。
 - **打包**：`pack`，用 FCI 生成 MSZIP CAB 并用 Msi API 建库，产出自包含 MSI；支持 `--name` / `--version` / `--manufacturer` / `--product-code` / `--upgrade-code` / `--platform` / `--language` / `--force` / `--dry-run`。
+- **打包 · 分卷**：`--cab-size`，按未压缩字节把文件切到多个内嵌 CAB（`Media` / `_Streams` 一一对应），`extract` 与 `msiexec /a` 均可还原。
+- **打包 · 大文件**：`--large-files layout|error`，> 2 GiB 的文件以未压缩伴随 layout 文件保存（空 `Cabinet` 的 `Media` 行 + `File.Attributes=8192`），`extract` 从伴随目录复制还原；`error` 恢复直接拒绝。
+- **打包 · 空目录**：默认写 `CreateFolder` 表并在安装 / 管理安装序列里保留 `CreateFolders` 动作，`--no-empty-dirs` 可关闭。
+- **打包 · manifest**：`--config <file>`，INI 清单支持多 Feature、快捷方式（含 `Icon`）、注册表、服务（`ServiceInstall` + `ServiceControl`）、环境变量、`[pack]` 默认值；相应标准动作已加入 `InstallExecuteSequence`。完整示例见 `examples/pack.ini`。
+- **打包 · UI**：`--ui none|basic|minimal`；`minimal` 生成 `InstallUISequence`、`Dialog`、`Control`、`ControlEvent`、`TextStyle` 与内置欢迎 / 进度 / 完成向导。
+- **打包 · 签名**：`--sign-cert` / `--sign-password` / `--sign-timestamp` / `--sign-tool`，提交后调用 Windows SDK `signtool.exe` 写入 `\x05DigitalSignature` 流，并再次自检。
 - **包验证**：所有命令打开数据库前检查 OLE 复合文件签名、`MsiOpenDatabaseW` 与 `_Tables` 结构；`verify` 输出完整报告并以退出码区分 VALID / INVALID。
 - **构建**：`build.bat`（x64/x86/clean，自动定位 vcvars）与 `CMakeLists.txt`（VS / NMake 生成器）。
 - **文档**：README、CONTRIBUTING、SECURITY、LICENSE 与 issue 模板。
@@ -31,7 +37,9 @@
 
 - 输出统一 UTF-8，表格支持 `--tsv`；警告与详细日志输出到 stderr。
 - 生成的 MSI 同时包含 `InstallExecuteSequence` 与 `AdminExecuteSequence`，使 `msiexec /i` 与 `msiexec /a` 都能处理。
-- README 的「路线图」改为带勾选进度的 TODO 清单，已完成项划掉。
+- README 的「路线图」改为带勾选进度的 TODO 清单，已完成项划掉；两条 `pack` TODO 均已完成并划掉。
+- `pack` 默认不再因单个文件 > 2 GiB 直接失败，改为伴随 layout 文件；空目录默认在安装时保留。
+- `InstallExecuteSequence` / `AdminExecuteSequence` 补齐资源相关的标准动作与 `CreateFolders`。
 
 ---
 

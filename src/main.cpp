@@ -27,6 +27,19 @@ struct Cli {
     std::wstring              upgradeCode;
     std::wstring              platform = L"Intel";
     int                       language = 1033;
+    std::wstring              configFile;
+    unsigned long long        cabSize = 0;
+    std::wstring              largeFiles = L"layout";
+    std::wstring              ui = L"none";
+    std::wstring              signCert;
+    std::wstring              signPassword;
+    std::wstring              signTimestamp;
+    std::wstring              signTool;
+    bool                      keepEmptyDirs = true;
+    bool                      uiSet = false;
+    bool                      largeFilesSet = false;
+    bool                      cabSizeSet = false;
+    bool                      signCertSet = false;
     std::wstring              command;
     std::vector<std::wstring> args;   // positional arguments after the command
 };
@@ -56,7 +69,7 @@ Commands:
   extract <outdir>         Unpack: rebuild the directory tree and decompress
                            every file from the package cabinets
   pack <srcdir> <out.msi>  Pack a directory into a self-contained MSI with
-                           one embedded MSZIP cabinet
+                           one or more embedded MSZIP cabinets
 
 Options:
   --tsv                    Emit tables as tab-separated values
@@ -74,6 +87,16 @@ Options:
   --upgrade-code <GUID>    pack: fixed UpgradeCode (default: random GUID)
   --platform <x64|Intel>   pack: platform (default: Intel)
   --language <LCID>        pack: ProductLanguage (default: 1033)
+  --cab-size <n>[M|G]      pack: split into CABs of ~n MiB (default: one CAB)
+  --no-empty-dirs          pack: do not emit CreateFolder rows
+  --large-files <mode>     pack: layout (default) or error for > 2 GiB files
+  --ui <none|basic|minimal> pack: none (default), basic or minimal wizard UI
+  --config <file>          pack: INI manifest (features, shortcuts, registry,
+                           services, environment, signing, [pack] overrides)
+  --sign-cert <pfx>        pack: Authenticode-sign with signtool.exe
+  --sign-password <text>   pack: PFX password
+  --sign-timestamp <url>   pack: RFC 3161 timestamp URL
+  --sign-tool <path>       pack: explicit path to signtool.exe
   --force                  pack: overwrite an existing output MSI
   -h, --help               Show this help
 
@@ -87,6 +110,8 @@ Examples:
   msitool export setup.msi C:\out\archive
   msitool extract setup.msi C:\out\files --verbose
   msitool pack C:\payload C:\out\app.msi --name "My App" --version 1.2.3
+  msitool pack C:\payload C:\out\app.msi --config examples\pack.ini
+  msitool pack C:\payload C:\out\app.msi --cab-size 16 --ui minimal
 
 Notes:
   * Every command preflights the package first (OLE compound-file signature,
@@ -100,6 +125,24 @@ Notes:
     their payload is a transform, not an MSI directory tree - 'extract' is
     intended for .msi packages.
 )";
+
+// "16", "16M", "512K", "1G" (1024 based) -> bytes.
+unsigned long long parseSize(const std::wstring& text) {
+    std::wstring s = util::trim(text);
+    if (s.size() >= 2 && (s.back() == L'B' || s.back() == L'b')) {
+        s.pop_back();
+        if (!s.empty() && (s.back() == L'i' || s.back() == L'I')) s.pop_back();
+    }
+    unsigned long long mult = 1024ULL * 1024ULL;
+    if (!s.empty()) {
+        wchar_t last = s.back();
+        if (last == L'K' || last == L'k') { mult = 1024ULL; s.pop_back(); }
+        else if (last == L'M' || last == L'm') { mult = 1024ULL * 1024ULL; s.pop_back(); }
+        else if (last == L'G' || last == L'g') { mult = 1024ULL * 1024ULL * 1024ULL; s.pop_back(); }
+    }
+    if (s.empty() || !iswdigit(static_cast<wint_t>(s.front()))) return 0;
+    return _wcstoui64(s.c_str(), nullptr, 10) * mult;
+}
 
 Cli parseCommandLine(int argc, wchar_t** argv) {
     Cli cli;
@@ -118,9 +161,13 @@ Cli parseCommandLine(int argc, wchar_t** argv) {
         if (a == L"--source-layout") { cli.sourceLayout = true; continue; }
         if (a == L"--keep-temp") { cli.keepTemp = true; continue; }
         if (a == L"--force") { cli.force = true; continue; }
+        if (a == L"--no-empty-dirs") { cli.keepEmptyDirs = false; continue; }
         if (a == L"--name" || a == L"--version" || a == L"--manufacturer" ||
             a == L"--product-code" || a == L"--upgrade-code" ||
-            a == L"--platform" || a == L"--language") {
+            a == L"--platform" || a == L"--language" ||
+            a == L"--config" || a == L"--cab-size" || a == L"--large-files" ||
+            a == L"--ui" || a == L"--sign-cert" || a == L"--sign-password" ||
+            a == L"--sign-timestamp" || a == L"--sign-tool") {
             if (i + 1 >= argc) util::fail(L"Option " + a + L" requires a value");
             std::wstring v = argv[++i] ? argv[i] : L"";
             if (a == L"--name") cli.productName = v;
@@ -129,6 +176,14 @@ Cli parseCommandLine(int argc, wchar_t** argv) {
             else if (a == L"--product-code") cli.productCode = v;
             else if (a == L"--upgrade-code") cli.upgradeCode = v;
             else if (a == L"--platform") cli.platform = v;
+            else if (a == L"--config") cli.configFile = v;
+            else if (a == L"--cab-size") { cli.cabSize = parseSize(v); cli.cabSizeSet = true; }
+            else if (a == L"--large-files") { cli.largeFiles = v; cli.largeFilesSet = true; }
+            else if (a == L"--ui") { cli.ui = v; cli.uiSet = true; }
+            else if (a == L"--sign-cert") { cli.signCert = v; cli.signCertSet = true; }
+            else if (a == L"--sign-password") cli.signPassword = v;
+            else if (a == L"--sign-timestamp") cli.signTimestamp = v;
+            else if (a == L"--sign-tool") cli.signTool = v;
             else cli.language = _wtoi(v.c_str());
             continue;
         }
@@ -438,6 +493,19 @@ void cmdPack(const Cli& cli) {
     opt.force = cli.force;
     opt.dryRun = cli.dryRun;
     opt.verbose = cli.verbose;
+    opt.configFile = cli.configFile;
+    opt.cabSize = cli.cabSize;
+    opt.keepEmptyDirs = cli.keepEmptyDirs;
+    opt.largeFiles = cli.largeFiles;
+    opt.ui = cli.ui;
+    opt.signCert = cli.signCert;
+    opt.signPassword = cli.signPassword;
+    opt.signTimestamp = cli.signTimestamp;
+    opt.signTool = cli.signTool;
+    opt.uiSet = cli.uiSet;
+    opt.largeFilesSet = cli.largeFilesSet;
+    opt.cabSizeSet = cli.cabSizeSet;
+    opt.signCertSet = cli.signCertSet;
     pack::pack(opt);
 }
 

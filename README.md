@@ -43,7 +43,7 @@
 | 查看 | SummaryInformation、Property、所有表与行数、列定义/类型/主键、任意 MSI SQL 查询 |
 | 导出 | 全部表为 `.idt`、全部 `_Streams` 原始流、`Binary` 条目、`summary.txt`、CAB + `manifest.txt` |
 | 解包 | 还原安装目录树；内嵌 CAB（`_Streams`）、外部 CAB、未压缩 layout 三种形态都支持 |
-| 打包 | 把目录做成自包含 MSI：FCI 生成 MSZIP CAB + Msi API 建库/写流/写摘要 |
+| 打包 | 把目录做成自包含 MSI：FCI 生成一个或多个 MSZIP CAB + Msi API 建库/写流/写摘要，可选分卷、空目录、快捷方式、注册表、服务、环境变量、多 Feature、UI 与数字签名 |
 | 输出 | UTF-8 文本表格或 `--tsv`；控制字符转义为 `\xNN`；警告与详细日志走 stderr |
 
 ---
@@ -120,7 +120,7 @@ msitool <command> <package.msi> [arguments...] [options...]
 | `cabs` | `<包> <输出目录>` | 导出内嵌/外部 CAB + `manifest.txt` |
 | `export` | `<包> <输出目录>` | 导出全部表 `.idt`、全部流、Binary、`summary.txt` |
 | `extract` | `<包> <输出目录>` | 解包：还原目录树并解压 CAB 中的文件 |
-| `pack` | `<源目录> <输出.msi>` | 打包：目录 → 自包含 MSI（内嵌 MSZIP CAB） |
+| `pack` | `<源目录> <输出.msi>` | 打包：目录 → 自包含 MSI（一个或多个内嵌 MSZIP CAB） |
 
 `list` 的常用名称：`files`、`components`、`features`、`dirs` / `directories`、`media`、`properties`、`streams`、`cabs`、`shortcuts`、`registry`、`services`、`customactions`、`upgrade`、`launchconditions`、`featurecomponents`、`binaries`、`assemblies`、`tables`，也可直接写任意真实表名。
 
@@ -174,6 +174,15 @@ msitool pack <源目录> <输出.msi> [选项]
 | `--upgrade-code <GUID>` | 随机 GUID | 固定 UpgradeCode |
 | `--platform <x64\|Intel>` | `Intel` | `x64` → `ProgramFiles64Folder` + 64 位组件；`Intel` → `ProgramFilesFolder` |
 | `--language <LCID>` | `1033` | ProductLanguage 与 SummaryInformation Template |
+| `--cab-size <n>[M\|G]` | `0` | 按未压缩字节把文件切到多个内嵌 CAB；`0` = 单 CAB。支持 `64K` / `16M` / `1G` 等后缀 |
+| `--no-empty-dirs` | — | 不写 `CreateFolder` 表，空目录不会在安装时创建 |
+| `--large-files <mode>` | `layout` | > 2 GiB 文件：`layout` 写成 MSI 同目录的未压缩伴随文件；`error` 直接拒绝 |
+| `--ui <none\|basic\|minimal>` | `none` | 安装界面：无 UI / Windows Installer 基础进度条 / 自带的欢迎·进度·完成向导 |
+| `--config <file>` | — | INI 清单：多 Feature、快捷方式、注册表、服务、环境变量、签名、默认值 |
+| `--sign-cert <pfx>` | — | 提交后用 `signtool.exe` 写入 `\x05DigitalSignature` 流 |
+| `--sign-password <text>` | — | PFX 密码 |
+| `--sign-timestamp <url>` | — | RFC 3161 时间戳服务 |
+| `--sign-tool <path>` | — | 显式指定 `signtool.exe` 路径 |
 | `--force` | — | 覆盖已存在的输出 MSI |
 | `--dry-run` | — | 只打印计划，不写 CAB / 数据库 |
 
@@ -188,16 +197,52 @@ Packing 7 file(s) in 4 directory(ies) -> E:\work\winmsi\app.msi
 Product   : My App 1.2.3
 Codes     : ProductCode={...} UpgradeCode={...}
 Platform  : x64;1033
-Cabinet   : 1114953 bytes (MSZIP, embedded as #cab1.cab)
+Cabinets  : 1 embedded CAB(s), 1 feature(s), 0 empty dir(s), 0 >2 GiB layout file(s)
+Cabinet   : 1114953 bytes in 1 CAB(s) (MSZIP)
 MSI       : 1138688 bytes
 MsiVerifyPackage: OK (Windows Installer accepts this package)
 Done      : E:\work\winmsi\app.msi
 ```
 
-生成的 MSI 含 9 张表：`Directory`、`Component`、`File`、`Media`、`Feature`、`FeatureComponents`、`Property`、`InstallExecuteSequence`、`AdminExecuteSequence`，以及完整 SummaryInformation。因为带 `AdminExecuteSequence`，可以用不写注册表的方式让 Windows Installer 自己验证：
+基础包含 9 张表：`Directory`、`Component`、`File`、`Media`、`Feature`、`FeatureComponents`、`Property`、`InstallExecuteSequence`、`AdminExecuteSequence`，以及完整 SummaryInformation；按需再加 `CreateFolder`、`Shortcut`、`Icon`、`Registry`、`ServiceInstall`、`ServiceControl`、`Environment`、`InstallUISequence` 与 UI 的 `Dialog` / `Control` / `ControlEvent` / `TextStyle`。因为带 `AdminExecuteSequence`，可以用不写注册表的方式让 Windows Installer 自己验证：
 
 ```bat
 msiexec /a app.msi /qn TARGETDIR=C:\out\admin
+```
+
+### 打包进阶
+
+#### 分卷、大文件与空目录
+
+- `--cab-size 16`：按**未压缩**输入字节把文件切成多个内嵌 CAB（`cab1.cab`、`cab2.cab`…）。每个 CAB 一条 `Media` 行（`DiskId` / `LastSequence` / `#cabN.cab`），全部写进 `_Streams`；单个文件超过阈值时独占一个 CAB。省略时仍是单 CAB。`extract` 与 `msiexec /a` 都能按 `Media.LastSequence` 还原。
+- 默认写 `CreateFolder` 表，配合已在序列里的 `CreateFolders` 标准动作，源目录里的**空目录**（含嵌套空目录）在安装时也会被创建；`--no-empty-dirs` 可关闭。
+- `File.FileSize` 是 32 位整数，FCI 的 seek 回调也只能表示 32 位偏移，因此 > 2 GiB 的文件无法进 CAB。默认 `--large-files layout`：把它作为**未压缩 layout 文件**写到 MSI 同目录的 `<ProductName>\...` 伴随目录，写一条 `Cabinet` 为空的 `Media` 行和 `File.Attributes=8192`（Noncompressed），`FileSize` 记 0 并给出警告。`extract` 会从该伴随目录复制还原。这类包必须把伴随目录和 MSI 一起分发。`--large-files error` 恢复旧的「直接拒绝」行为。
+
+#### UI
+
+`--ui none`（默认，不建 `InstallUISequence`）/ `basic`（只加 `CostInitialize`、`FileCost`、`CostFinalize`、`ExecuteAction`，用 Windows Installer 自带进度条）/ `minimal`（再生成 `Dialog`、`Control`、`ControlEvent`、`TextStyle` 和欢迎 / 进度 / 完成 / 取消 / 错误五个对话框，以及 `DefaultUIFont` 属性）。无论哪种，包都能用 `/qn`、`/qb`、`/a` 安装。
+
+#### 数字签名
+
+`--sign-cert <pfx>` 在数据库提交后调用 `signtool.exe sign /fd SHA256` 写入 `\x05DigitalSignature` 流，可用 `--sign-password`、`--sign-timestamp`、`--sign-tool` 补充参数；签名后再次用 `MsiVerifyPackageW` 自检。签名是**可选**的：仅在打包时需要 Windows SDK 的 `signtool.exe`（自动从 `PATH` 或 `%ProgramFiles(x86)%\Windows Kits\10\bin\*\x64` 查找），运行时依旧只依赖系统 `msi.dll` / `cabinet.dll`。
+
+#### manifest：`--config`
+
+复杂资源用一个 INI 风格的 UTF-8 / UTF-16 清单描述，完整示例见 [examples/pack.ini](examples/pack.ini)。段名 `[类型:名称]`，键名不区分大小写；`;` / `#` 开头为注释；相对路径按源目录解析。**命令行的同名选项优先于 `[pack]` 段**。
+
+| 段 | 常用键 | 生成的表 / 作用 |
+| --- | --- | --- |
+| `[pack]` | `cab-size`（MiB）、`ui`、`large-files`、`keep-empty-dirs`、`sign-cert` / `sign-password` / `sign-timestamp` / `sign-tool` | 填充命令行未指定的默认值 |
+| `[feature:名称]` | `title`、`description`、`dirs`（`;` 分隔的相对目录前缀）、`level`、`display`、`attributes` | `Feature` + `FeatureComponents`；未匹配的目录归 `MainFeature` |
+| `[shortcut:名称]` | `name`、`dir`（`ProgramMenuFolder` / `DesktopFolder` 等标准目录，或源内相对目录）、`target`（源内文件相对路径，自动转成 `[#FileKey]`）、`args`、`description`、`wkdir`、`icon`（.ico）、`component` | `Shortcut` + `Icon` |
+| `[registry:名称]` | `root`（`HKLM` / `HKCU` / `HKCR` / `HKU` / `auto`）、`key`、`name`、`value`、`type`（`string` / `integer` / `binary` / `expand` / `multi` / `key` / `keydelete` / `keycreatedelete`）、`component` | `Registry` |
+| `[service:名称]` | `name`、`displayname`、`image`（服务 exe 的源内相对路径，用于选组件）、`type`（`own` / `share` / `interactive`）、`start`（`auto` / `demand` / `disabled` / `system`）、`error`、`account`、`password`、`args`、`dependencies`、`description` | `ServiceInstall` + `ServiceControl` |
+| `[environment:名称]` | `name`、`value`、`action`（`set` / `create` / `append` / `prepend` / `remove`）、`separator`、`system`、`component` | `Environment` |
+
+`component` 可写组件键（`C1`）、目录键（`INSTALLFOLDER` / `D2`）、源内相对目录或文件相对路径；省略时资源挂到目标文件所属组件（无目标时挂到根组件）。标准动作 `CreateShortcuts`、`WriteRegistryValues`、`InstallServices`、`StartServices`、`WriteEnvironmentStrings`（以及卸载侧的 `RemoveShortcuts`、`RemoveRegistryValues`、`StopServices`、`DeleteServices`）已加入 `InstallExecuteSequence`。
+
+```bat
+msitool pack C:\payload C:\out\app.msi --config examples\pack.ini --cab-size 16 --ui minimal
 ```
 
 ### 退出码与输出约定
@@ -250,11 +295,11 @@ MSI SQL 是 SQL 的**子集**（例如没有 `COUNT(*)` 这类聚合函数），
 
 **打包侧**
 
-1. 递归枚举源目录：每个目录一行 `Directory` + 一个 `Component`，每个文件一行 `File`；`File` 主键（`F1`、`F2`…）同时是 CAB 内文件名。
-2. **FCI**（`FCICreate` / `FCIAddFile` / `FCIFlushCabinet`）生成单个 MSZIP CAB；源路径以 UTF-8 交给 FCI 回调再转回 UTF-16。
-3. `MsiOpenDatabaseW(MSIDBOPEN_CREATE)` 建表（MSI SQL 的 `PRIMARY KEY <列名>` 必须附在**最后一个列定义之后**），参数化 `INSERT ... VALUES (?, ?)` 写行。
-4. `MsiRecordSetStreamW` + `MSIMODIFY_INSERT` 把 CAB 写入 `_Streams`，`Media.Cabinet=#cab1.cab`。
-5. `MsiSummaryInfoSetPropertyW` → `MsiSummaryInfoPersist` → `MsiDatabaseCommit`；最后 `MsiVerifyPackageW` 自检。
+1. 递归枚举源目录：每个目录一行 `Directory` + 一个 `Component`（含空目录），每个文件一行 `File`；`File` 主键（`F1`、`F2`…）同时是 CAB 内文件名。> 2 GiB 的文件移到序列末尾，标记为 uncompressed layout。
+2. 按 `--cab-size` 把文件分组（未压缩字节数），每组跑一次独立的 **FCI**（`FCICreate` / `FCIAddFile` / `FCIFlushCabinet`）生成 MSZIP CAB；源路径以 UTF-8 交给 FCI 回调再转回 UTF-16。
+3. `MsiOpenDatabaseW(MSIDBOPEN_CREATE)` 建表（基础 9 张 + 按需的资源表 / UI 表；MSI SQL 的 `PRIMARY KEY <列名>` 必须附在**最后一个列定义之后**），参数化 `INSERT ... VALUES (?, ?)` 写行：`Media` 每个 CAB 一行，空目录写 `CreateFolder`，清单里的资源写 `Shortcut` / `Registry` / `ServiceInstall` / `Environment` / `Feature` 等。
+4. `MsiRecordSetStreamW` + `MSIMODIFY_INSERT` 把每个 CAB 写入 `_Streams`（`#cabN.cab`），图标同理写入 `Icon`；> 2 GiB 的文件复制到 MSI 同目录的伴随 layout 树。
+5. `MsiSummaryInfoSetPropertyW` → `MsiSummaryInfoPersist` → `MsiDatabaseCommit`；可选 `signtool.exe` 签名；最后 `MsiVerifyPackageW` 自检。
 
 所有句柄用 RAII 封装，文件 I/O 使用 Win32 W 版 API，不依赖 CRT 的 ANSI 路径。
 
@@ -272,8 +317,10 @@ MSI SQL 是 SQL 的**子集**（例如没有 `COUNT(*)` 这类聚合函数），
 │   ├── msidb.h / msidb.cpp      Msi API RAII 封装：包预检、查询、列信息、流、摘要、导出
 │   ├── cab.h / cab.cpp          FDI 解压，回调式直接落盘
 │   ├── extract.h / extract.cpp  表解析、目录树、Media/Sequence 映射、CAB 导出与解包
-│   ├── pack.h / pack.cpp        FCI 压缩 + Msi 建库/建表/写流/摘要
+│   ├── pack.h / pack.cpp        FCI 多 CAB 压缩 + manifest + Msi 建库/建表/写流/签名/摘要
 │   └── main.cpp                 命令行解析与全部命令
+├── examples/
+│   └── pack.ini                 打包清单示例（features/shortcuts/registry/services/env）
 ├── build.bat                    MSVC 构建脚本（x64 / x86 / clean）
 ├── CMakeLists.txt               CMake 构建（MSVC）
 ├── CHANGELOG.md                 变更记录
@@ -349,6 +396,14 @@ build\msitool_x64.exe extract path\to\sample.msi C:\out\files
 build\msitool_x64.exe pack C:\payload C:\out\app.msi --force
 build\msitool_x64.exe verify C:\out\app.msi
 build\msitool_x64.exe extract C:\out\app.msi C:\out\roundtrip
+
+:: 4) 进阶能力（分卷 / 清单 / UI / 签名）
+build\msitool_x64.exe pack C:\payload C:\out\split.msi --cab-size 64K --force
+build\msitool_x64.exe list C:\out\split.msi media --tsv
+build\msitool_x64.exe pack C:\payload C:\out\full.msi --config examples\pack.ini --ui minimal --force
+build\msitool_x64.exe tables C:\out\full.msi
+build\msitool_x64.exe pack C:\payload C:\out\signed.msi --sign-cert C:\cert.pfx --force
+build\msitool_x64.exe list C:\out\signed.msi streams
 ```
 
 还可以让 Windows Installer 自己验证生成的包（administrative install 不写注册表）：
@@ -373,6 +428,12 @@ msiexec /a C:\out\app.msi /qn TARGETDIR=C:\out\admin
 | NetLimiter 5.3.28 x64 | 未压缩 layout，`target:source` 语法 / 178 文件 | 178 文件全部从源目录树还原，0 警告 |
 | KB2565063 `.msp` | 补丁包 | `verify` 判定 VALID（patch 模式），可读取 `MsiPatchMetadata` 等表 |
 | `pack` 往返（7 文件：中文名 / 空格 / 空文件 / 嵌套 / 1 MiB 随机数据） | 自包含 MSI | `MsiVerifyPackage` OK；`extract` 往返 sha256 完全一致；`ACTION=ADMIN` 让 Windows Installer 自身也解出全部文件 |
+| `pack --cab-size 64K`（5 文件） | 3 个内嵌 CAB | 3 条 `Media` 行 + 3 个 `_Streams`；`extract` 全量还原；`msiexec /a` 也解出全部文件 |
+| `pack --config` 全量清单 | 21 张表 | `Feature` 3 / `Shortcut` 2 + `Icon` 1 / `Registry` 2 / `ServiceInstall`+`ServiceControl` / `Environment` / 5 个 `Dialog`；`MsiVerifyPackage` OK，`msiexec /a` 成功 |
+| `pack --ui minimal` | 自包含向导 | 欢迎 / 进度 / 完成 / 取消 / 错误对话框；`msiexec /i /qb` 安装成功 |
+| `pack --sign-cert`（自签名 PFX） | 已签名 MSI | `\x05DigitalSignature` + `\x05MsiDigitalSignatureEx` 流写入，`MsiVerifyPackage` 仍 OK |
+| `pack`（2.3 GiB 稀疏文件） | 未压缩伴随 layout | `FileSize=0`、`Attributes=8192`、一条空 `Cabinet` 的 `Media` 行；`extract` 从伴随目录完整还原 2,300,000,000 字节 |
+| 纯空目录（0 文件 / 3 目录） | 仅 `CreateFolder` 表 | `MsiVerifyPackage` OK；`msiexec /i` 会真正创建空目录树 |
 | 文本 / EXE / 伪造 CFB 头 / 目录 / 不存在路径 | 非 MSI | 预检拒绝，`verify` 输出 INVALID + 完整原因，退出码 1 |
 
 ---
@@ -388,8 +449,8 @@ msiexec /a C:\out\app.msi /qn TARGETDIR=C:\out\admin
 - [x] ~~MSVC x64/x86 构建脚本与 CMake 构建~~
 - [x] ~~开源项目文档：README / LICENSE / CONTRIBUTING / CHANGELOG / SECURITY / 行为准则 / issue 与 PR 模板~~
 
-- [ ] `pack`：多 CAB 分卷、> 2 GiB 文件、`CreateFolders` 保留空目录
-- [ ] `pack`：快捷方式、注册表、服务、环境变量、UI、数字签名、多个 Feature
+- [x] ~~`pack`：多 CAB 分卷、> 2 GiB 文件、`CreateFolders` 保留空目录~~
+- [x] ~~`pack`：快捷方式、注册表、服务、环境变量、UI、数字签名、多个 Feature~~
 - [ ] `extract`：跨 CAB 连续文件（FDI `fdintNEXT_CABINET`）、应用 transform 后的视图、`.msp` 解包
 - [ ] 工程：自动化单元测试 + GitHub Actions CI（MSVC x64/x86）
 
@@ -412,10 +473,12 @@ msiexec /a C:\out\app.msi /qn TARGETDIR=C:\out\admin
 
 **打包**
 
-- 生成的是**最小可安装包**：单 Feature、单 CAB、无 UI、无快捷方式 / 注册表 / 服务 / 自定义动作、无数字签名；空目录不会被保留。
-- 单文件不得超过 2 GiB（`File.FileSize` 是 32 位整数），CAB 不分卷。
+- 基础形态是单 Feature、单 CAB 的最小包；快捷方式 / 注册表 / 服务 / 环境变量 / 多 Feature / UI / 签名都通过 `--config` 或对应选项按需生成，不提供自定义动作与自定义 UI 皮肤（`--ui minimal` 是内置的固定向导）。
+- 分卷按**未压缩**字节估算，压缩后的 CAB 可能小于或略大于阈值；不生成 CAB 之间的连续文件（一个文件不会跨 CAB 切分）。
+- > 2 GiB 的文件不能进 CAB（`File.FileSize` 是 32 位整数、FCI 的 seek 也是 32 位）：默认以未压缩伴随文件的方式保留，`FileSize` 记 0，安装 / 还原时必须同时分发伴随目录。
+- 数字签名是可选的，需要 Windows SDK 的 `signtool.exe` 与一张代码签名证书；不提供证书管理。
 - 文件名 / 目录名中的 `\ / : * ? " < > |` 与控制字符会替换为 `_`，结尾的点与空格会被去掉。
-- 需要一块与 CAB 相当的临时磁盘空间；输出已存在时默认拒绝，需 `--force`。
+- 需要一块与所有 CAB 总大小相当的临时磁盘空间；输出已存在时默认拒绝，需 `--force`。
 
 ---
 
@@ -432,6 +495,10 @@ msiexec /a C:\out\app.msi /qn TARGETDIR=C:\out\admin
 | 中文显示乱码 | 输出是 UTF-8；终端可执行 `chcp 65001`，或用支持 UTF-8 的编辑器打开重定向文件 |
 | `verify` 里 `MsiVerifyPackage` 显示 `reported ...` | 这是附加诊断，不影响 VALID 结论；某些缓存/剥离的 MSI 不是可安装包 |
 | `pack` 提示输出已存在 | 加 `--force` 覆盖，或换一个输出路径 |
+| `pack` 警告 `file(s) exceed 2 GiB` 并多出一个目录 | 大文件以未压缩伴随文件保存；分发 MSI 时必须一并带上 `<ProductName>\` 目录，否则安装 / `extract` 找不到源文件 |
+| `--sign-cert` 报 `Cannot find signtool.exe` | 安装 Windows SDK，或用 `--sign-tool <signtool.exe 完整路径>` 指定 |
+| 安装后看不到源里的空目录 | 检查是否用了 `--no-empty-dirs`；正常包会写 `CreateFolder` 表并由 `CreateFolders` 动作创建 |
+| `--config` 报 `Unknown section` | 段名只能是 `pack` / `feature:*` / `shortcut:*` / `registry:*` / `service:*` / `environment:*` |
 
 ---
 
