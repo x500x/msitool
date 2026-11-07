@@ -75,6 +75,11 @@ public:
 
     MSIHANDLE handle() const noexcept { return h_.get(); }
     const std::wstring& path() const noexcept { return path_; }
+    bool isPatch() const noexcept { return isPatch_; }
+
+    // Applies a Windows Installer transform (.mst) as a temporary view on
+    // this read-only database. Every later query sees the transformed rows.
+    void applyTransform(const std::wstring& path, int errorConditions = 0);
 
     // SELECT-style query, optionally with '?' parameters (all passed as strings).
     QueryResult query(const std::wstring& sql,
@@ -110,6 +115,7 @@ public:
 private:
     Handle      h_;
     std::wstring path_;
+    bool        isPatch_ = false;
 };
 
 // Escape an identifier for use inside backticks in MSI SQL.

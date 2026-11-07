@@ -4,20 +4,25 @@
 
 #include <fcntl.h>
 #include <cstdlib>
+#include <cstring>
 #include <unordered_map>
 
 namespace cab {
 
 namespace {
 
+std::wstring fdiErrorText(const ERF& erf);
+
 struct Context {
     const std::unordered_map<std::wstring, std::wstring>* map = nullptr;
     std::wstring fallbackDir;
     std::wstring tempDir;
+    std::wstring cabDir;            // directory holding every staged cabinet
+    std::string  cabDirUtf8;        // same, UTF-8, with trailing backslash
+    std::vector<std::wstring> cabPaths;  // cabinet set, in order
     bool         dryRun = false;
     bool         skipExisting = false;
     bool         verbose = false;
-    bool         spanning = false;
     Result*      result = nullptr;
 
     // handle -> lowercased cab-internal file name (fdintCOPY_FILE -> CLOSE_FILE_INFO)
@@ -85,6 +90,8 @@ FNOPEN(fdiOpen) {
     }
 
     // We pass UTF-8 encoded paths down to FDI; convert back to UTF-16 here.
+    // A cabinet-set continuation name comes from the CAB header in the
+    // system ANSI code page, so fall back to that if the UTF-8 path is absent.
     path = util::widen(pszFile, CP_UTF8);
     if (path.empty()) return -1;
 
@@ -104,6 +111,13 @@ FNOPEN(fdiOpen) {
     h = CreateFileW(path.c_str(), access,
                     FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
                     creation, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+        std::wstring acp = util::fromAcp(pszFile);
+        if (!acp.empty() && acp != path)
+            h = CreateFileW(acp.c_str(), access,
+                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                            nullptr, creation, FILE_ATTRIBUTE_NORMAL, nullptr);
+    }
     return reinterpret_cast<INT_PTR>(h);
 }
 
@@ -140,6 +154,22 @@ FNSEEK(fdiSeek) {
                                         : (seektype == SEEK_END ? FILE_END : FILE_BEGIN);
     if (!SetFilePointerEx(reinterpret_cast<HANDLE>(hf), distance, &pos, method)) return -1L;
     return static_cast<long>(pos.QuadPart);
+}
+
+// Make sure a file with the name FDI is about to open exists, pointing at the
+// staged cabinet we selected for this link in the set.
+bool ensureCabinetAlias(Context* ctx, const std::wstring& requested,
+                        const std::wstring& staged) {
+    std::wstring rel = util::path::sanitizeRelative(requested);
+    if (rel.empty()) return false;
+    std::wstring alias = util::path::join(ctx->cabDir, rel);
+    if (util::iequals(alias, staged)) return true;
+    if (util::path::exists(alias)) return true;
+    std::wstring dir = util::path::dirName(alias);
+    if (!dir.empty() && !util::path::makeDirs(dir)) return false;
+    if (!util::path::copyFile(staged, alias)) return false;
+    util::verboseLine(ctx->verbose, L"cabinet alias " + requested + L" -> " + staged);
+    return true;
 }
 
 FNFDINOTIFY(fdiNotify) {
@@ -203,11 +233,66 @@ FNFDINOTIFY(fdiNotify) {
             return TRUE;
         }
 
-        case fdintNEXT_CABINET:
-            ctx->spanning = true;
-            return -1;  // files spanning multiple cabinets are not supported
+        case fdintNEXT_CABINET: {
+            // A file (or MSZIP folder) continues into the next cabinet of the
+            // set. FDI concatenates psz3 + psz1 to open it; we stage every
+            // cabinet in the same directory and point psz3 at that directory.
+            if (ctx->cabPaths.empty() || ctx->cabDirUtf8.empty() || !pfdin->psz3)
+                return -1;
+            if (ctx->cabDirUtf8.size() >= 256) {
+                ctx->result->warnings.push_back(
+                    L"Cabinet staging path is too long for FDI's 256-byte buffer");
+                return -1;
+            }
+            std::wstring requested = util::fromAcp(pfdin->psz1 ? pfdin->psz1 : "");
+
+            size_t idx = static_cast<size_t>(pfdin->iCabinet);
+            if (idx >= ctx->cabPaths.size()) {
+                idx = ctx->cabPaths.size();
+                for (size_t i = 1; i < ctx->cabPaths.size(); ++i) {
+                    if (util::iequals(util::path::fileName(ctx->cabPaths[i]), requested)) {
+                        idx = i;
+                        break;
+                    }
+                }
+            }
+            // WRONG_CABINET means FDI rejected our previous answer: find the
+            // staged cabinet whose header matches the expected set/cabinet.
+            if (pfdin->fdie == FDIERROR_WRONG_CABINET) {
+                bool found = false;
+                for (size_t i = 1; i < ctx->cabPaths.size(); ++i) {
+                    CabinetInfo ci = inspect(ctx->cabPaths[i]);
+                    if (ci.valid && ci.setID == pfdin->setID &&
+                        ci.iCabinet == pfdin->iCabinet) {
+                        idx = i;
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) return -1;
+            }
+            if (idx >= ctx->cabPaths.size()) {
+                ctx->result->warnings.push_back(
+                    L"CAB set requested cabinet '" + requested + L"' which is not staged");
+                return -1;
+            }
+            if (!ensureCabinetAlias(ctx, requested, ctx->cabPaths[idx])) {
+                ctx->result->warnings.push_back(
+                    L"Cannot stage continuation cabinet '" + requested + L"'");
+                return -1;
+            }
+            size_t n = std::min<size_t>(ctx->cabDirUtf8.size(), 255);
+            std::memcpy(pfdin->psz3, ctx->cabDirUtf8.data(), n);
+            pfdin->psz3[n] = '\0';
+            util::verboseLine(ctx->verbose,
+                              L"cabinet continuation -> " + ctx->cabPaths[idx]);
+            return 0;   // success; FDI validates setID / iCabinet itself
+        }
 
         case fdintPARTIAL_FILE:
+            // Only occurs when FDICopy is started on a later cabinet of a set
+            // (i.e. the first cabinet is missing). Chain grouping normally
+            // prevents that; report it instead of writing a truncated file.
             ctx->result->warnings.push_back(
                 L"CAB contains a partial file (continued from another cabinet)");
             return 0;
@@ -217,9 +302,68 @@ FNFDINOTIFY(fdiNotify) {
     }
 }
 
+HFDI createFdi(ERF& erf) {
+    return FDICreate(fdiAlloc, fdiFree, fdiOpen, fdiRead, fdiWrite, fdiClose,
+                     fdiSeek, cpuUNKNOWN, &erf);
+}
+
 }  // namespace
 
-Result extract(const std::wstring& cabPath,
+CabinetInfo inspect(const std::wstring& cabPath) {
+    CabinetInfo info;
+    HANDLE h = CreateFileW(cabPath.c_str(), GENERIC_READ,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return info;
+    ERF erf{};
+    HFDI hfdi = createFdi(erf);
+    if (hfdi) {
+        FDICABINETINFO ci{};
+        if (FDIIsCabinet(hfdi, reinterpret_cast<INT_PTR>(h), &ci)) {
+            info.valid = true;
+            info.setID = ci.setID;
+            info.iCabinet = ci.iCabinet;
+            info.hasPrev = ci.hasprev != FALSE;
+            info.hasNext = ci.hasnext != FALSE;
+        }
+        FDIDestroy(hfdi);
+    }
+    CloseHandle(h);
+    return info;
+}
+
+std::vector<std::vector<size_t>> groupCabinetChains(
+    const std::vector<std::wstring>& cabPaths) {
+    std::vector<CabinetInfo> infos;
+    infos.reserve(cabPaths.size());
+    for (const auto& p : cabPaths) infos.push_back(inspect(p));
+
+    std::vector<std::vector<size_t>> chains;
+    std::vector<size_t> cur;
+    for (size_t i = 0; i < cabPaths.size(); ++i) {
+        bool continuation = false;
+        if (!cur.empty()) {
+            const CabinetInfo& prev = infos[cur.back()];
+            const CabinetInfo& here = infos[i];
+            continuation = prev.valid && here.valid && prev.hasNext && here.hasPrev &&
+                           prev.setID == here.setID &&
+                           here.iCabinet == prev.iCabinet + 1;
+        }
+        if (!continuation) {
+            if (!cur.empty()) chains.push_back(cur);
+            cur.clear();
+        }
+        cur.push_back(i);
+        if (!infos[i].hasNext) {
+            chains.push_back(cur);
+            cur.clear();
+        }
+    }
+    if (!cur.empty()) chains.push_back(cur);
+    return chains;
+}
+
+Result extract(const std::vector<std::wstring>& cabPaths,
                const std::unordered_map<std::wstring, std::wstring>& nameToTarget,
                const std::wstring& fallbackDir,
                const std::wstring& tempDir,
@@ -227,30 +371,42 @@ Result extract(const std::wstring& cabPath,
                bool skipExisting,
                bool verbose) {
     Result result;
-    if (!util::path::exists(cabPath)) {
-        result.error = L"Cabinet not found: " + cabPath;
+    if (cabPaths.empty()) {
+        result.error = L"No cabinet to extract";
         return result;
+    }
+    for (const auto& p : cabPaths) {
+        if (!util::path::exists(p)) {
+            result.error = L"Cabinet not found: " + p;
+            return result;
+        }
     }
 
     Context ctx;
     ctx.map = &nameToTarget;
     ctx.fallbackDir = fallbackDir;
     ctx.tempDir = tempDir;
+    ctx.cabPaths = cabPaths;
+    ctx.cabDir = util::path::dirName(cabPaths[0]);
+    if (ctx.cabDir.empty()) ctx.cabDir = L".";
+    ctx.cabDirUtf8 = util::narrow(ctx.cabDir);
+    if (ctx.cabDirUtf8.empty() ||
+        (ctx.cabDirUtf8.back() != '\\' && ctx.cabDirUtf8.back() != '/'))
+        ctx.cabDirUtf8 += '\\';
     ctx.dryRun = dryRun;
     ctx.skipExisting = skipExisting;
     ctx.verbose = verbose;
     ctx.result = &result;
 
     ERF erf{};
-    HFDI hfdi = FDICreate(fdiAlloc, fdiFree, fdiOpen, fdiRead, fdiWrite, fdiClose,
-                          fdiSeek, cpuUNKNOWN, &erf);
+    HFDI hfdi = createFdi(erf);
     if (!hfdi) {
         result.error = L"FDICreate failed: " + fdiErrorText(erf);
         return result;
     }
 
-    std::string nameU8 = util::narrow(util::path::fileName(cabPath));
-    std::string dirU8 = util::narrow(util::path::dirName(cabPath));
+    std::string nameU8 = util::narrow(util::path::fileName(cabPaths[0]));
+    std::string dirU8 = util::narrow(util::path::dirName(cabPaths[0]));
     if (dirU8.empty()) dirU8 = ".\\";
     std::vector<char> cabinet(nameU8.begin(), nameU8.end());
     cabinet.push_back('\0');
@@ -263,9 +419,7 @@ Result extract(const std::wstring& cabPath,
     FDIDestroy(hfdi);
 
     if (!ok) {
-        result.error = ctx.spanning
-                           ? L"CAB set spans multiple cabinets; this is not supported"
-                           : L"FDICopy(" + cabPath + L"): " + fdiErrorText(erf);
+        result.error = L"FDICopy(" + cabPaths[0] + L"): " + fdiErrorText(erf);
         return result;
     }
     result.ok = true;

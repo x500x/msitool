@@ -3,6 +3,7 @@
 
 #include <stdlib.h>
 #include <algorithm>
+#include <cstring>
 #include <functional>
 #include <unordered_map>
 #include <unordered_set>
@@ -185,7 +186,9 @@ struct CabJob {
 
 }  // namespace
 
-std::vector<MediaInfo> readMedia(msi::Db& db) {
+std::vector<MediaInfo> readMedia(
+    msi::Db& db,
+    const std::vector<std::pair<std::wstring, std::wstring>>& extraStreams) {
     std::vector<MediaInfo> result;
     TableData t = loadTable(db, L"Media");
     if (t.cols.empty()) return result;
@@ -203,9 +206,22 @@ std::vector<MediaInfo> readMedia(msi::Db& db) {
                 m.embedded = true;
                 m.streamName = m.cabinet.substr(1);
                 std::wstring resolved = findStreamName(streams, m.streamName);
-                if (!resolved.empty()) m.streamName = resolved;
-                m.available = !resolved.empty();
-                m.size = streamSize(db, m.streamName);
+                if (!resolved.empty()) {
+                    m.streamName = resolved;
+                    m.available = true;
+                    m.size = streamSize(db, m.streamName);
+                } else {
+                    // The stream may live in a companion patch package.
+                    for (const auto& extra : extraStreams) {
+                        if (!util::iequals(extra.first, m.streamName)) continue;
+                        if (!util::path::exists(extra.second)) continue;
+                        m.streamName = extra.first;
+                        m.stagedPath = extra.second;
+                        m.available = true;
+                        m.size = fileSize(extra.second);
+                        break;
+                    }
+                }
             } else {
                 std::wstring rel = util::path::sanitizeRelative(stripProps(m.cabinet));
                 if (!rel.empty()) {
@@ -244,7 +260,7 @@ Stats extractPackage(msi::Db& db, const Options& opt) {
     TableData compTable = loadTable(db, L"Component");
     TableData fileTable = loadTable(db, L"File");
     TableData propTable = loadTable(db, L"Property");
-    std::vector<MediaInfo> media = readMedia(db);
+    std::vector<MediaInfo> media = readMedia(db, opt.extraStreams);
 
     struct DirRec {
         std::wstring parent;
@@ -386,15 +402,37 @@ Stats extractPackage(msi::Db& db, const Options& opt) {
     if (opt.keepTemp) temp.keep();
     const std::wstring fallbackDir = util::path::join(outDir, L"_unmapped");
 
-    std::unordered_set<size_t> writtenFiles;
+    // Stage every cabinet up front. A cabinet set can ask for its next CAB
+    // while FDI is still writing a spanned file, so all members of the set
+    // must already be on disk under the names stored in the CAB headers.
+    struct StagedCab {
+        std::wstring localPath;
+        bool         prepared = false;
+    };
+    std::vector<StagedCab> staged(jobs.size());
+    std::unordered_set<std::wstring> usedNames;
     for (size_t j = 0; j < jobs.size(); ++j) {
         CabJob& job = jobs[j];
-        job.localPath = util::path::join(
-            temp.path(), util::fmt(L"c%u.cab", static_cast<unsigned>(j + 1)));
+        std::wstring rel = util::path::sanitizeRelative(
+            job.media.embedded ? job.media.streamName : stripProps(job.media.cabinet));
+        // Stage flat: a Media.Cabinet may contain a source-side subpath, but
+        // the staged name must be a single file name in the temp directory.
+        rel = util::path::fileName(rel);
+        if (rel.empty()) rel = L"cab" + std::to_wstring(j + 1) + L".cab";
+        if (util::path::ext(rel).empty()) rel += L".cab";
+        std::wstring name = rel;
+        for (int n = 2; !usedNames.insert(util::toLower(name)).second; ++n)
+            name = util::path::fileName(rel) + L"_" + std::to_wstring(n) +
+                   util::path::ext(rel);
+        job.localPath = util::path::join(temp.path(), name);
+        staged[j].localPath = job.localPath;
 
         bool prepared = false;
         std::wstring stageError;
-        if (job.media.embedded) {
+        if (!job.media.stagedPath.empty()) {
+            prepared = util::path::copyFile(job.media.stagedPath, job.localPath);
+            if (!prepared) stageError = L"cannot copy staged " + job.media.stagedPath;
+        } else if (job.media.embedded) {
             if (!job.media.available) {
                 stageError = L"embedded stream '" + job.media.streamName + L"' not found";
             } else {
@@ -420,36 +458,70 @@ Stats extractPackage(msi::Db& db, const Options& opt) {
             warnings.push_back(L"Skipping cabinet '" + job.media.cabinet + L"': " + stageError);
             continue;
         }
+        staged[j].prepared = true;
+    }
 
+    // Group the staged files into cabinet sets (chains). One FDICopy call per
+    // chain reconstructs files that continue across cabinet boundaries.
+    std::vector<std::wstring> preparedPaths;
+    std::vector<size_t> preparedJobs;
+    for (size_t j = 0; j < staged.size(); ++j) {
+        if (!staged[j].prepared) continue;
+        preparedPaths.push_back(staged[j].localPath);
+        preparedJobs.push_back(j);
+    }
+    std::vector<std::vector<size_t>> chains = cab::groupCabinetChains(preparedPaths);
+
+    std::unordered_set<size_t> writtenFiles;
+    for (size_t c = 0; c < chains.size(); ++c) {
+        const std::vector<size_t>& chain = chains[c];
+        std::vector<std::wstring> paths;
+        std::unordered_map<std::wstring, std::wstring> targets;
+        std::unordered_map<std::wstring, size_t> toFile;
         std::unordered_set<size_t> mappedFiles;
-        for (const auto& kv : job.nameToFile) mappedFiles.insert(kv.second);
-        util::outLine(util::fmt(L"[cab %u/%llu] %s (%llu bytes, %llu file(s), %llu name(s))",
-                                static_cast<unsigned>(j + 1),
-                                static_cast<unsigned long long>(jobs.size()),
-                                job.media.cabinet.c_str(),
-                                fileSize(job.localPath),
-                                static_cast<unsigned long long>(mappedFiles.size()),
-                                static_cast<unsigned long long>(job.nameToTarget.size())));
+        std::wstring label;
+        unsigned long long bytes = 0;
+        for (size_t k : chain) {
+            size_t j = preparedJobs[k];
+            CabJob& job = jobs[j];
+            paths.push_back(staged[j].localPath);
+            bytes += fileSize(staged[j].localPath);
+            if (!label.empty()) label += L" + ";
+            label += job.media.cabinet;
+            for (const auto& kv : job.nameToTarget) targets.emplace(kv.first, kv.second);
+            for (const auto& kv : job.nameToFile) {
+                toFile.emplace(kv.first, kv.second);
+                mappedFiles.insert(kv.second);
+            }
+        }
+        if (paths.empty()) continue;
+        util::outLine(util::fmt(
+            L"[cab %u/%llu] %s (%llu bytes, %llu CAB(s), %llu file(s), %llu name(s))",
+            static_cast<unsigned>(c + 1),
+            static_cast<unsigned long long>(chains.size()), label.c_str(), bytes,
+            static_cast<unsigned long long>(chain.size()),
+            static_cast<unsigned long long>(mappedFiles.size()),
+            static_cast<unsigned long long>(targets.size())));
 
-        cab::Result r = cab::extract(job.localPath, job.nameToTarget, fallbackDir,
-                                     temp.path(), opt.dryRun, opt.skipExisting, opt.verbose);
+        cab::Result r = cab::extract(paths, targets, fallbackDir, temp.path(),
+                                     opt.dryRun, opt.skipExisting, opt.verbose);
         for (const auto& w : r.warnings) warnings.push_back(w);
         if (!r.ok) {
             warnings.push_back(r.error);
             continue;
         }
-        ++st.cabCount;
+        st.cabCount += chain.size();
         st.skipped += r.skipped.size();
         st.written += r.extracted.size();
         for (const auto& name : r.extracted) {
-            auto it = job.nameToFile.find(name);
-            if (it != job.nameToFile.end()) writtenFiles.insert(it->second);
+            auto it = toFile.find(name);
+            if (it != toFile.end()) writtenFiles.insert(it->second);
         }
         // Skipped files are already present on disk - do not treat them as
         // missing sources in the fallback pass below.
         for (const auto& name : r.skipped) {
-            auto it = job.nameToFile.find(name);
-            if (it != job.nameToFile.end()) writtenFiles.insert(it->second);
+            auto it = toFile.find(name);
+            if (it != toFile.end()) writtenFiles.insert(it->second);
         }
     }
 
@@ -522,6 +594,185 @@ Stats extractPackage(msi::Db& db, const Options& opt) {
         static_cast<unsigned long long>(st.fileRows)));
     util::outLine(L"Output: " + outDir);
     if (opt.keepTemp) util::outLine(L"Temporary cabinets kept in: " + temp.path());
+    return st;
+}
+
+Stats extractPatch(msi::Db& patch, const Options& opt) {
+    Stats st;
+    std::vector<std::wstring> warnings;
+    const std::wstring outDir = util::path::full(opt.outDir);
+    const std::wstring payloadDir = util::path::join(outDir, L"payload");
+    const std::wstring streamsDir = util::path::join(outDir, L"streams");
+    const std::wstring transformDir = util::path::join(outDir, L"transforms");
+
+    if (!opt.dryRun) {
+        if (!util::path::makeDirs(outDir))
+            util::fail(L"Cannot create output directory: " + outDir);
+        util::path::makeDirs(payloadDir);
+        util::path::makeDirs(streamsDir);
+        util::path::makeDirs(transformDir);
+    }
+
+    util::TempDir temp(L"msitool_msp");
+    if (opt.keepTemp) temp.keep();
+
+    struct Item {
+        std::wstring name;
+        std::vector<unsigned char> data;
+        int         kind = 0;   // 1 = CAB, 2 = transform, 3 = other stream
+        std::wstring output;
+    };
+    static const unsigned char kCabSig[4] = {'M', 'S', 'C', 'F'};
+    static const unsigned char kOleSig[8] = {0xD0, 0xCF, 0x11, 0xE0,
+                                             0xA1, 0xB1, 0x1A, 0xE1};
+    std::vector<Item> items;
+    for (const auto& name : patch.streamNames()) {
+        Item it;
+        it.name = name;
+        try {
+            it.data = patch.readStream(
+                L"SELECT `Data` FROM `_Streams` WHERE `Name`=?", {name}, 1);
+        } catch (const util::Error& e) {
+            warnings.push_back(L"stream '" + name + L"': " + e.message());
+            continue;
+        }
+        bool isCab = it.data.size() >= 4 &&
+                     std::memcmp(it.data.data(), kCabSig, sizeof(kCabSig)) == 0;
+        bool isOle = it.data.size() >= 8 &&
+                     std::memcmp(it.data.data(), kOleSig, sizeof(kOleSig)) == 0;
+        if (isCab) it.kind = 1;
+        else if (isOle && !name.empty() && name.front() == L'#') it.kind = 2;
+        else it.kind = 3;
+        items.push_back(std::move(it));
+    }
+
+    std::wstring manifest = L"# msitool .msp extraction\n# Package\t" +
+                            patch.path() + L"\n";
+    try {
+        msi::QueryResult r = patch.query(
+            L"SELECT `Company`,`Property`,`Value` FROM `MsiPatchMetadata`");
+        for (const auto& row : r.rows) {
+            manifest += L"# Meta\t";
+            for (size_t i = 0; i < row.size(); ++i)
+                manifest += (i ? L"\t" : L"") + row[i];
+            manifest += L"\n";
+        }
+    } catch (const util::Error&) {
+    }
+    for (const auto& s : patch.summary())
+        manifest += L"# Summary\t" + s.name + L"=" + s.value + L"\n";
+    manifest += L"# Stream\tKind\tSize\tOutput\n";
+
+    std::vector<std::wstring> cabPaths;
+    std::vector<std::wstring> transformPaths;
+    std::vector<std::pair<std::wstring, std::wstring>> extraStreams;
+    std::unordered_set<std::wstring> usedNames;
+    for (auto& it : items) {
+        std::wstring rel = util::path::sanitizeComponent(it.name);
+        if (rel.empty()) rel = L"stream";
+        std::wstring unique = rel;
+        for (int n = 2; !usedNames.insert(util::toLower(unique)).second; ++n)
+            unique = rel + L"_" + std::to_wstring(n);
+        std::wstring kind = it.kind == 1 ? L"cab"
+                            : it.kind == 2 ? L"transform" : L"stream";
+
+        if (it.kind == 1) {
+            std::wstring staged = util::path::join(temp.path(), unique);
+            if (util::path::ext(staged).empty()) staged += L".cab";
+            // Staging is a temporary file, so it is written even for --dry-run.
+            if (!util::path::writeFile(staged, it.data)) {
+                warnings.push_back(L"cannot stage cabinet stream '" + it.name + L"'");
+                continue;
+            }
+            cabPaths.push_back(staged);
+            extraStreams.push_back({it.name, staged});
+            if (!it.name.empty() && it.name.front() == L'#')
+                extraStreams.push_back({it.name.substr(1), staged});
+            else extraStreams.push_back({L"#" + it.name, staged});
+            it.output = L"payload/ (see file list below)";
+        } else if (it.kind == 2) {
+            std::wstring staged = util::path::join(temp.path(), unique + L".mst");
+            util::path::writeFile(staged, it.data);
+            transformPaths.push_back(staged);
+            it.output = L"transforms/" + unique + L".mst";
+            if (!opt.dryRun)
+                util::path::writeFile(util::path::join(transformDir, unique + L".mst"),
+                                      it.data);
+        } else {
+            it.output = L"streams/" + unique;
+            if (!opt.dryRun)
+                util::path::writeFile(util::path::join(streamsDir, unique), it.data);
+        }
+        manifest += it.name + L"\t" + kind + L"\t" +
+                    std::to_wstring(it.data.size()) + L"\t" + it.output + L"\n";
+        util::verboseLine(opt.verbose, L"stream " + it.name + L" -> " + it.output);
+    }
+
+    std::vector<std::wstring> payloadFiles;
+    if (!cabPaths.empty()) {
+        std::vector<std::vector<size_t>> chains = cab::groupCabinetChains(cabPaths);
+        for (const auto& chain : chains) {
+            std::vector<std::wstring> paths;
+            for (size_t k : chain) paths.push_back(cabPaths[k]);
+            cab::Result r = cab::extract(paths, {}, payloadDir, temp.path(),
+                                         opt.dryRun, opt.skipExisting, opt.verbose);
+            for (const auto& w : r.warnings) warnings.push_back(w);
+            if (!r.ok) { warnings.push_back(r.error); continue; }
+            st.cabCount += chain.size();
+            st.written += r.extracted.size();
+            st.skipped += r.skipped.size();
+            for (const auto& name : r.extracted) payloadFiles.push_back(name);
+        }
+    } else {
+        warnings.push_back(L"Patch contains no embedded CAB stream");
+    }
+
+    manifest += L"\n# Payload files (CAB-internal names)\n";
+    for (const auto& name : payloadFiles) manifest += L"# File\t" + name + L"\n";
+    if (!opt.dryRun)
+        writeText(util::path::join(outDir, L"manifest.txt"), manifest);
+
+    // Optional: apply the patch's transforms to a target .msi so the payload
+    // can also be laid out under its real installed directory names.
+    if (!opt.baseMsi.empty()) {
+        util::outLine(L"");
+        util::outLine(L"=== transformed base MSI layout ===");
+        msi::Db base(util::path::full(opt.baseMsi));
+        std::vector<std::wstring> allTransforms = transformPaths;
+        for (const auto& t : opt.transforms) allTransforms.push_back(util::path::full(t));
+        if (allTransforms.empty())
+            warnings.push_back(L"Patch has no transform streams; --base-msi layout is "
+                               L"the untransformed MSI");
+        for (const auto& t : allTransforms) {
+            try {
+                base.applyTransform(t);
+                util::verboseLine(opt.verbose, L"applied transform " + t);
+            } catch (const util::Error& e) {
+                warnings.push_back(L"transform '" + t + L"': " + e.message());
+            }
+        }
+        Options sub = opt;
+        sub.outDir = util::path::join(outDir, L"layout");
+        sub.extraStreams = extraStreams;
+        sub.baseMsi.clear();
+        sub.transforms.clear();
+        extractPackage(base, sub);
+    }
+
+    st.warnings = warnings.size();
+    showWarnings(warnings);
+    util::outLine(L"");
+    util::outLine(util::fmt(
+        L"%s %llu stream(s) from patch, %llu CAB(s), %llu payload file(s), "
+        L"%llu skipped, %llu warning(s).",
+        opt.dryRun ? L"[dry-run] Would extract" : L"Extracted",
+        static_cast<unsigned long long>(items.size()),
+        static_cast<unsigned long long>(st.cabCount),
+        static_cast<unsigned long long>(st.written),
+        static_cast<unsigned long long>(st.skipped),
+        static_cast<unsigned long long>(st.warnings)));
+    util::outLine(L"Output: " + outDir);
+    if (opt.keepTemp) util::outLine(L"Temporary files kept in: " + temp.path());
     return st;
 }
 

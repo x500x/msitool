@@ -40,6 +40,8 @@ struct Cli {
     bool                      largeFilesSet = false;
     bool                      cabSizeSet = false;
     bool                      signCertSet = false;
+    std::wstring              baseMsi;                    // extract .msp with a target MSI
+    std::vector<std::wstring> transforms;               // --transform (repeatable)
     std::wstring              command;
     std::vector<std::wstring> args;   // positional arguments after the command
 };
@@ -80,6 +82,11 @@ Options:
   --source-layout          extract: use the source-image directory tree
                            instead of the installed (target) tree
   --keep-temp              extract: keep staged temporary cabinets
+  --transform <file.mst>   apply an MST as a temporary view (repeatable);
+                           info/tables/schema/query/list/extract see the
+                           transformed database
+  --base-msi <file.msi>    extract .msp: apply the patch transforms to this
+                           target MSI and lay out the payload with real names
   --name <text>            pack: ProductName (default: directory name)
   --version <x.y.z>        pack: ProductVersion (default 1.0.0)
   --manufacturer <text>    pack: Manufacturer (default: msitool)
@@ -109,6 +116,9 @@ Examples:
   msitool cabs setup.msi C:\out\cabs
   msitool export setup.msi C:\out\archive
   msitool extract setup.msi C:\out\files --verbose
+  msitool extract setup.msi C:\out\files --transform custom.mst
+  msitool extract update.msp C:\out\patch
+  msitool extract update.msp C:\out\patch --base-msi setup.msi
   msitool pack C:\payload C:\out\app.msi --name "My App" --version 1.2.3
   msitool pack C:\payload C:\out\app.msi --config examples\pack.ini
   msitool pack C:\payload C:\out\app.msi --cab-size 16 --ui minimal
@@ -121,9 +131,11 @@ Notes:
     looked up next to the MSI. Uncompressed ("layout") packages are copied
     from their source tree next to the MSI.
   * Extraction never installs anything and never needs administrator rights.
-  * .msp patch packages can be inspected (info/tables/query/export/cabs), but
-    their payload is a transform, not an MSI directory tree - 'extract' is
-    intended for .msi packages.
+  * .msp patch packages can be inspected (info/tables/query/export/cabs) and
+    'extract' dumps their embedded CAB payload, transform and raw streams.
+    Use --base-msi <target.msi> to lay the patch payload out with real names.
+  * --transform <file.mst> applies a transform as a temporary read-only view;
+    it never modifies the package on disk. Repeatable.
 )";
 
 // "16", "16M", "512K", "1G" (1024 based) -> bytes.
@@ -162,6 +174,13 @@ Cli parseCommandLine(int argc, wchar_t** argv) {
         if (a == L"--keep-temp") { cli.keepTemp = true; continue; }
         if (a == L"--force") { cli.force = true; continue; }
         if (a == L"--no-empty-dirs") { cli.keepEmptyDirs = false; continue; }
+        if (a == L"--transform" || a == L"--base-msi") {
+            if (i + 1 >= argc) util::fail(L"Option " + a + L" requires a value");
+            std::wstring v = argv[++i] ? argv[i] : L"";
+            if (a == L"--transform") cli.transforms.push_back(v);
+            else cli.baseMsi = v;
+            continue;
+        }
         if (a == L"--name" || a == L"--version" || a == L"--manufacturer" ||
             a == L"--product-code" || a == L"--upgrade-code" ||
             a == L"--platform" || a == L"--language" ||
@@ -409,7 +428,10 @@ void cmdExtract(msi::Db& db, const Cli& cli) {
     opt.sourceLayout = cli.sourceLayout;
     opt.keepTemp = cli.keepTemp;
     opt.verbose = cli.verbose;
-    extract::extractPackage(db, opt);
+    opt.transforms = cli.transforms;
+    opt.baseMsi = cli.baseMsi;
+    if (db.isPatch()) extract::extractPatch(db, opt);
+    else              extract::extractPackage(db, opt);
 }
 
 // Stands alone (it must be able to report a bad file instead of throwing
@@ -441,6 +463,12 @@ bool cmdVerify(const Cli& cli) {
         try {
             msi::Db db(p.path);
             add(L"MsiOpenDatabase", L"OK");
+            if (!p.isPatch) {
+                for (const auto& tr : cli.transforms) {
+                    db.applyTransform(tr);
+                    add(L"Transform", L"applied " + tr);
+                }
+            }
             if (!p.isPatch) {
                 UINT vr = MsiVerifyPackageW(p.path.c_str());
                 add(L"MsiVerifyPackage",
@@ -523,6 +551,12 @@ int run(int argc, wchar_t** argv) {
 
     std::wstring package = requireArg(cli, 0, L"package path (.msi)");
     msi::Db db(package);  // preflight + MsiOpenDatabase + _Tables check
+    if (!db.isPatch()) {
+        for (const auto& tr : cli.transforms) {
+            db.applyTransform(tr);
+            util::verboseLine(cli.verbose, L"applied transform " + tr);
+        }
+    }
 
     if (cmd == L"info")             cmdInfo(db, cli);
     else if (cmd == L"tables")      cmdTables(db, cli);

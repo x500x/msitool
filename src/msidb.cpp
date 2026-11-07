@@ -160,6 +160,7 @@ Db::Db(const std::wstring& path) : path_(util::path::full(path)) {
     // 1. Preflight: make sure the input really is an MSI/MSP storage at all.
     FileProbe p = probe(path_);
     if (!p.error.empty()) util::fail(p.error);
+    isPatch_ = p.isPatch;
 
     // 2. Open. A patch package must be opened with the MSIDBOPEN_PATCHFILE
     //    pseudo-pointer; plain MSIDBOPEN_READONLY fails with ERROR_OPEN_FAILED.
@@ -188,6 +189,13 @@ Db::Db(const std::wstring& path) : path_(util::path::full(path)) {
     UINT rc = MsiDatabaseOpenViewW(h_.get(), L"SELECT `Name` FROM `_Tables`", view.out());
     if (rc != ERROR_SUCCESS || MsiViewExecute(view.get(), 0) != ERROR_SUCCESS)
         util::fail(L"Not a valid Windows Installer database (no _Tables table): " + path_);
+}
+
+void Db::applyTransform(const std::wstring& path, int errorConditions) {
+    std::wstring full = util::path::full(path);
+    if (!util::path::exists(full)) util::fail(L"Transform not found: " + full);
+    util::checkMsi(MsiDatabaseApplyTransformW(h_.get(), full.c_str(), errorConditions),
+                   L"MsiDatabaseApplyTransformW " + full);
 }
 
 QueryResult Db::query(const std::wstring& sql,

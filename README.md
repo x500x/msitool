@@ -42,7 +42,7 @@
 | 包预检 | 打开前校验 OLE 复合文件签名、`MsiOpenDatabaseW`、`_Tables` 结构；`verify` 额外调用 `MsiVerifyPackageW` |
 | 查看 | SummaryInformation、Property、所有表与行数、列定义/类型/主键、任意 MSI SQL 查询 |
 | 导出 | 全部表为 `.idt`、全部 `_Streams` 原始流、`Binary` 条目、`summary.txt`、CAB + `manifest.txt` |
-| 解包 | 还原安装目录树；内嵌 CAB（`_Streams`）、外部 CAB、未压缩 layout 三种形态都支持 |
+| 解包 | 还原安装目录树；内嵌 CAB（`_Streams`）、外部 CAB、未压缩 layout、跨 CAB 连续文件（FDI 分卷集）、`.msp` 补丁负载都支持；`--transform` 可查看应用 transform 后的视图 |
 | 打包 | 把目录做成自包含 MSI：FCI 生成一个或多个 MSZIP CAB + Msi API 建库/写流/写摘要，可选分卷、空目录、快捷方式、注册表、服务、环境变量、多 Feature、UI 与数字签名 |
 | 输出 | UTF-8 文本表格或 `--tsv`；控制字符转义为 `\xNN`；警告与详细日志走 stderr |
 
@@ -119,7 +119,7 @@ msitool <command> <package.msi> [arguments...] [options...]
 | `list` | `<包> <名称>` | 常用表或任意表；`--tsv` 便于脚本处理 |
 | `cabs` | `<包> <输出目录>` | 导出内嵌/外部 CAB + `manifest.txt` |
 | `export` | `<包> <输出目录>` | 导出全部表 `.idt`、全部流、Binary、`summary.txt` |
-| `extract` | `<包> <输出目录>` | 解包：还原目录树并解压 CAB 中的文件 |
+| `extract` | `<包> <输出目录>` | 解包：还原目录树并解压 CAB 中的文件；`.msp` 导出补丁负载 |
 | `pack` | `<源目录> <输出.msi>` | 打包：目录 → 自包含 MSI（一个或多个内嵌 MSZIP CAB） |
 
 `list` 的常用名称：`files`、`components`、`features`、`dirs` / `directories`、`media`、`properties`、`streams`、`cabs`、`shortcuts`、`registry`、`services`、`customactions`、`upgrade`、`launchconditions`、`featurecomponents`、`binaries`、`assemblies`、`tables`，也可直接写任意真实表名。
@@ -141,6 +141,8 @@ msitool <command> <package.msi> [arguments...] [options...]
 | `--skip-existing` | 跳过已存在的目标文件 |
 | `--source-layout` | 按未压缩源镜像的目录树输出，而不是安装后的目录树 |
 | `--keep-temp` | 保留暂存的 CAB 临时目录，便于排查 |
+| `--transform <file.mst>` | 把 MST 作为**临时视图**应用到只读数据库；`info` / `tables` / `schema` / `query` / `list` / `extract` / `verify` 看到的都是 transform 后的表（可重复指定） |
+| `--base-msi <file.msi>` | 解包 `.msp` 时，把补丁里的 transform 应用到该目标 MSI，并按真实目录名布局输出 |
 
 示例：
 
@@ -148,6 +150,8 @@ msitool <command> <package.msi> [arguments...] [options...]
 msitool extract setup.msi C:\out\files --verbose
 msitool extract setup.msi C:\out\files --flat --skip-existing
 msitool extract setup.msi C:\out\files --dry-run
+msitool extract setup.msi C:\out\files --transform custom.mst
+msitool extract update.msp C:\out\patch --base-msi setup.msi
 ```
 
 真实输出（Windows SDK Debuggers MSI，18 个 CAB）：
@@ -158,6 +162,44 @@ msitool extract setup.msi C:\out\files --dry-run
 Extracted 473 file(s) from 18 cabinet(s), 0 copied from layout, 0 skipped, 0 warning(s).  File table: 473 row(s).
 Output: E:\work\winmsi\out
 ```
+
+### 解包进阶
+
+#### 跨 CAB 连续文件（cabinet set）
+
+有些打包工具会让一个 MSZIP folder / 文件**横跨多个 CAB**（CAB 头里的 `hasnext` / `hasprev`、`setID`、`iCabinet` 串成一个分卷集，FDI 会回调 `fdintNEXT_CABINET` 请求下一个 CAB）。`extract` 会：
+
+1. 把 `Media` 里的所有 CAB 先暂存到同一个短临时目录，并保留 `Media.Cabinet` 里的文件名；
+2. 用 `FDIIsCabinet` 读每个 CAB 头，按 `hasnext/hasprev` + `setID` + 连续 `iCabinet` 把它们分组为分卷集；
+3. 每个分卷集只跑一次 `FDICopy`，在 `fdintNEXT_CABINET` 回调里把下一个 CAB 的路径交给 FDI（必要时生成别名文件），跨 CAB 的文件因此被写成**一个完整文件**；
+4. `Media.LastSequence` 相同的多条记录（跨 CAB 文件常这样写）会合并到同一个分卷集，文件不会被重复还原。
+
+独立 CAB（包括 `pack --cab-size` 生成的多 CAB）仍是各自一组，行为不变。
+
+#### transform 后的视图
+
+`--transform <file.mst>` 用 `MsiDatabaseApplyTransformW` 把 MST 应用为**只读临时视图**（不修改包、不落盘），之后所有查看 / 解包命令读到的都是 transform 后的 `File` / `Property` / `Directory` 等表。可重复指定多个 MST，按顺序应用；`verify` 也会在报告里列出已应用的 transform。
+
+```bat
+msitool list setup.msi properties --transform custom.mst
+msitool extract setup.msi C:\out\files --transform custom.mst
+```
+
+#### `.msp` 补丁解包
+
+`extract` 对 `.msp`（用 `MSIDBOPEN_PATCHFILE` 打开）不再只做查看，而是：
+
+- 遍历 `_Streams`，按签名分类：`MSCF` → CAB 负载、`D0 CF 11 E0` 且流名以 `#` 开头 → transform、其余 → 原始流；
+- CAB 负载用 FDI 解到 `<输出目录>\payload\`（文件名为 CAB 内部名 / File 表键），transform 写到 `transforms\*.mst`，其余流写到 `streams\`；
+- 写 `manifest.txt`：`MsiPatchMetadata`、SummaryInformation、每条流的大小与去向、解出的负载文件清单；
+- 可选 `--base-msi <file.msi>`：把补丁里的 transform（以及 `--transform` 指定的额外 MST）应用到目标 MSI 的临时视图，并把补丁 CAB 作为额外 `_Streams` 提供给解包流程，从而在 `<输出目录>\layout\` 下按**真实安装目录名**还原补丁后的文件布局。
+
+```bat
+msitool extract KB2565063.msp C:\out\patch
+msitool extract KB2565063.msp C:\out\patch --base-msi C:\src\setup.msi
+```
+
+QFE / hotfix 型补丁（例如 KB2565063）通常只有 `QFE.cab`、没有 transform 流：此时 `--base-msi` 只能解出目标 MSI 本身的布局，补丁文件仍以 CAB 内部名放在 `payload\`。
 
 ### 打包选项（`pack`）
 
@@ -290,8 +332,9 @@ MSI SQL 是 SQL 的**子集**（例如没有 `COUNT(*)` 这类聚合函数），
 1. 读 `Media` 表：`Cabinet` 以 `#` 开头表示 `_Streams` 里的内嵌 CAB；否则是外部 CAB（按 MSI 同目录查找）；为空则是未压缩 layout。
 2. 按 `Media.LastSequence` 升序划分 `File.Sequence` 区间，确定每个文件属于哪个 CAB。
 3. 由 `Directory` / `Component.Directory_` / `File.FileName` 还原相对目录树；`TARGETDIR` 映射到输出根。`DefaultDir` 采用 MSI 的 **`target:source`** 双路径语法：冒号左边是安装目录、右边是未压缩源镜像里的目录，每侧还可写成 `short|long`，`.` 表示与父目录相同。
-4. CAB 暂存到短临时目录（规避 FDI 的 256 字节路径限制），再用 `cabinet.dll` 的 **FDI**（`FDICreate` / `FDICopy`）。`fdintCOPY_FILE` 回调按 CAB 内文件名查表，直接用 `CreateFileW` 打开最终路径；未匹配的条目落到 `_unmapped\`，不会丢文件。
+4. 所有 CAB 先暂存到短临时目录（规避 FDI 的 256 字节路径限制），用 `FDIIsCabinet` 读头信息把连成一套的分卷 CAB 分组；每组跑一次 `FDICopy`（`cabinet.dll` 的 FDI）。`fdintCOPY_FILE` 回调按 CAB 内文件名查表，直接用 `CreateFileW` 打开最终路径；未匹配的条目落到 `_unmapped\`，不会丢文件。`fdintNEXT_CABINET` 回调把分卷集的下一个 CAB 交回 FDI，跨 CAB 的文件保持**同一个打开的目标句柄**，因此不会被截断或重复写入。
 5. 未被 CAB 覆盖的文件（未压缩 layout / 外置文件）从 MSI 同目录的源树复制，仍找不到才给出警告。
+6. `--transform` 用 `MsiDatabaseApplyTransformW` 在只读句柄上叠加临时视图；`.msp` 走单独分支：分类 `_Streams` 里的 CAB / transform / 原始流，FDI 解出 `payload\`，可选 `--base-msi` 把补丁 transform 应用到目标 MSI 后按真实目录名布局。
 
 **打包侧**
 
@@ -404,6 +447,12 @@ build\msitool_x64.exe pack C:\payload C:\out\full.msi --config examples\pack.ini
 build\msitool_x64.exe tables C:\out\full.msi
 build\msitool_x64.exe pack C:\payload C:\out\signed.msi --sign-cert C:\cert.pfx --force
 build\msitool_x64.exe list C:\out\signed.msi streams
+
+:: 5) 解包进阶（transform 视图 / .msp / 分卷集）
+build\msitool_x64.exe list setup.msi properties --transform custom.mst
+build\msitool_x64.exe extract setup.msi C:\out\files --transform custom.mst
+build\msitool_x64.exe extract update.msp C:\out\patch
+build\msitool_x64.exe extract update.msp C:\out\patch --base-msi setup.msi
 ```
 
 还可以让 Windows Installer 自己验证生成的包（administrative install 不写注册表）：
@@ -434,6 +483,9 @@ msiexec /a C:\out\app.msi /qn TARGETDIR=C:\out\admin
 | `pack --sign-cert`（自签名 PFX） | 已签名 MSI | `\x05DigitalSignature` + `\x05MsiDigitalSignatureEx` 流写入，`MsiVerifyPackage` 仍 OK |
 | `pack`（2.3 GiB 稀疏文件） | 未压缩伴随 layout | `FileSize=0`、`Attributes=8192`、一条空 `Cabinet` 的 `Media` 行；`extract` 从伴随目录完整还原 2,300,000,000 字节 |
 | 纯空目录（0 文件 / 3 目录） | 仅 `CreateFolder` 表 | `MsiVerifyPackage` OK；`msiexec /i` 会真正创建空目录树 |
+| `makecab` 分卷集（400 KB 文件跨 `span1/2/3.cab`） | 3 条相同 `LastSequence` 的 `Media` 行 | `fdintNEXT_CABINET` 串起 3 个 CAB，`extract` 还原出 400,000 字节，sha256 与源文件完全一致 |
+| Autodesk `acadps.mst` + 自生成 MSI | `--transform` 临时视图 | `Property` 表由 8 行变 14 行（新增 6 个 `ODIS_*` 属性），`extract` / `verify` 均正常 |
+| KB2565063 `.msp`（VS2010 QFE） | `QFE.cab` + `MsiPatchMetadata` | 解出 18 个补丁负载文件 + `manifest.txt` + 原始流；`--base-msi` 另解出目标 MSI 布局 |
 | 文本 / EXE / 伪造 CFB 头 / 目录 / 不存在路径 | 非 MSI | 预检拒绝，`verify` 输出 INVALID + 完整原因，退出码 1 |
 
 ---
@@ -451,7 +503,7 @@ msiexec /a C:\out\app.msi /qn TARGETDIR=C:\out\admin
 
 - [x] ~~`pack`：多 CAB 分卷、> 2 GiB 文件、`CreateFolders` 保留空目录~~
 - [x] ~~`pack`：快捷方式、注册表、服务、环境变量、UI、数字签名、多个 Feature~~
-- [ ] `extract`：跨 CAB 连续文件（FDI `fdintNEXT_CABINET`）、应用 transform 后的视图、`.msp` 解包
+- [x] ~~`extract`：跨 CAB 连续文件（FDI `fdintNEXT_CABINET`）、应用 transform 后的视图、`.msp` 解包~~
 - [ ] 工程：自动化单元测试 + GitHub Actions CI（MSVC x64/x86）
 
 欢迎在 issue 中讨论或认领（见 [CONTRIBUTING.md](CONTRIBUTING.md)）。
@@ -462,13 +514,13 @@ msiexec /a C:\out\app.msi /qn TARGETDIR=C:\out\admin
 
 **解包 / 查看**
 
-- **不执行安装**：不解析条件、不执行 CustomAction、不写注册表、不应用 transform；得到的只是 `File` 表描述的静态布局。
-- 不支持**跨多个 CAB 连续存放**的单个文件；主流打包工具（WiX / InstallShield / VS Setup）不生成这种布局。
+- **不执行安装**：不解析条件、不执行 CustomAction、不写注册表；`--transform` 只叠加只读的临时视图，不落盘、不修改原包。
+- 跨 CAB 连续文件依赖完整的**分卷集**：某个 CAB 缺失时 `extract` 会给出 `CAB set requested cabinet ... which is not staged` / `FDICopy ... aborted` 警告并跳过该分卷集；从分卷集中间的 CAB 开始解包则报 `partial file`，被截断的文件无法还原。
 - 外部 CAB 必须在 MSI 同目录（或 `Media.Cabinet` 指定的相对路径）；内嵌 CAB 无此要求。
 - `extract` 需要一块与 CAB 总大小相当的临时磁盘空间，结束后自动清理（`--keep-temp` 可保留）。
 - 目录还原是**相对布局**：`TARGETDIR` 作为输出根，标准目录属性展开为同名目录，不映射到真实的 `C:\Program Files`。
 - 未压缩 administrative image 的源目录结构（source 侧）常与安装布局不同，需保留源结构时用 `--source-layout`。
-- 不校验数字签名，不处理加密/受口令保护的包；`.msp` 只能查看，不适合 `extract`。
+- 不校验数字签名，不处理加密/受口令保护的包。`.msp` 可以导出补丁 CAB 负载 / transform / 原始流；QFE 型补丁没有 transform 流时，只能用 CAB 内部名（`F_CENTRAL_*` 之类）命名 `payload\` 里的文件，需要真实目录名时必须提供 `--base-msi`（且补丁需带 transform）。
 - MSI SQL 是子集：`query` 只支持受限的 `SELECT` 语法，聚合函数等常见 SQL 特性不可用。
 
 **打包**
@@ -499,6 +551,10 @@ msiexec /a C:\out\app.msi /qn TARGETDIR=C:\out\admin
 | `--sign-cert` 报 `Cannot find signtool.exe` | 安装 Windows SDK，或用 `--sign-tool <signtool.exe 完整路径>` 指定 |
 | 安装后看不到源里的空目录 | 检查是否用了 `--no-empty-dirs`；正常包会写 `CreateFolder` 表并由 `CreateFolders` 动作创建 |
 | `--config` 报 `Unknown section` | 段名只能是 `pack` / `feature:*` / `shortcut:*` / `registry:*` / `service:*` / `environment:*` |
+| `extract` 报 `FDICopy ... wrong cabinet in set` | 分卷集里某个 CAB 缺失或顺序不对；确认 MSI 同目录外部 CAB 齐全，或用 `cabs` 导出后检查 CAB 头的 `setID` / `iCabinet` 是否连续 |
+| `extract` 报 `partial file` | 从分卷集中间的 CAB 开始解包；必须提供完整 CAB 集（从 `hasprev=0` 的第一个 CAB 开始） |
+| `--transform` 报 `MsiDatabaseApplyTransformW` 失败 | 检查 MST 路径、是否属于该产品的 transform，以及 transform 与目标 MSI 的 ProductCode / 语言是否匹配 |
+| `extract *.msp` 的 `payload\` 文件名是 `F_CENTRAL_*` | QFE 补丁 CAB 里只有 File 表键；加 `--base-msi` 且补丁带 transform 时才能还原真实目录名 |
 
 ---
 
