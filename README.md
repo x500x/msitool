@@ -25,7 +25,7 @@
 - [构建详解](#构建详解)
 - [测试与验证](#测试与验证)
 - [实测过的样本](#实测过的样本)
-- [路线图](#路线图)
+- [TODO](#todo)
 - [已知限制](#已知限制)
 - [故障排除 FAQ](#故障排除-faq)
 - [安全](#安全)
@@ -91,7 +91,7 @@ build\msitool_x64.exe extract setup.msi C:\out\files --verbose
 
 ## 安装
 
-本项目目前**不发布预编译二进制**（见 [路线图](#路线图)）。从源码构建后，把 `build\msitool_x64.exe` 复制到任意目录并加入 `PATH` 即可：
+本项目目前**不发布预编译二进制**（见 [TODO](#todo)）。从源码构建后，把 `build\msitool_x64.exe` 复制到任意目录并加入 `PATH` 即可：
 
 ```bat
 setx PATH "%PATH%;E:\work\winmsi\build"
@@ -334,7 +334,7 @@ cmake --build build-cmake
 
 ## 测试与验证
 
-项目目前没有自动化单元测试框架（见 [路线图](#路线图)），验证以**真实 MSI 样本 + 往返哈希**为准。提交 PR 前建议至少跑一遍：
+项目目前没有自动化单元测试框架（见 [TODO](#todo)），验证以**真实 MSI 样本 + 往返哈希**为准。提交 PR 前建议至少跑一遍：
 
 ```bat
 :: 1) 查看侧
@@ -377,15 +377,28 @@ msiexec /a C:\out\app.msi /qn TARGETDIR=C:\out\admin
 
 ---
 
-## 路线图
+## TODO
 
-欢迎在 issue 中讨论或认领（见 [CONTRIBUTING.md](CONTRIBUTING.md)）：
+约定：`- [x]` 是已完成项（同时用删除线划掉），`- [ ]` 是待办。搞定一项就把 `[ ]` 改成 `[x]`、给文字加上 `~~`，并同步更新 [CHANGELOG.md](CHANGELOG.md)。
+
+**已完成**
+
+- [x] ~~包预检与 `verify`：OLE 签名、`_Tables` 结构、`MsiVerifyPackageW`~~
+- [x] ~~查看命令：`info` / `tables` / `schema` / `query` / `list` / `cabs` / `export`~~
+- [x] ~~解包：内嵌 CAB、外部 CAB、未压缩 layout、`target:source` 目录语法~~
+- [x] ~~打包：FCI + Msi 建库，产出通过 `MsiVerifyPackageW` 的自包含 MSI~~
+- [x] ~~MSVC x64/x86 构建脚本与 CMake 构建~~
+- [x] ~~开源项目文档：README / LICENSE / CONTRIBUTING / CHANGELOG / SECURITY / 行为准则 / issue 与 PR 模板~~
+
+**待办**
 
 - [ ] `pack`：多 CAB 分卷、> 2 GiB 文件、`CreateFolders` 保留空目录
 - [ ] `pack`：快捷方式、注册表、服务、环境变量、UI、数字签名、多个 Feature
 - [ ] `extract`：跨 CAB 连续文件（FDI `fdintNEXT_CABINET`）、应用 transform 后的视图、`.msp` 解包
 - [ ] 通用：`--json` 输出、PowerShell 补全、预编译 Release 二进制
 - [ ] 工程：自动化单元测试 + GitHub Actions CI（MSVC x64/x86）
+
+欢迎在 issue 中讨论或认领（见 [CONTRIBUTING.md](CONTRIBUTING.md)）。
 
 ---
 

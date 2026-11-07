@@ -31,6 +31,7 @@
 
 - 输出统一 UTF-8，表格支持 `--tsv`；警告与详细日志输出到 stderr。
 - 生成的 MSI 同时包含 `InstallExecuteSequence` 与 `AdminExecuteSequence`，使 `msiexec /i` 与 `msiexec /a` 都能处理。
+- README 的「路线图」改为带勾选进度的 TODO 清单，已完成项划掉。
 
 ---
 
