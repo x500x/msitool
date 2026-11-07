@@ -16,6 +16,7 @@ add_executable(msitool
     src/msidb.cpp
     src/cab.cpp
     src/extract.cpp
+    src/pack.cpp
 )
 
 target_include_directories(msitool PRIVATE src)
@@ -26,8 +27,9 @@ target_compile_options(msitool PRIVATE /utf-8 /W4 /EHsc /permissive-)
 
 target_link_libraries(msitool PRIVATE
     msi        # Msi.Lib      : MsiOpenDatabaseW / MsiDatabaseOpenViewW / ...
-    cabinet    # Cabinet.Lib  : FDICreate / FDICopy / FDIDestroy
+    cabinet    # Cabinet.Lib  : FDI (FDICopy) + FCI (FCIAddFile)
     shell32    # CommandLineToArgvW
+    ole32      # CoCreateGuid / StringFromGUID2
 )
 
 # Build with:  cmake -S . -B build -G "Visual Studio 17 2022" -A x64

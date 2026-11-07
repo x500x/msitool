@@ -87,8 +87,8 @@ echo Building msitool ^(%ARCH%^) ...
 cl /nologo /std:c++17 /EHsc /W4 /O2 /utf-8 ^
    /DUNICODE /D_UNICODE /D_CRT_SECURE_NO_WARNINGS ^
    /Isrc /Fobuild\obj\%ARCH%\ /Febuild\msitool_%ARCH%.exe ^
-   src\util.cpp src\msidb.cpp src\cab.cpp src\extract.cpp src\main.cpp ^
-   Msi.Lib Cabinet.Lib Shell32.Lib ^
+   src\util.cpp src\msidb.cpp src\cab.cpp src\extract.cpp src\pack.cpp src\main.cpp ^
+   Msi.Lib Cabinet.Lib Shell32.Lib Ole32.Lib ^
    /link /MACHINE:%MACHINE% /SUBSYSTEM:CONSOLE
 if errorlevel 1 (
     echo [!] Build FAILED.

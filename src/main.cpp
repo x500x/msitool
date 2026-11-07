@@ -1,7 +1,9 @@
 #include "util.h"
 #include "msidb.h"
 #include "extract.h"
+#include "pack.h"
 
+#include <stdlib.h>
 #include <cstdlib>
 #include <cwctype>
 #include <utility>
@@ -17,6 +19,14 @@ struct Cli {
     bool                      skipExisting = false;
     bool                      keepTemp = false;
     bool                      sourceLayout = false;
+    bool                      force = false;
+    std::wstring              productName;
+    std::wstring              version = L"1.0.0";
+    std::wstring              manufacturer = L"msitool";
+    std::wstring              productCode;
+    std::wstring              upgradeCode;
+    std::wstring              platform = L"Intel";
+    int                       language = 1033;
     std::wstring              command;
     std::vector<std::wstring> args;   // positional arguments after the command
 };
@@ -45,6 +55,8 @@ Commands:
                            Binary entries and summary.txt
   extract <outdir>         Unpack: rebuild the directory tree and decompress
                            every file from the package cabinets
+  pack <srcdir> <out.msi>  Pack a directory into a self-contained MSI with
+                           one embedded MSZIP cabinet
 
 Options:
   --tsv                    Emit tables as tab-separated values
@@ -55,6 +67,14 @@ Options:
   --source-layout          extract: use the source-image directory tree
                            instead of the installed (target) tree
   --keep-temp              extract: keep staged temporary cabinets
+  --name <text>            pack: ProductName (default: directory name)
+  --version <x.y.z>        pack: ProductVersion (default 1.0.0)
+  --manufacturer <text>    pack: Manufacturer (default: msitool)
+  --product-code <GUID>    pack: fixed ProductCode (default: random GUID)
+  --upgrade-code <GUID>    pack: fixed UpgradeCode (default: random GUID)
+  --platform <x64|Intel>   pack: platform (default: Intel)
+  --language <LCID>        pack: ProductLanguage (default: 1033)
+  --force                  pack: overwrite an existing output MSI
   -h, --help               Show this help
 
 Examples:
@@ -66,6 +86,7 @@ Examples:
   msitool cabs setup.msi C:\out\cabs
   msitool export setup.msi C:\out\archive
   msitool extract setup.msi C:\out\files --verbose
+  msitool pack C:\payload C:\out\app.msi --name "My App" --version 1.2.3
 
 Notes:
   * Every command preflights the package first (OLE compound-file signature,
@@ -96,6 +117,21 @@ Cli parseCommandLine(int argc, wchar_t** argv) {
         if (a == L"--skip-existing") { cli.skipExisting = true; continue; }
         if (a == L"--source-layout") { cli.sourceLayout = true; continue; }
         if (a == L"--keep-temp") { cli.keepTemp = true; continue; }
+        if (a == L"--force") { cli.force = true; continue; }
+        if (a == L"--name" || a == L"--version" || a == L"--manufacturer" ||
+            a == L"--product-code" || a == L"--upgrade-code" ||
+            a == L"--platform" || a == L"--language") {
+            if (i + 1 >= argc) util::fail(L"Option " + a + L" requires a value");
+            std::wstring v = argv[++i] ? argv[i] : L"";
+            if (a == L"--name") cli.productName = v;
+            else if (a == L"--version") cli.version = v;
+            else if (a == L"--manufacturer") cli.manufacturer = v;
+            else if (a == L"--product-code") cli.productCode = v;
+            else if (a == L"--upgrade-code") cli.upgradeCode = v;
+            else if (a == L"--platform") cli.platform = v;
+            else cli.language = _wtoi(v.c_str());
+            continue;
+        }
         if (util::startsWith(a, L"-"))
             util::fail(L"Unknown option (quote SQL that starts with '-'): " + a);
         pos.push_back(a);
@@ -350,6 +386,12 @@ bool cmdVerify(const Cli& cli) {
         try {
             msi::Db db(p.path);
             add(L"MsiOpenDatabase", L"OK");
+            if (!p.isPatch) {
+                UINT vr = MsiVerifyPackageW(p.path.c_str());
+                add(L"MsiVerifyPackage",
+                    vr == ERROR_SUCCESS ? L"OK (installable package)"
+                                        : L"reported " + util::msiError(vr));
+            }
             add(L"_Tables", L"OK - " + std::to_wstring(db.tableNames().size()) + L" table(s)");
             add(L"_Streams", std::to_wstring(db.streamNames().size()) + L" stream(s)");
 
@@ -382,6 +424,23 @@ bool cmdVerify(const Cli& cli) {
     return ok;
 }
 
+void cmdPack(const Cli& cli) {
+    pack::Options opt;
+    opt.inputDir = requireArg(cli, 0, L"input directory");
+    opt.outputMsi = requireArg(cli, 1, L"output .msi path");
+    opt.productName = cli.productName;
+    opt.version = cli.version;
+    opt.manufacturer = cli.manufacturer;
+    opt.productCode = cli.productCode;
+    opt.upgradeCode = cli.upgradeCode;
+    opt.platform = cli.platform;
+    opt.language = cli.language;
+    opt.force = cli.force;
+    opt.dryRun = cli.dryRun;
+    opt.verbose = cli.verbose;
+    pack::pack(opt);
+}
+
 int run(int argc, wchar_t** argv) {
     Cli cli = parseCommandLine(argc, argv);
     if (cli.help || cli.command.empty()) {
@@ -390,8 +449,9 @@ int run(int argc, wchar_t** argv) {
     }
 
     std::wstring cmd = util::toLower(cli.command);
-    // verify must run before Db (which validates and throws on bad input).
+    // verify and pack must run before Db (which validates an input MSI).
     if (cmd == L"verify") return cmdVerify(cli) ? 0 : 1;
+    if (cmd == L"pack") { cmdPack(cli); return 0; }
 
     std::wstring package = requireArg(cli, 0, L"package path (.msi)");
     msi::Db db(package);  // preflight + MsiOpenDatabase + _Tables check

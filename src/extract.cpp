@@ -525,7 +525,10 @@ Stats extractPackage(msi::Db& db, const Options& opt) {
     return st;
 }
 
-void exportCabs(msi::Db& db, const std::wstring& outDir, bool verbose) {
+void exportCabs(msi::Db& db, const std::wstring& outDirRaw, bool verbose) {
+    // MsiDatabaseExportW rejects '/' separated paths (ERROR_INVALID_NAME),
+    // so normalise to a canonical Win32 path first.
+    const std::wstring outDir = util::path::full(outDirRaw);
     if (!util::path::makeDirs(outDir))
         util::fail(L"Cannot create output directory: " + outDir);
     std::vector<MediaInfo> media = readMedia(db);
@@ -576,7 +579,8 @@ void exportCabs(msi::Db& db, const std::wstring& outDir, bool verbose) {
                             static_cast<unsigned long long>(media.size()), outDir.c_str()));
 }
 
-void exportArchive(msi::Db& db, const std::wstring& outDir, bool verbose) {
+void exportArchive(msi::Db& db, const std::wstring& outDirRaw, bool verbose) {
+    const std::wstring outDir = util::path::full(outDirRaw);
     if (!util::path::makeDirs(outDir))
         util::fail(L"Cannot create output directory: " + outDir);
     const std::wstring tablesDir = util::path::join(outDir, L"tables");
