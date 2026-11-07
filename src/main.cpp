@@ -16,6 +16,7 @@ struct Cli {
     bool                      dryRun = false;
     bool                      skipExisting = false;
     bool                      keepTemp = false;
+    bool                      sourceLayout = false;
     std::wstring              command;
     std::vector<std::wstring> args;   // positional arguments after the command
 };
@@ -49,6 +50,8 @@ Options:
   --flat                   extract: flatten all files into outdir
   --dry-run                extract: show the plan, write nothing
   --skip-existing          extract: do not overwrite existing files
+  --source-layout          extract: use the source-image directory tree
+                           instead of the installed (target) tree
   --keep-temp              extract: keep staged temporary cabinets
   -h, --help               Show this help
 
@@ -86,6 +89,7 @@ Cli parseCommandLine(int argc, wchar_t** argv) {
         if (a == L"--flat") { cli.flat = true; continue; }
         if (a == L"--dry-run") { cli.dryRun = true; continue; }
         if (a == L"--skip-existing") { cli.skipExisting = true; continue; }
+        if (a == L"--source-layout") { cli.sourceLayout = true; continue; }
         if (a == L"--keep-temp") { cli.keepTemp = true; continue; }
         if (util::startsWith(a, L"-"))
             util::fail(L"Unknown option (quote SQL that starts with '-'): " + a);
@@ -306,6 +310,7 @@ void cmdExtract(msi::Db& db, const Cli& cli) {
     opt.flat = cli.flat;
     opt.dryRun = cli.dryRun;
     opt.skipExisting = cli.skipExisting;
+    opt.sourceLayout = cli.sourceLayout;
     opt.keepTemp = cli.keepTemp;
     opt.verbose = cli.verbose;
     extract::extractPackage(db, opt);

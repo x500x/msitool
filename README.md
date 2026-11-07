@@ -86,6 +86,7 @@ msitool extract setup.msi C:\out\files --verbose
 | `--flat` | 不还原目录层次，所有文件平铺到输出目录（重名自动加序号） |
 | `--dry-run` | 只列出计划（CAB 内容会被枚举但不写文件） |
 | `--skip-existing` | 跳过已存在的目标文件 |
+| `--source-layout` | 按源镜像（layout）的目录树输出，而不是安装后的目录树 |
 | `--keep-temp` | 保留暂存 CAB 的临时目录，便于排查 |
 | `--tsv` / `-v` | 表格 TSV 输出 / 详细日志（stderr） |
 
@@ -118,7 +119,11 @@ msitool extract setup.msi C:\out\files --verbose
 
 1. 读 `Media` 表：`Cabinet` 以 `#` 开头表示流名（内嵌 CAB，从 `_Streams` 读出）；否则是外部 CAB 文件名，按 MSI 所在目录查找；为空则是未压缩 layout。
 2. 按 `Media.LastSequence` 升序划分 `File.Sequence` 区间，确定每个文件属于哪个 CAB。
-3. 读 `Directory`（`DefaultDir` 的 `short|long` 取长名、`.` 表示与父目录相同、`[Property]` 展开）、`Component.Directory_`、`File.FileName`，还原相对目录树；`TARGETDIR` 映射到输出根目录。
+3. 读 `Directory` / `Component.Directory_` / `File.FileName` 还原相对目录树，`TARGETDIR` 映射到输出根目录。`DefaultDir` 使用 MSI 的 `target:source` 双路径语法：
+   - 冒号左边是**安装目录**（target），右边是**未压缩源镜像里的目录**（source）；没有冒号时两者相同；
+   - 每一侧都可以是 `short|long`（取长名），`.` 表示与父目录相同，`SourceDir` 是根标记，`[Property]` 会展开。
+   - 例如 `.:x64` 表示「安装到父目录，但源文件在 `x64\` 子目录」；`.:LANGS-~1|Langs-x64` 表示「安装到父目录，源文件在 `Langs-x64\`」。
+   - 输出默认用 target 侧；查找未压缩 layout 的源文件用 source 侧；`--source-layout` 可改用 source 侧作为输出布局。
 4. 把 CAB 暂存到一个短的临时目录（规避 FDI 的 256 字节路径限制，同时支持中文路径），再调用 `cabinet.dll` 的 **FDI**（`FDICreate` / `FDICopy`）。在 `fdintCOPY_FILE` 回调里按 CAB 内文件名查表，直接用 `CreateFileW` 打开最终目标路径，FDI 把数据写进去；`fdintCLOSE_FILE_INFO` 关闭句柄并恢复文件时间。CAB 里没匹配上的条目落到 `_unmapped\`，不会丢文件。
 5. CAB 未覆盖的文件（未压缩 layout / 外置文件）尝试从 MSI 同目录的源目录树复制，仍找不到才给出警告。
 
@@ -133,6 +138,7 @@ msitool extract setup.msi C:\out\files --verbose
 - 外部 CAB 必须存在于 MSI 同目录（或 `Media.Cabinet` 指定的相对路径）；内嵌 CAB 无此要求。
 - `extract` 需要一块与 CAB 总大小相当的临时磁盘空间，结束后自动清理（`--keep-temp` 可保留）。
 - 目录还原是**相对布局**：`TARGETDIR` 作为输出根，标准目录属性（如 `[ProgramFilesFolder]`）展开为同名目录，不会映射到真实的 `C:\Program Files`。
+- 未压缩 administrative image 的**源目录结构**（`DefaultDir` 的 source 侧，例如 `x64\`、`Langs-x64\`、`Win7_x86\`）通常与安装后的结构不同；`extract` 默认按安装布局输出，需要保留源镜像结构时用 `--source-layout`。
 - 不校验数字签名，也不处理加密/受口令保护的包。
 
 ---
@@ -146,6 +152,7 @@ msitool extract setup.msi C:\out\files --verbose
 | X64 Debuggers And Tools (Windows SDK) | 18 个内嵌 CAB / 473 文件 | 473 文件、约 84 MiB，0 警告 |
 | Windows Installer 缓存 MSI | 1 个内嵌 CAB / 146 文件 | 146 文件、约 21 MiB |
 | VS Setup TestMsi | 无 Media 表 | 0 文件，正常退出 |
+| NetLimiter 5.3.28 x64 | 未压缩 administrative layout，`target:source` 目录语法 / 178 文件 | 178 文件全部从源目录树还原，0 警告 |
 | KB2565063 `.msp` | 补丁包 | `info` / `tables` / `export` 可读取 `MsiPatchMetadata` 等表 |
 
 ---

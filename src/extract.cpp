@@ -84,6 +84,46 @@ std::wstring expandProps(std::wstring s,
     return s;
 }
 
+// MSI Directory.DefaultDir syntax:
+//     "target[:source]", each side optionally "short|long".
+// The target side is the directory created on the installed machine, the
+// source side is the directory inside an uncompressed ("layout") source
+// image. A dot means "same as the parent"; with no colon both sides are
+// identical. Administrative images (Media.Cabinet empty) rely on this
+// distinction, e.g. ".:x64" installs into APPDIR but reads from .\x64.
+struct DirPaths {
+    std::wstring target;
+    std::wstring source;
+};
+
+std::pair<std::wstring, std::wstring> splitTargetSource(const std::wstring& def) {
+    size_t colon = def.find(L':');
+    if (colon == std::wstring::npos) return {def, def};
+    // A literal "C:\..." is a path, not a target:source pair.
+    if (colon == 1 && def.size() > 2 && (def[2] == L'\\' || def[2] == L'/'))
+        return {def, def};
+    return {def.substr(0, colon), def.substr(colon + 1)};
+}
+
+std::wstring dirLeaf(const std::wstring& raw,
+                     const std::unordered_map<std::wstring, std::wstring>& props) {
+    std::wstring s = raw;
+    size_t bar = s.find(L'|');
+    if (bar != std::wstring::npos) s = s.substr(bar + 1);  // short|long -> long
+    s = util::trim(s);
+    if (s.empty() || s == L"." || s == L".." || util::iequals(s, L"SourceDir"))
+        return L"";
+    return util::path::sanitizeRelative(expandProps(s, props));
+}
+
+DirPaths combineDirs(const DirPaths& parent, const std::wstring& targetLeaf,
+                     const std::wstring& sourceLeaf) {
+    DirPaths r;
+    r.target = util::path::join(parent.target, targetLeaf);
+    r.source = util::path::join(parent.source, sourceLeaf);
+    return r;
+}
+
 std::wstring findStreamName(const std::vector<std::wstring>& streams,
                             const std::wstring& wanted) {
     for (const auto& s : streams)
@@ -131,7 +171,8 @@ struct FileItem {
     std::wstring component;  // File.Component_
     std::wstring name;       // File.FileName ("short|long")
     std::wstring target;     // absolute destination path
-    std::wstring sourceRel;  // relative directory in an uncompressed layout
+    std::wstring targetRel;  // installed directory (Directory.DefaultDir target side)
+    std::wstring sourceRel;  // source-image directory (source side)
     int          sequence = 0;
 };
 
@@ -227,21 +268,20 @@ Stats extractPackage(msi::Db& db, const Options& opt) {
         if (!key.empty()) props[util::toLower(key)] = propTable.get(i, L"Value");
     }
 
-    std::function<std::wstring(const std::wstring&, int)> resolveDir =
-        [&](const std::wstring& key, int depth) -> std::wstring {
+    std::function<DirPaths(const std::wstring&, int)> resolveDir =
+        [&](const std::wstring& key, int depth) -> DirPaths {
         std::wstring k = util::toLower(util::trim(key));
-        if (k.empty() || k == L"targetdir" || depth > 64) return L"";
+        if (k.empty() || k == L"targetdir" || depth > 64) return {};
         auto it = dirs.find(k);
-        if (it == dirs.end()) return L"";
-        std::wstring parentRel;
+        if (it == dirs.end()) return {};
+        DirPaths parent;
         if (!it->second.parent.empty() &&
             !util::iequals(it->second.parent, key) &&
             !util::iequals(it->second.parent, L"TARGETDIR"))
-            parentRel = resolveDir(it->second.parent, depth + 1);
-        std::wstring leaf = expandProps(util::path::longName(it->second.def), props);
-        leaf = util::path::sanitizeRelative(leaf);
-        if (leaf.empty()) return parentRel;
-        return parentRel.empty() ? leaf : parentRel + L"\\" + leaf;
+            parent = resolveDir(it->second.parent, depth + 1);
+        auto sides = splitTargetSource(it->second.def);
+        return combineDirs(parent, dirLeaf(sides.first, props),
+                           dirLeaf(sides.second, props));
     };
 
     std::unordered_map<std::wstring, int> targetCount;
@@ -266,13 +306,18 @@ Stats extractPackage(msi::Db& db, const Options& opt) {
         f.sequence = _wtoi(fileTable.get(i, L"Sequence").c_str());
 
         auto cd = compDirs.find(util::toLower(f.component));
-        std::wstring relDir = cd == compDirs.end() ? L"" : resolveDir(cd->second, 0);
+        DirPaths dp = cd == compDirs.end() ? DirPaths{} : resolveDir(cd->second, 0);
         std::wstring leaf = util::path::longName(f.name);
         if (leaf.empty()) leaf = f.key;
         leaf = util::path::sanitizeComponent(leaf);
-        std::wstring base = opt.flat ? outDir : util::path::join(outDir, relDir);
+        std::wstring outRel = opt.sourceLayout ? dp.source : dp.target;
+        std::wstring base = opt.flat ? outDir : util::path::join(outDir, outRel);
         f.target = uniqueTarget(util::path::join(base, leaf));
-        f.sourceRel = relDir;
+        f.targetRel = outRel;
+        f.sourceRel = dp.source;
+        util::verboseLine(opt.verbose && dp.target != dp.source,
+                          f.key + L": installed dir='" + dp.target +
+                              L"', layout dir='" + dp.source + L"'");
         files.push_back(std::move(f));
     }
     st.fileRows = files.size();
@@ -412,16 +457,29 @@ Stats extractPackage(msi::Db& db, const Options& opt) {
     // tree next to the MSI, which is how administrative images are shipped.
     for (size_t k = 0; k < files.size(); ++k) {
         if (writtenFiles.count(k)) continue;
-        std::vector<std::wstring> candidates;
+        // The source image may store either the long name, the 8.3 short name
+        // or the File table key. Try each of them in the layout source dir
+        // first, then the installed dir (in case target/source were identical
+        // but expressed differently), then the bare MSI folder.
         std::wstring leaf = util::path::longName(files[k].name);
         size_t bar = files[k].name.find(L'|');
         std::wstring shortName = bar == std::wstring::npos ? L"" : files[k].name.substr(0, bar);
-        if (!files[k].sourceRel.empty() && !leaf.empty())
-            candidates.push_back(util::path::join(msiDir,
-                                  util::path::join(files[k].sourceRel, leaf)));
-        if (!leaf.empty()) candidates.push_back(util::path::join(msiDir, leaf));
-        if (!shortName.empty()) candidates.push_back(util::path::join(msiDir, shortName));
-        candidates.push_back(util::path::join(msiDir, files[k].key));
+        std::vector<std::wstring> names;
+        for (const std::wstring& n : {leaf, shortName, files[k].key})
+            if (!n.empty()) names.push_back(n);
+
+        std::vector<std::wstring> candidates;
+        for (const auto& n : names)
+            if (!files[k].sourceRel.empty())
+                candidates.push_back(
+                    util::path::join(msiDir, util::path::join(files[k].sourceRel, n)));
+        if (files[k].targetRel != files[k].sourceRel)
+            for (const auto& n : names)
+                if (!files[k].targetRel.empty())
+                    candidates.push_back(
+                        util::path::join(msiDir, util::path::join(files[k].targetRel, n)));
+        for (const auto& n : names)
+            candidates.push_back(util::path::join(msiDir, n));
 
         bool done = false;
         for (const auto& c : candidates) {

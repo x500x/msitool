@@ -11,6 +11,7 @@ struct Options {
     bool dryRun = false;
     bool skipExisting = false;
     bool keepTemp = false;
+    bool sourceLayout = false;  // output the source-image tree instead of the installed tree
     bool verbose = false;
 };
 
