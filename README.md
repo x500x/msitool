@@ -4,6 +4,7 @@
 
 | 命令 | 作用 |
 | --- | --- |
+| `verify` | 验证文件是否是真正的 MSI/MSP 包（签名、打开、`_Tables`、摘要、CAB） |
 | `info` | 摘要信息（SummaryInformation）、关键属性、Media/CAB 清单 |
 | `tables` | 列出所有表、是否持久表、行数 |
 | `schema <表>` | 列定义、MSI 类型、主键 |
@@ -68,6 +69,7 @@ cmake --build build-cmake
 
 ```bat
 msitool --help
+msitool verify setup.msi
 msitool info setup.msi
 msitool tables setup.msi
 msitool schema setup.msi File
@@ -105,10 +107,31 @@ msitool extract setup.msi C:\out\files --verbose
 
 ---
 
+## 包验证
+
+**所有命令**在打开数据库之前都会自动预检；传错文件（普通文本、EXE/ZIP、`.mst` transform、目录、不存在路径）会立即被拒绝，不会进入任何表查询或解包逻辑，并给出明确原因、退出码 1。`verify` 把每一步结果打印成完整报告并返回退出码（VALID=0 / INVALID=1）：
+
+```bat
+msitool verify setup.msi
+```
+
+| 检查项 | 判定 |
+| --- | --- |
+| 存在 / 非目录 / 大小 ≥ 512 字节 | 否则直接失败 |
+| OLE 复合文件头 `D0 CF 11 E0 A1 B1 1A E1` | MSI/MSP 都是 CFB 存储；不符即拒绝（会显示实际前 8 字节） |
+| `MsiOpenDatabaseW`（`.msp` 用 patch 模式） | 打不开则不是有效 Installer 数据库 |
+| `_Tables` 虚拟表可查询 | 排除「有 CFB 头但不是 MSI 存储」的文件 |
+| `SummaryInformation` / `_Streams` / `Media` | 附加诊断信息，打印种类、表数、流数、CAB 数 |
+
+报告中的 `Package kind` 会标明是 `.msi` 还是 `.msp`；`.msp` 可以查看但只适合用 `info`/`tables`/`query`/`export`/`cabs`，`extract` 面向 `.msi`。
+
+---
+
 ## 实现原理
 
 **查看侧（全部走 Msi API，只读打开）**
 
+- **预检**：`probe()` 读文件属性与前 8 字节校验 CFB 签名；`Db` 构造函数在 `MsiOpenDatabaseW` 之后再次确认 `_Tables` 虚拟表可查询。`verify` 复用这层检查生成报告。
 - `MsiOpenDatabaseW(path, MSIDBOPEN_READONLY, &h)`；对 `.msp` 使用 `MSIDBOPEN_PATCHFILE` 伪指针（msi.dll 实际要求值 32，SDK 宏在 Unicode 下算出 16，代码两种都试）。
 - `MsiDatabaseOpenViewW` + `MsiViewExecute` + `MsiViewFetch` 逐行取数据，`MsiViewGetColumnInfo(MSICOLINFO_NAMES/TYPES)` 拿列名与类型，`MsiRecordGetStringW` / `MsiRecordGetInteger` / `MsiRecordDataSize` 渲染单元格。
 - `MsiGetSummaryInformationW` + `MsiSummaryInfoGetPropertyW` 读取 PID_TITLE / PID_TEMPLATE / PID_REVNUMBER(PackageCode) 等。
@@ -153,7 +176,8 @@ msitool extract setup.msi C:\out\files --verbose
 | Windows Installer 缓存 MSI | 1 个内嵌 CAB / 146 文件 | 146 文件、约 21 MiB |
 | VS Setup TestMsi | 无 Media 表 | 0 文件，正常退出 |
 | NetLimiter 5.3.28 x64 | 未压缩 administrative layout，`target:source` 目录语法 / 178 文件 | 178 文件全部从源目录树还原，0 警告 |
-| KB2565063 `.msp` | 补丁包 | `info` / `tables` / `export` 可读取 `MsiPatchMetadata` 等表 |
+| KB2565063 `.msp` | 补丁包 | `verify` 判定 VALID（patch 模式），`info` / `tables` / `export` 可读取 `MsiPatchMetadata` 等表 |
+| 文本 / EXE / 伪造 CFB 头 / 目录 / 不存在路径 | 非 MSI | 预检拒绝；`verify` 输出 INVALID + 完整原因，退出码 1，其它命令同样报错退出 |
 
 ---
 
@@ -161,7 +185,7 @@ msitool extract setup.msi C:\out\files --verbose
 
 ```
 src/util.h / util.cpp        Unicode/UTF-8 输出、表格打印、路径与错误处理
-src/msidb.h / msidb.cpp      Msi API 的 RAII 封装：查询、列信息、流、摘要、导出
+src/msidb.h / msidb.cpp      Msi API 的 RAII 封装：包预检、查询、列信息、流、摘要、导出
 src/cab.h / cab.cpp          FDI (cabinet.dll) 解压，回调式直接落盘
 src/extract.h / extract.cpp  表解析、目录树、Media/Sequence 映射、CAB 导出与解包
 src/main.cpp                 命令行解析与 info/tables/schema/query/list 命令

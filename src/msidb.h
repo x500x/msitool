@@ -51,6 +51,19 @@ struct SummaryItem {
     std::wstring value;
 };
 
+// Lightweight preflight check performed before MsiOpenDatabaseW: verifies
+// that the input really is an OLE compound file (MSI/MSP storage).
+struct FileProbe {
+    std::wstring       path;
+    unsigned long long size = 0;
+    std::wstring       signatureHex;   // first 8 bytes, uppercase hex
+    bool               signatureOk = false;
+    bool               isPatch = false;
+    std::wstring       error;          // empty => preflight passed
+};
+
+FileProbe probe(const std::wstring& path);
+
 class Db {
 public:
     Db() = default;

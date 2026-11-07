@@ -1,6 +1,7 @@
 #include "msidb.h"
 
 #include <algorithm>
+#include <cstring>
 #include <cwctype>
 
 namespace msi {
@@ -103,24 +104,90 @@ std::wstring quoteIdent(const std::wstring& name) {
     return L"`" + util::replaceAll(name, L"`", L"``") + L"`";
 }
 
+FileProbe probe(const std::wstring& path) {
+    FileProbe p;
+    p.path = util::path::full(path);
+    p.isPatch = util::iequals(util::path::ext(p.path), L".msp");
+
+    DWORD attrs = GetFileAttributesW(p.path.c_str());
+    if (attrs == INVALID_FILE_ATTRIBUTES) {
+        p.error = L"File not found: " + p.path;
+        return p;
+    }
+    if (attrs & FILE_ATTRIBUTE_DIRECTORY) {
+        p.error = L"Path is a directory, not a package: " + p.path;
+        p.signatureHex = L"(not a file)";
+        return p;
+    }
+
+    HANDLE h = CreateFileW(p.path.c_str(), GENERIC_READ,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+        p.error = L"Cannot open " + p.path + L": " + util::winError(GetLastError());
+        return p;
+    }
+    LARGE_INTEGER sz{};
+    if (GetFileSizeEx(h, &sz)) p.size = static_cast<unsigned long long>(sz.QuadPart);
+    BYTE header[8] = {};
+    DWORD got = 0;
+    if (!ReadFile(h, header, sizeof(header), &got, nullptr)) got = 0;
+    CloseHandle(h);
+
+    for (DWORD i = 0; i < got; ++i)
+        p.signatureHex += util::fmt(L"%02X ", static_cast<unsigned>(header[i]));
+    p.signatureHex = util::trim(p.signatureHex);
+    if (p.signatureHex.empty()) p.signatureHex = L"(empty)";
+
+    // Windows Installer databases are OLE compound files (CFBF).
+    static const BYTE kOleSignature[8] = {0xD0, 0xCF, 0x11, 0xE0,
+                                          0xA1, 0xB1, 0x1A, 0xE1};
+    p.signatureOk = got == sizeof(kOleSignature) &&
+                    std::memcmp(header, kOleSignature, sizeof(kOleSignature)) == 0;
+    if (p.size < 512) {
+        p.error = L"File is too small to be a Windows Installer package (" +
+                  std::to_wstring(p.size) + L" bytes): " + p.path;
+    } else if (!p.signatureOk) {
+        p.error = L"Not a Windows Installer package: missing the OLE compound-file "
+                  L"signature D0 CF 11 E0 A1 B1 1A E1 (found " + p.signatureHex +
+                  L"). Expected an .msi or .msp file; .mst transforms, EXE/ZIP/text "
+                  L"files are not supported: " + p.path;
+    }
+    return p;
+}
+
 Db::Db(const std::wstring& path) : path_(util::path::full(path)) {
-    if (!util::path::exists(path_)) util::fail(L"File not found: " + path_);
-    // A patch package must be opened with the MSIDBOPEN_PATCHFILE pseudo-
-    // pointer; plain MSIDBOPEN_READONLY fails with ERROR_OPEN_FAILED.
-    // The SDK macro expands to 16 in a Unicode build (32/sizeof(wchar_t)),
-    // but msi.dll actually expects the byte value 32 - try both.
-    if (util::iequals(util::path::ext(path_), L".msp")) {
+    // 1. Preflight: make sure the input really is an MSI/MSP storage at all.
+    FileProbe p = probe(path_);
+    if (!p.error.empty()) util::fail(p.error);
+
+    // 2. Open. A patch package must be opened with the MSIDBOPEN_PATCHFILE
+    //    pseudo-pointer; plain MSIDBOPEN_READONLY fails with ERROR_OPEN_FAILED.
+    //    The SDK macro expands to 16 in a Unicode build (32/sizeof(wchar_t)),
+    //    but msi.dll actually expects the byte value 32 - try both.
+    if (p.isPatch) {
         const ULONG_PTR patchModes[] = {32,
                                         static_cast<ULONG_PTR>(MSIDBOPEN_PATCHFILE)};
         UINT rc = ERROR_OPEN_FAILED;
         for (ULONG_PTR m : patchModes) {
             rc = MsiOpenDatabaseW(path_.c_str(), reinterpret_cast<LPCWSTR>(m), h_.out());
-            if (rc == ERROR_SUCCESS && h_) return;
+            if (rc == ERROR_SUCCESS && h_) break;
         }
-        util::fail(L"Cannot open patch package " + path_ + L": " + util::msiError(rc));
+        if (rc != ERROR_SUCCESS || !h_)
+            util::fail(L"Cannot open patch package " + path_ + L": " + util::msiError(rc));
+    } else {
+        UINT rc = MsiOpenDatabaseW(path_.c_str(), MSIDBOPEN_READONLY, h_.out());
+        if (rc != ERROR_SUCCESS || !h_)
+            util::fail(L"Not a valid Windows Installer database: " + path_ +
+                       L" - " + util::msiError(rc));
     }
-    util::checkMsi(MsiOpenDatabaseW(path_.c_str(), MSIDBOPEN_READONLY, h_.out()),
-                   L"MsiOpenDatabaseW(" + path_ + L")");
+
+    // 3. Structural check: every Installer database exposes _Tables. This
+    //    rejects OLE compound documents that are not Installer storages.
+    Handle view;
+    UINT rc = MsiDatabaseOpenViewW(h_.get(), L"SELECT `Name` FROM `_Tables`", view.out());
+    if (rc != ERROR_SUCCESS || MsiViewExecute(view.get(), 0) != ERROR_SUCCESS)
+        util::fail(L"Not a valid Windows Installer database (no _Tables table): " + path_);
 }
 
 QueryResult Db::query(const std::wstring& sql,

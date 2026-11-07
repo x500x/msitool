@@ -29,6 +29,8 @@ Usage:
   msitool <command> <package.msi> [arguments...] [options...]
 
 Commands:
+  verify                   Check that a file really is an MSI/MSP package
+                           (signature, open, _Tables, summary, CAB media)
   info                     SummaryInformation, key properties, CAB/media list
   tables                   List every table with its row count
   schema <table>           Show columns, MSI types and primary keys
@@ -56,6 +58,7 @@ Options:
   -h, --help               Show this help
 
 Examples:
+  msitool verify setup.msi
   msitool info setup.msi
   msitool tables setup.msi
   msitool query setup.msi "SELECT `File`,`FileName`,`FileSize` FROM `File`"
@@ -65,6 +68,8 @@ Examples:
   msitool extract setup.msi C:\out\files --verbose
 
 Notes:
+  * Every command preflights the package first (OLE compound-file signature,
+    MsiOpenDatabase, _Tables). 'verify' prints the full validation report.
   * Output is UTF-8. Redirect with e.g. `msitool list ... > files.tsv`.
   * Embedded cabinets are read from the _Streams table; external cabinets are
     looked up next to the MSI. Uncompressed ("layout") packages are copied
@@ -316,6 +321,67 @@ void cmdExtract(msi::Db& db, const Cli& cli) {
     extract::extractPackage(db, opt);
 }
 
+// Stands alone (it must be able to report a bad file instead of throwing
+// before any diagnostics are printed). Returns false for an invalid package.
+bool cmdVerify(const Cli& cli) {
+    std::wstring package = requireArg(cli, 0, L"package path");
+    msi::FileProbe p = msi::probe(package);
+
+    util::Table t;
+    t.headers = {L"Check", L"Result"};
+    auto add = [&](const wchar_t* name, std::wstring value) {
+        t.rows.push_back({name, std::move(value)});
+    };
+    add(L"Path", p.path);
+    add(L"Size", p.size ? humanSize(p.size) : L"-");
+    add(L"OLE compound signature",
+        p.signatureOk ? L"OK  (D0 CF 11 E0 A1 B1 1A E1)"
+                      : L"FAIL  (got " + p.signatureHex + L")");
+    add(L"Package kind", p.isPatch ? L".msp patch (patch open mode)"
+                                   : L".msi database (read-only)");
+
+    bool ok = p.error.empty();
+    std::wstring reason = p.error;
+    if (!ok) {
+        add(L"Preflight", L"FAIL - " + p.error);
+        add(L"Result", L"INVALID: not a Windows Installer package");
+    } else {
+        add(L"Preflight", L"OK");
+        try {
+            msi::Db db(p.path);
+            add(L"MsiOpenDatabase", L"OK");
+            add(L"_Tables", L"OK - " + std::to_wstring(db.tableNames().size()) + L" table(s)");
+            add(L"_Streams", std::to_wstring(db.streamNames().size()) + L" stream(s)");
+
+            std::vector<extract::MediaInfo> media = extract::readMedia(db);
+            size_t cabs = 0;
+            for (const auto& m : media)
+                if (!m.cabinet.empty()) ++cabs;
+            add(L"Media / cabinets",
+                std::to_wstring(media.size()) + L" media row(s), " +
+                    std::to_wstring(cabs) + L" cabinet(s)");
+
+            std::wstring title, templ;
+            for (const auto& s : db.summary()) {
+                if (s.name == L"Title") title = s.value;
+                if (util::startsWith(s.name, L"Template")) templ = s.value;
+            }
+            add(L"SummaryInformation", L"OK - Title=\"" + title + L"\", Template=\"" +
+                                           templ + L"\"");
+            add(L"Result", L"VALID Windows Installer package");
+        } catch (const util::Error& e) {
+            reason = e.message();
+            add(L"MsiOpenDatabase / structure", L"FAIL - " + reason);
+            add(L"Result", L"INVALID: cannot open as a Windows Installer database");
+            ok = false;
+        }
+    }
+    util::printTable(t, cli.tsv);
+    // The table truncates long cells; always print the full reason as well.
+    if (!ok && !reason.empty()) util::outLine(L"Reason: " + reason);
+    return ok;
+}
+
 int run(int argc, wchar_t** argv) {
     Cli cli = parseCommandLine(argc, argv);
     if (cli.help || cli.command.empty()) {
@@ -324,8 +390,11 @@ int run(int argc, wchar_t** argv) {
     }
 
     std::wstring cmd = util::toLower(cli.command);
+    // verify must run before Db (which validates and throws on bad input).
+    if (cmd == L"verify") return cmdVerify(cli) ? 0 : 1;
+
     std::wstring package = requireArg(cli, 0, L"package path (.msi)");
-    msi::Db db(package);
+    msi::Db db(package);  // preflight + MsiOpenDatabase + _Tables check
 
     if (cmd == L"info")             cmdInfo(db, cli);
     else if (cmd == L"tables")      cmdTables(db, cli);
