@@ -381,8 +381,6 @@ msiexec /a C:\out\app.msi /qn TARGETDIR=C:\out\admin
 
 约定：`- [x]` 是已完成项（同时用删除线划掉），`- [ ]` 是待办。搞定一项就把 `[ ]` 改成 `[x]`、给文字加上 `~~`，并同步更新 [CHANGELOG.md](CHANGELOG.md)。
 
-**已完成**
-
 - [x] ~~包预检与 `verify`：OLE 签名、`_Tables` 结构、`MsiVerifyPackageW`~~
 - [x] ~~查看命令：`info` / `tables` / `schema` / `query` / `list` / `cabs` / `export`~~
 - [x] ~~解包：内嵌 CAB、外部 CAB、未压缩 layout、`target:source` 目录语法~~
@@ -390,12 +388,9 @@ msiexec /a C:\out\app.msi /qn TARGETDIR=C:\out\admin
 - [x] ~~MSVC x64/x86 构建脚本与 CMake 构建~~
 - [x] ~~开源项目文档：README / LICENSE / CONTRIBUTING / CHANGELOG / SECURITY / 行为准则 / issue 与 PR 模板~~
 
-**待办**
-
 - [ ] `pack`：多 CAB 分卷、> 2 GiB 文件、`CreateFolders` 保留空目录
 - [ ] `pack`：快捷方式、注册表、服务、环境变量、UI、数字签名、多个 Feature
 - [ ] `extract`：跨 CAB 连续文件（FDI `fdintNEXT_CABINET`）、应用 transform 后的视图、`.msp` 解包
-- [ ] 通用：`--json` 输出、PowerShell 补全、预编译 Release 二进制
 - [ ] 工程：自动化单元测试 + GitHub Actions CI（MSVC x64/x86）
 
 欢迎在 issue 中讨论或认领（见 [CONTRIBUTING.md](CONTRIBUTING.md)）。
