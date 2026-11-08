@@ -1087,9 +1087,14 @@ public:
     }
 
     void layoutLogCard(RECT c, int topPad) {
+        // The card header paints a title at S(9)..S(33) and a subtitle at
+        // S(30)..S(48). The log view must start below both, otherwise its
+        // white rounded frame clips the lower half of the small caption.
+        topPad = std::max(topPad, S(54));
         addCard(c, L"运行日志", L"命令输出实时显示 · Ctrl+C 复制", Ic::Terminal);
         log_->setRect(R(c.left + S(12), c.top + topPad,
-                        W(c) - S(24), H(c) - topPad - S(12)));
+                        W(c) - S(24),
+                        std::max(S(24), H(c) - topPad - S(12))));
         btnClearLog_->setRect(R(c.right - S(96), c.top + S(10), S(84), S(30)));
         btnOpenFolder_->setRect(R(c.right - S(212), c.top + S(10), S(108), S(30)));
     }
@@ -1219,7 +1224,7 @@ public:
         // 7) Collapsible log drawer.
         if (logH) {
             RECT lc = R(body.left, body.bottom - logH, W(body), logH);
-            layoutLogCard(lc, S(40));
+            layoutLogCard(lc, S(54));
         }
     }
 
@@ -1229,7 +1234,7 @@ public:
         RECT oc = R(body.left, body.top, optW, H(body));
         RECT lc = R(oc.right + S(16), body.top, W(body) - optW - S(16), H(body));
         addCard(oc, L"导出选项", L"把包内容完整导出到目录", Ic::Export);
-        layoutLogCard(lc, S(48));
+        layoutLogCard(lc, S(54));
         int x = oc.left + S(16), w = W(oc) - S(32);
         int y = oc.top + S(48);
         addLabel(R(x, y, w, S(18)), L"导出模式", t.fSmall, t.subText); y += S(20);
@@ -1349,8 +1354,8 @@ public:
         }
 
         // Log card is shared with the extract / export pages.
-        int logBody = std::max(S(24), H(logCard) - S(56));
-        log_->setRect(R(logCard.left + S(12), logCard.top + S(44),
+        int logBody = std::max(S(24), H(logCard) - S(66));
+        log_->setRect(R(logCard.left + S(12), logCard.top + S(54),
                         W(logCard) - S(24), logBody));
         btnClearLog_->setRect(R(logCard.right - S(96), logCard.top + S(8),
                                 S(84), S(30)));
@@ -1504,7 +1509,7 @@ public:
                            c.title, t.text, t.fSubtitle,
                            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
                     if (!c.subtitle.empty())
-                        g.text(R(tx, c.r.top + S(30), W(c.r) - S(60), S(18)),
+                        g.text(R(tx, c.r.top + S(30), W(c.r) - S(60), S(16)),
                                c.subtitle, t.muted, t.fSmall,
                                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
                 }
