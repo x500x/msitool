@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="utf-8"?>
+<strings>
+  <string id="FontFace">Tahoma</string>
+  <string id="FontSize">8</string>
+  <string id="FontTitleSize">9</string>
+  <string id="FontBiggerSize">12</string>
+
+  <string id="SetupTitle">[ProductName] Setup</string>
+
+  <string id="WelcomeTitle">Welcome to the [ProductName] Setup Wizard</string>
+  <string id="WelcomeDescription">The Setup Wizard will install [ProductName] [ProductVersion] on your computer. Click Next to continue or Cancel to exit.</string>
+
+  <string id="LicenseTitle">End-User License Agreement</string>
+  <string id="LicenseDescription">Please read the following license agreement carefully.</string>
+  <string id="LicenseAccept">I &amp;accept the terms in the License Agreement</string>
+
+  <string id="InstallDirTitle">Destination Folder</string>
+  <string id="InstallDirDescription">Click Next to install to the default folder or click Change to choose another folder.</string>
+  <string id="InstallDirFolderLabel">Install [ProductName] to:</string>
+  <string id="Change">&amp;Change...</string>
+
+  <string id="VerifyTitle">Ready to install [ProductName]</string>
+  <string id="VerifyText">Click Install to begin the installation. Click Back to review or change any installation settings. Click Cancel to exit the wizard.</string>
+  <string id="Install">&amp;Install</string>
+
+  <string id="Back">&amp;Back</string>
+  <string id="Next">&amp;Next</string>
+  <string id="Cancel">Cancel</string>
+  <string id="Finish">&amp;Finish</string>
+
+  <string id="ProgressTitle">Installing [ProductName]</string>
+  <string id="ProgressText">Please wait while the Setup Wizard installs [ProductName]. This may take several minutes.</string>
+  <string id="Status">Status:</string>
+
+  <string id="ExitTitle">Completed the [ProductName] Setup Wizard</string>
+  <string id="ExitText">Click the Finish button to exit the Setup Wizard.</string>
+
+  <string id="UserExitTitle">[ProductName] Setup Wizard was interrupted</string>
+  <string id="UserExitText">Your system has not been modified. To install this program at a later time, please run the installation again.</string>
+
+  <string id="FatalTitle">[ProductName] Setup Wizard ended prematurely</string>
+  <string id="FatalText">Because of an error, [ProductName] setup could not be completed. Your system has not been modified.</string>
+
+  <string id="CancelText">Are you sure you want to cancel [ProductName] installation?</string>
+  <string id="Yes">&amp;Yes</string>
+  <string id="No">&amp;No</string>
+
+  <string id="MaintenanceWelcomeTitle">Welcome to the [ProductName] Maintenance Wizard</string>
+  <string id="MaintenanceWelcomeDescription">The wizard allows you to repair or remove [ProductName]. Click Next to continue or Cancel to exit.</string>
+  <string id="MaintenanceTypeTitle">Repair or Remove [ProductName]</string>
+  <string id="MaintenanceTypeDescription">Select the operation you want to perform.</string>
+  <string id="Repair">Re&amp;pair</string>
+  <string id="RepairText">Repairs errors in the most recent installation by fixing missing files and registry entries.</string>
+  <string id="Remove">&amp;Remove</string>
+  <string id="RemoveText">Removes [ProductName] from your computer.</string>
+
+  <string id="BrowseTitle">Change Destination Folder</string>
+  <string id="BrowseText">Browse to the destination folder.</string>
+  <string id="LookIn">&amp;Look in:</string>
+  <string id="Up">&amp;Up</string>
+  <string id="NewFolder">&amp;New</string>
+  <string id="FolderName">&amp;Folder name:</string>
+  <string id="OK">OK</string>
+</strings>

@@ -8,6 +8,15 @@
 
 ### Added
 
+- **打包 · XML 清单（破坏性）**：`--config` 改为只接受 XML（根 `<msitool>`，命名空间 `https://msitool.dev/schema/pack/v1`），覆盖 `<pack>` / `<features>` / `<shortcuts>` / `<registry>` / `<services>` / `<environment>` / `<sign>` / `<ui>`；删除 INI 解析器，传 `.ini` 会报错并指向 `examples/pack.xml`。新增 `examples/pack.xml` 与 `examples/ui-custom.xml`。
+- **打包 · 内置多页向导**：`--ui wizard` 生成 12 个对话框（欢迎 / 许可 / 目标文件夹 + BrowseDlg / 确认 / 进度 / 完成 / 取消 / 错误 / 维护欢迎 / 维护类型），许可页用 `ScrollableText` + `CheckBox` + `ControlCondition`，目录页用 `PathEdit` + `DirectoryList` / `DirectoryCombo`（`_BrowseProperty` + `Indirect`），维护模式用 `Installed` / `NOT Installed` 条件切换，修复 / 删除走 `Reinstall All` / `Remove All`；中英两套文案与字体（`--ui-locale`，1033 → en，2052 / 1028 → zh-CN）；`--dump-ui <dir>` 导出内置 XML / EULA / banner / background。
+- **打包 · UI 模板**：`--ui-template <msi>` 读取现有包的 `Dialog` / `Control` / `ControlEvent` / `ControlCondition` / `CheckBox` / `RadioButton` / `ComboBox` / `ListBox` / `ListView` / `TextStyle` / `Binary` / `Error` / `Billboard` / `BBControl` 与 `InstallUISequence` / `AdminUISequence`，只保留标准动作；非标准 `DoAction`（如 `WixUIValidatePath` / `WixUIPrintEula`）丢弃并告警。
+- **打包 · 自定义 UI**：XML `<ui base="wizard">` 增量覆盖内置布局（`dialog` 按 id、`control` 按 `(dialog,id)`、`publish` / `controlcondition` 按键合并），支持 `textstyle` / `dialog` / `control` / `publish` / `setproperty` / `controlcondition` / `checkbox` / `binary` / `error` / `billboard` / `uisequence` / `adminuisequence`；生成前校验 `Control_Next` 单环、外键、事件白名单、终止页与序列必需动作。
+- **打包 · 快捷方式增强**：`directory` 支持 `desktop` / `startmenu` / `startup` / `sendto` 别名与 `ProgramMenuFolder\厂商\产品` 多级子目录（自动生成 `Directory` + HKLM keypath 组件 + `RemoveFile`），`icon` 支持 `.ico` / `.exe` / `.dll`，新增 `iconIndex` / `advertise` / `workingDirectory` / `MsiShortcutProperty`；CLI 新增 `--desktop-shortcut` / `--start-menu-shortcut` / `--main-exe`。
+- **GUI · 打包页**：安装界面下拉扩为 `none` / `basic` / `minimal` / `wizard` / `custom`，新增「UI 模板 (.msi)」「UI 语言」字段与第四个「快捷方式」标签页（主程序、桌面 / 开始菜单勾选、逐行 `名称 | 位置 | 目标 | 参数 | 图标 | 图标索引 | 说明` 编辑器）；拖放清单改为 `.xml`，新增 UI 模板投放区。
+- **打包 · 校验元数据**：数据库写入空 `_Validation` 表；`AdminExecuteSequence` 移除不合法的 `CreateFolders`；UI 表覆盖 `CheckBox` / `ControlCondition` / `RadioButton` / `ComboBox` / `ListBox` / `ListView` / `Binary` / `Error` / `Billboard` / `BBControl`。
+- **构建**：`resources/msitool.rc`（RCDATA 嵌入向导 XML / EULA / BMP）与 `rc.exe` 步骤，链接 `Msxml6.Lib` / `OleAut32.Lib`；`tools/make_ui_art.ps1` 生成 banner / background / 示例 EULA。
+
 - **设置 · 自定义快捷键**：新增「快捷键」卡片，点击右侧按键框即可重新录制组合键（如把「打开包文件」改成 `Ctrl+P`），Backspace 清除、Esc 取消，冲突与系统保留组合（`Alt+F4`、`Alt+Tab`、`Ctrl+C` 等）就地提示并拒绝，右上角「恢复默认」一键还原。前四项（打开包文件 / 重新载入 / 打开设置 / 切换明暗主题）可在 `HKCU\Software\msitool\Key*` 中持久化，启动与修改后重建加速键表；录制期间临时绕过加速键，保证正在输入的组合不会被已有快捷键抢走。
 
 - **查看**：`verify`（包预检报告 + `MsiVerifyPackageW`）、`info`、`tables`、`schema`、`query`、`list`、`cabs`、`export`。
@@ -16,17 +25,17 @@
 - **解包 · transform 视图**：`--transform <file.mst>`（可重复）用 `MsiDatabaseApplyTransformW` 在只读句柄上叠加临时视图，`verify` / `info` / `tables` / `schema` / `query` / `list` / `extract` 都读 transform 后的表。
 - **解包 · .msp**：`extract <file.msp>` 分类 `_Streams`（CAB / transform / 原始流），FDI 解出 `payload\`、导出 `transforms\*.mst` 与 `streams\`、写 `manifest.txt`；`--base-msi <file.msi>` 把补丁 transform 应用到目标 MSI 临时视图并在 `layout\` 下按真实目录名还原。
 - **打包**：`pack`，用 FCI 生成 MSZIP CAB 并用 Msi API 建库，产出自包含 MSI；支持 `--name` / `--version` / `--manufacturer` / `--product-code` / `--upgrade-code` / `--platform` / `--language` / `--force` / `--dry-run`。
-- **打包 · 安装位置**：`--install-dir <path>`（清单 `[pack] install-dir`、GUI「基本」页「安装目录」）把源目录映射到指定位置：`App` / `Tools\App` 相对 Program Files，`LocalAppDataFolder\App`、`CommonAppDataFolder\Vendor\App` 等标准目录前缀按其关键目录键展开，中间层自动生成 `Directory` 行；绝对路径（`D:\Apps\App`、`\\server\share\App`）不能写进 `Directory.DefaultDir`（`:` 是 target:source 分隔符，实测 `/a` 报 2714、`/i` 会建出名叫 `D` 的文件夹），改按 MSI 文档用一条 `Property` 行把 `INSTALLFOLDER` 属性设成完整路径完成钉位，实测装到该目录；`INSTALLFOLDER` 仍是安装根，命令行 `INSTALLFOLDER=` 可覆盖，`/a` 与 `extract` 仍还原相对树。
+- **打包 · 安装位置**：`--install-dir <path>`（清单 `<pack installDir>`、GUI「基本」页「安装目录」）把源目录映射到指定位置：`App` / `Tools\App` 相对 Program Files，`LocalAppDataFolder\App`、`CommonAppDataFolder\Vendor\App` 等标准目录前缀按其关键目录键展开，中间层自动生成 `Directory` 行；绝对路径（`D:\Apps\App`、`\\server\share\App`）不能写进 `Directory.DefaultDir`（`:` 是 target:source 分隔符，实测 `/a` 报 2714、`/i` 会建出名叫 `D` 的文件夹），改按 MSI 文档用一条 `Property` 行把 `INSTALLFOLDER` 属性设成完整路径完成钉位，实测装到该目录；`INSTALLFOLDER` 仍是安装根，命令行 `INSTALLFOLDER=` 可覆盖，`/a` 与 `extract` 仍还原相对树。
 - **打包 · 分卷**：`--cab-size`，按未压缩字节把文件切到多个内嵌 CAB（`Media` / `_Streams` 一一对应），`extract` 与 `msiexec /a` 均可还原。
 - **打包 · 大文件**：`--large-files layout|error`，> 2 GiB 的文件以未压缩伴随 layout 文件保存（空 `Cabinet` 的 `Media` 行 + `File.Attributes=8192`），`extract` 从伴随目录复制还原；`error` 恢复直接拒绝。
 - **打包 · 空目录**：默认写 `CreateFolder` 表并在安装 / 管理安装序列里保留 `CreateFolders` 动作，`--no-empty-dirs` 可关闭。
-- **打包 · manifest**：`--config <file>`，INI 清单支持多 Feature、快捷方式（含 `Icon`）、注册表、服务（`ServiceInstall` + `ServiceControl`）、环境变量、`[pack]` 默认值；相应标准动作已加入 `InstallExecuteSequence`。完整示例见 `examples/pack.ini`。
-- **打包 · UI**：`--ui none|basic|minimal`；`minimal` 生成 `InstallUISequence`、`Dialog`、`Control`、`ControlEvent`、`TextStyle` 与内置欢迎 / 进度 / 完成向导。
+- **打包 · manifest**：`--config <file.xml>`，XML 清单支持多 Feature、快捷方式（含 `Icon`）、注册表、服务（`ServiceInstall` + `ServiceControl`）、环境变量、`<pack>` 默认值；相应标准动作已加入 `InstallExecuteSequence`。完整示例见 `examples/pack.xml`。
+- **打包 · UI**：`--ui none|basic|minimal`；`minimal` 生成 `InstallUISequence`、`Dialog`、`Control`、`ControlEvent`、`TextStyle` 与内置欢迎 / 进度 / 完成向导（`wizard` 多页向导与 XML 自定义 UI 见上）。
 - **打包 · 签名**：`--sign-cert` / `--sign-password` / `--sign-timestamp` / `--sign-tool`，提交后调用 Windows SDK `signtool.exe` 写入 `\x05DigitalSignature` 流，并再次自检。
 - **包验证**：所有命令打开数据库前检查 OLE 复合文件签名、`MsiOpenDatabaseW` 与 `_Tables` 结构；`verify` 输出完整报告并以退出码区分 VALID / INVALID。
 - **构建**：`build.bat`（x64/x86/clean，自动定位 vcvars）与 `CMakeLists.txt`（VS / NMake 生成器）。
 - **图形界面（Fluent UI）**：新增 `src/ui.h` / `ui_draw.cpp` / `ui_widgets.cpp` / `ui_app.cpp`，纯 Win32 API（user32 / gdi32 / shell32 / ole32 / advapi32）自绘，无任何第三方 UI 库。包含九个页面（概览 / 包信息 / 数据表 / SQL 查询 / 解包 / 导出 / 打包 / 验证 / 设置）、亮暗主题与跟随系统、Per-Monitor V2 高 DPI、圆角卡片与矢量图标、数据网格 / 下拉 / 开关 / 进度条 / 日志 / Toast、拖放打开、后台任务与实时日志。
-- **GUI · 打包页拖放（文件 / 文件夹）**：拖放按**落点**路由到字段——「源目录」收目录（拖文件则取其所在目录，多项目取最深共同目录）并自动补齐产品名与输出路径；「输出 MSI」收 `.msi` 作为目标，收目录则在其下按产品名生成 `<产品名>.msi`；「配置文件」收 INI 清单，拖目录会在其中找 `pack.ini` / `msitool.ini` / `manifest.ini` / `pack.cfg`；「签名证书」收 `.pfx` / `.p12`；落在表单 / 页面空白处则按内容自动分配，需要时会自己切到对应标签页。解包页「解包到」与导出页「输出目录」同样可接目录（并记入「最近」）；字段以外的空白处按内容在两条流程间路由（文件夹 → 打包源目录，`.msi` / `.msp` → 查看 / 解包）。实现上改用 ole32 `RegisterDragDrop` + `IDropTarget`（`WM_DROPFILES` 保留为旧式拖放的兜底路径），拖动过程中就能拿到光标位置：命中字段描边高亮、表单卡片加边框与「拖放自动分配」标签、Toast 粘滞显示「松开：设为…」；只读路径所以只报告 `DROPEFFECT_COPY`（绝不返回 `MOVE` / `LINK`，不会移动或删除源文件），每次拖放写一行 `[drop]` 日志且不自动开始打包。
+- **GUI · 打包页拖放（文件 / 文件夹）**：拖放按**落点**路由到字段——「源目录」收目录（拖文件则取其所在目录，多项目取最深共同目录）并自动补齐产品名与输出路径；「输出 MSI」收 `.msi` 作为目标，收目录则在其下按产品名生成 `<产品名>.msi`；「配置文件」收 XML 清单，拖目录会在其中找 `pack.xml` / `msitool.xml` / `manifest.xml`；「签名证书」收 `.pfx` / `.p12`；落在表单 / 页面空白处则按内容自动分配，需要时会自己切到对应标签页。解包页「解包到」与导出页「输出目录」同样可接目录（并记入「最近」）；字段以外的空白处按内容在两条流程间路由（文件夹 → 打包源目录，`.msi` / `.msp` → 查看 / 解包）。实现上改用 ole32 `RegisterDragDrop` + `IDropTarget`（`WM_DROPFILES` 保留为旧式拖放的兜底路径），拖动过程中就能拿到光标位置：命中字段描边高亮、表单卡片加边框与「拖放自动分配」标签、Toast 粘滞显示「松开：设为…」；只读路径所以只报告 `DROPEFFECT_COPY`（绝不返回 `MOVE` / `LINK`，不会移动或删除源文件），每次拖放写一行 `[drop]` 日志且不自动开始打包。
 - **解包 · 选择存放目录**：命令栏下方新增常驻「解包到」位置条（可直接编辑、点「浏览…」用系统文件夹对话框选择、「最近」下拉复用最近 6 个目录、点「打开」跳转），输出目录不再藏在折叠选项里；对话框默认定位到当前输出目录，选择结果与每次解包使用的目录都会记入最近列表（`HKCU\Software\msitool\RecentOutDirs`）。
 - **解包 · 整页资源管理器**：解包页去掉重复的全局「当前包文件」栏与页面大标题，以文件浏览器为主体：命令 / 地址栏（后退、前进、上一级、刷新、可点击面包屑、搜索、解包全部 / 解包选中、选项、日志）+ 左侧导航树 + 右侧详细信息列表（文件夹与文件混排、图标、类型列、点击表头排序、双击进入目录 / 双击单文件解包、右键菜单、Backspace 返回上级、F5 刷新、状态栏），选项面板与日志抽屉默认折叠，主体区域随窗口全量自适应。
 - **解包 · 资源管理器式浏览**：GUI 解包页新增基于 `Directory` / `File` 表的目录树 + 文件列表（关键字筛选、已解包状态、双击展开/折叠），支持双击单文件解包、右键菜单（解包此文件 / 解包到… / 解包此目录（递归）/ 复制相对路径 / 复制文件键 / 在资源管理器中显示）、「解包全部 / 解包选中」按钮与输出目录自动填充（`<包名>_files`）。新增 `extract::browse()` 目录清单接口与 `extract::Options::onlyFiles` 选择性解包：只解选中文件，未选中的 CAB 不再被解压到 `_unmapped`。
@@ -37,6 +46,8 @@
 
 ### Fixed
 
+- **查看 / 查询：超过 511 字符的 LONGCHAR 被读成空**：`MsiRecordGetStringW` 首次用 512 字符缓冲区读取，遇到 `ERROR_MORE_DATA` 后虽然放大了缓冲区，却仍用旧长度当作容量，第二次读取继续失败并返回空串。现在按 API 返回的所需长度循环扩容（`msidb.cpp`），`Control.Text`（许可协议 RTF）、`Property.Value`、`Error.Text` 等长字段都能完整显示；内置向导的许可页也因此能真正显示 RTF。
+- **打包：`AdminExecuteSequence` 包含不合法的 `CreateFolders`**：`dark.exe` / ICE 会以「action not allowed in this table」告警；已从管理安装序列移除，`/a` 仍能还原目录树。
 - **GUI 高 DPI · 跨显示器后表格列宽 / 行高不跟随缩放**：网格的列宽是用「数据到达时的 DPI」测量出来的像素值，行高（`rowHeightPx = S(28)`）也是启动时算好的一次性常量；窗口被拖到另一块缩放比例不同的显示器（`WM_DPICHANGED`）后，布局会重排，但网格仍用旧像素值 → 每列过窄、文本一律被省略号截断，行高被压扁。现在 `DataGrid` 记住当前列宽是按哪个 DPI 拟合的，检测到变化时自动列宽重新测量、显式列宽按比例缩放，密排行高改在每次 `layout()` 重新计算；`WM_DPICHANGED` 改为使用 wParam 携带的新 DPI 重建主题（不再重复 `rebuild` 两次）。附 `tools/dpi_probe.py` 截图 / 伪造切换脚本，实测 96 → 144 切换后的表格与原生的 144 启动完全一致。
 - `layout()` 增加控件尚未创建的空指针保护（`WM_SIZE` 可能早于 `onCreate()` 到达）。
 

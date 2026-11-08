@@ -22,6 +22,9 @@ struct Cli {
     bool                      keepTemp = false;
     bool                      sourceLayout = false;
     bool                      force = false;
+    bool                      desktopShortcut = false;
+    bool                      startMenuShortcut = false;
+    std::wstring              mainExe;
     std::wstring              productName;
     std::wstring              version = L"1.0.0";
     std::wstring              manufacturer = L"msitool";
@@ -31,6 +34,9 @@ struct Cli {
     std::wstring              installDir;                // --install-dir
     int                       language = 1033;
     std::wstring              configFile;
+    std::wstring              uiTemplate;
+    std::wstring              uiLocale;
+    std::wstring              dumpUiDir;
     unsigned long long        cabSize = 0;
     std::wstring              largeFiles = L"layout";
     std::wstring              ui = L"none";
@@ -44,6 +50,14 @@ struct Cli {
     bool                      cabSizeSet = false;
     bool                      signCertSet = false;
     bool                      installDirSet = false;
+    bool                      uiTemplateSet = false;
+    bool                      productNameSet = false;
+    bool                      versionSet = false;
+    bool                      manufacturerSet = false;
+    bool                      productCodeSet = false;
+    bool                      upgradeCodeSet = false;
+    bool                      platformSet = false;
+    bool                      languageSet = false;
     std::wstring              baseMsi;                    // extract .msp with a target MSI
     std::vector<std::wstring> transforms;               // --transform (repeatable)
     std::vector<std::wstring> files;                    // --files (repeatable)
@@ -108,9 +122,22 @@ Options:
   --cab-size <n>[M|G]      pack: split into CABs of ~n MiB (default: one CAB)
   --no-empty-dirs          pack: do not emit CreateFolder rows
   --large-files <mode>     pack: layout (default) or error for > 2 GiB files
-  --ui <none|basic|minimal> pack: none (default), basic or minimal wizard UI
-  --config <file>          pack: INI manifest (features, shortcuts, registry,
-                           services, environment, signing, [pack] overrides)
+  --ui <none|basic|minimal|wizard|custom>
+                           pack: installer UI. wizard = built-in multi-page
+                           wizard (welcome / license / folder / progress /
+                           finish, or maintenance), minimal = the compact
+                           legacy wizard, custom = dialogs from the XML
+  --ui-template <file.msi> pack: use an existing package's UI tables as base
+  --ui-locale <en|zh-CN>   pack: built-in wizard language (default: follows
+                           --language; 1033 = en, 2052 = zh-CN)
+  --desktop-shortcut       pack: create a desktop shortcut for the main .exe
+  --start-menu-shortcut    pack: create a Start Menu shortcut
+  --main-exe <relpath>     pack: program used by the generated shortcuts
+                           (default: the only root .exe, or the largest .exe)
+  --dump-ui <dir>          pack: write the embedded wizard XML / EULA / bitmaps
+                           to <dir> and exit
+  --config <file.xml>      pack: XML manifest (features, shortcuts, registry,
+                           services, environment, UI, signing, defaults)
   --files <path[;path...]> pack: install only these entries (repeatable, ; or
                            , separated). Relative paths resolve against the
                            source directory; a directory adds its whole
@@ -138,8 +165,11 @@ Examples:
   msitool pack C:\payload C:\out\app.msi --name "My App" --version 1.2.3
   msitool pack C:\payload C:\out\app.msi --install-dir "LocalAppDataFolder\My App"
   msitool pack C:\payload C:\out\app.msi --install-dir "D:\Apps\MyApp"
-  msitool pack C:\payload C:\out\app.msi --config examples\pack.ini
-  msitool pack C:\payload C:\out\app.msi --cab-size 16 --ui minimal
+  msitool pack C:\payload C:\out\app.msi --config examples\pack.xml
+  msitool pack C:\payload C:\out\app.msi --cab-size 16 --ui wizard
+  msitool pack C:\payload C:\out\app.msi --ui custom --config custom-ui.xml
+  msitool pack C:\payload C:\out\app.msi --ui-template C:\templates\ui.msi
+  msitool pack C:\payload C:\out\app.msi --dump-ui C:\out\wizard-ui
   msitool pack C:\payload C:\out\app.msi --files "app.exe;cfg\app.ini"
   msitool pack C:\payload C:\out\app.msi --files "app.exe" --files tools
 
@@ -162,22 +192,7 @@ Notes:
 )";
 
 // "16", "16M", "512K", "1G" (1024 based) -> bytes.
-unsigned long long parseSize(const std::wstring& text) {
-    std::wstring s = util::trim(text);
-    if (s.size() >= 2 && (s.back() == L'B' || s.back() == L'b')) {
-        s.pop_back();
-        if (!s.empty() && (s.back() == L'i' || s.back() == L'I')) s.pop_back();
-    }
-    unsigned long long mult = 1024ULL * 1024ULL;
-    if (!s.empty()) {
-        wchar_t last = s.back();
-        if (last == L'K' || last == L'k') { mult = 1024ULL; s.pop_back(); }
-        else if (last == L'M' || last == L'm') { mult = 1024ULL * 1024ULL; s.pop_back(); }
-        else if (last == L'G' || last == L'g') { mult = 1024ULL * 1024ULL * 1024ULL; s.pop_back(); }
-    }
-    if (s.empty() || !iswdigit(static_cast<wint_t>(s.front()))) return 0;
-    return _wcstoui64(s.c_str(), nullptr, 10) * mult;
-}
+// (pack::parseSize is declared in pack.h.)
 
 Cli parseCommandLine(int argc, wchar_t** argv) {
     Cli cli;
@@ -197,6 +212,8 @@ Cli parseCommandLine(int argc, wchar_t** argv) {
         if (a == L"--keep-temp") { cli.keepTemp = true; continue; }
         if (a == L"--force") { cli.force = true; continue; }
         if (a == L"--no-empty-dirs") { cli.keepEmptyDirs = false; continue; }
+        if (a == L"--desktop-shortcut") { cli.desktopShortcut = true; continue; }
+        if (a == L"--start-menu-shortcut") { cli.startMenuShortcut = true; continue; }
         if (a == L"--transform" || a == L"--base-msi" || a == L"--files") {
             if (i + 1 >= argc) util::fail(L"Option " + a + L" requires a value");
             std::wstring v = argv[++i] ? argv[i] : L"";
@@ -209,26 +226,32 @@ Cli parseCommandLine(int argc, wchar_t** argv) {
             a == L"--product-code" || a == L"--upgrade-code" ||
             a == L"--platform" || a == L"--language" || a == L"--install-dir" ||
             a == L"--config" || a == L"--cab-size" || a == L"--large-files" ||
-            a == L"--ui" || a == L"--sign-cert" || a == L"--sign-password" ||
+            a == L"--ui" || a == L"--ui-template" || a == L"--ui-locale" ||
+            a == L"--main-exe" ||
+            a == L"--dump-ui" || a == L"--sign-cert" || a == L"--sign-password" ||
             a == L"--sign-timestamp" || a == L"--sign-tool") {
             if (i + 1 >= argc) util::fail(L"Option " + a + L" requires a value");
             std::wstring v = argv[++i] ? argv[i] : L"";
-            if (a == L"--name") cli.productName = v;
-            else if (a == L"--version") cli.version = v;
-            else if (a == L"--manufacturer") cli.manufacturer = v;
-            else if (a == L"--product-code") cli.productCode = v;
-            else if (a == L"--upgrade-code") cli.upgradeCode = v;
-            else if (a == L"--platform") cli.platform = v;
+            if (a == L"--name") { cli.productName = v; cli.productNameSet = true; }
+            else if (a == L"--version") { cli.version = v; cli.versionSet = true; }
+            else if (a == L"--manufacturer") { cli.manufacturer = v; cli.manufacturerSet = true; }
+            else if (a == L"--product-code") { cli.productCode = v; cli.productCodeSet = true; }
+            else if (a == L"--upgrade-code") { cli.upgradeCode = v; cli.upgradeCodeSet = true; }
+            else if (a == L"--platform") { cli.platform = v; cli.platformSet = true; }
             else if (a == L"--install-dir") { cli.installDir = v; cli.installDirSet = true; }
             else if (a == L"--config") cli.configFile = v;
-            else if (a == L"--cab-size") { cli.cabSize = parseSize(v); cli.cabSizeSet = true; }
+            else if (a == L"--ui-template") { cli.uiTemplate = v; cli.uiTemplateSet = true; }
+            else if (a == L"--ui-locale") cli.uiLocale = v;
+            else if (a == L"--main-exe") cli.mainExe = v;
+            else if (a == L"--dump-ui") cli.dumpUiDir = v;
+            else if (a == L"--cab-size") { cli.cabSize = pack::parseSize(v); cli.cabSizeSet = true; }
             else if (a == L"--large-files") { cli.largeFiles = v; cli.largeFilesSet = true; }
             else if (a == L"--ui") { cli.ui = v; cli.uiSet = true; }
             else if (a == L"--sign-cert") { cli.signCert = v; cli.signCertSet = true; }
             else if (a == L"--sign-password") cli.signPassword = v;
             else if (a == L"--sign-timestamp") cli.signTimestamp = v;
             else if (a == L"--sign-tool") cli.signTool = v;
-            else cli.language = _wtoi(v.c_str());
+            else { cli.language = _wtoi(v.c_str()); cli.languageSet = true; }
             continue;
         }
         if (util::startsWith(a, L"-"))
@@ -534,6 +557,11 @@ bool cmdVerify(const Cli& cli) {
 
 void cmdPack(const Cli& cli) {
     pack::Options opt;
+    if (!cli.dumpUiDir.empty()) {
+        opt.dumpUiDir = cli.dumpUiDir;
+        pack::pack(opt);
+        return;
+    }
     opt.inputDir = requireArg(cli, 0, L"input directory");
     opt.inputFiles = cli.files;
     opt.outputMsi = requireArg(cli, 1, L"output .msi path");
@@ -550,6 +578,11 @@ void cmdPack(const Cli& cli) {
     opt.dryRun = cli.dryRun;
     opt.verbose = cli.verbose;
     opt.configFile = cli.configFile;
+    opt.uiTemplate = cli.uiTemplate;
+    opt.uiLocale = cli.uiLocale;
+    opt.desktopShortcut = cli.desktopShortcut;
+    opt.startMenuShortcut = cli.startMenuShortcut;
+    opt.mainExe = cli.mainExe;
     opt.cabSize = cli.cabSize;
     opt.keepEmptyDirs = cli.keepEmptyDirs;
     opt.largeFiles = cli.largeFiles;
@@ -562,6 +595,14 @@ void cmdPack(const Cli& cli) {
     opt.largeFilesSet = cli.largeFilesSet;
     opt.cabSizeSet = cli.cabSizeSet;
     opt.signCertSet = cli.signCertSet;
+    opt.uiTemplateSet = cli.uiTemplateSet;
+    opt.productNameSet = cli.productNameSet;
+    opt.versionSet = cli.versionSet;
+    opt.manufacturerSet = cli.manufacturerSet;
+    opt.productCodeSet = cli.productCodeSet;
+    opt.upgradeCodeSet = cli.upgradeCodeSet;
+    opt.platformSet = cli.platformSet;
+    opt.languageSet = cli.languageSet;
     pack::pack(opt);
 }
 

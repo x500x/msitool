@@ -7,7 +7,7 @@
 
 > 用 **MSVC + C++17 + Windows Installer (Msi) API** 编写的工具，用来**查看、解包、打包** MSI 安装包；带一个纯 Win32 自绘的 Fluent 风格图形界面，同时完整保留命令行。
 
-`msitool` 是一个零外部依赖的单文件程序：运行时只使用 Windows 自带的 `msi.dll` 与 `cabinet.dll`，不需要 WiX、Orca、7-Zip、Python、.NET 或任何 UI 框架，不需要管理员权限，也**不会真正安装任何东西**。它直接读取 MSI 的 OLE 复合存储与表，用 FDI/FCI 处理 CAB，适合逆向分析、离线审计、CI 中的包检查，以及把目录快速做成一个可安装的 MSI。双击 exe 打开图形界面，在终端里带参数运行则仍是原来的 CLI。
+`msitool` 是一个零外部依赖的单文件程序：运行时只使用 Windows 自带的 `msi.dll`、`cabinet.dll` 与 `msxml6.dll`，不需要 WiX、Orca、7-Zip、Python、.NET 或任何 UI 框架，不需要管理员权限，也**不会真正安装任何东西**。它直接读取 MSI 的 OLE 复合存储与表，用 FDI/FCI 处理 CAB，适合逆向分析、离线审计、CI 中的包检查，以及把目录快速做成一个可安装的 MSI。双击 exe 打开图形界面，在终端里带参数运行则仍是原来的 CLI。
 
 - **只读安全**：数据库一律以 `MSIDBOPEN_READONLY` 打开（`query` 也无法修改包）。
 - **Unicode**：全程 W 版 API + `std::wstring`，输出 UTF-8，支持中文/空格路径与文件名。
@@ -44,7 +44,7 @@
 | 查看 | SummaryInformation、Property、所有表与行数、列定义/类型/主键、任意 MSI SQL 查询 |
 | 导出 | 全部表为 `.idt`、全部 `_Streams` 原始流、`Binary` 条目、`summary.txt`、CAB + `manifest.txt` |
 | 解包 | 还原安装目录树；内嵌 CAB（`_Streams`）、外部 CAB、未压缩 layout、跨 CAB 连续文件（FDI 分卷集）、`.msp` 补丁负载都支持；`--transform` 可查看应用 transform 后的视图；GUI 另提供资源管理器式浏览（目录树 + 文件列表、筛选、右键菜单、双击单文件解包、目录递归解包、自动输出目录） |
-| 打包 | 把目录做成自包含 MSI：FCI 生成一个或多个 MSZIP CAB + Msi API 建库/写流/写摘要，可选安装位置（`--install-dir`）、分卷、空目录、快捷方式、注册表、服务、环境变量、多 Feature、UI 与数字签名 |
+| 打包 | 把目录做成自包含 MSI：FCI 生成一个或多个 MSZIP CAB + Msi API 建库/写流/写摘要，可选安装位置（`--install-dir`）、分卷、空目录、快捷方式（桌面 / 公共桌面 / 开始菜单子目录 / 图标索引 / 广告式）、注册表、服务、环境变量、多 Feature、**XML 清单**、**内置中英多页向导**、**UI 模板导入**、自定义 UI 与数字签名 |
 | 输出 | UTF-8 文本表格或 `--tsv`；控制字符转义为 `\xNN`；警告与详细日志走 stderr |
 | 图形界面 | 纯 Win32 API（user32 / gdi32 / shell32 / ole32）自绘的 Fluent 界面：亮/暗主题、高 DPI（Per-Monitor V2，实测 75%–300%，跨显示器热切换会重排布局与列宽）、导航、卡片、数据网格、SQL 查询、解包/导出/打包表单、实时日志与进度；**不使用任何第三方库或 UI 框架** |
 
@@ -56,7 +56,7 @@
 
 | 项目 | 要求 |
 | --- | --- |
-| 操作系统 | Windows（需系统自带 `msi.dll` / `cabinet.dll`）；在 Windows 10/11 上完成验证 |
+| 操作系统 | Windows（需系统自带 `msi.dll` / `cabinet.dll` / `msxml6.dll`）；在 Windows 10/11 上完成验证 |
 | 编译器 | MSVC（Visual Studio 2017+，实测 VS 2022 / MSVC 19.44） |
 | SDK | Windows SDK 10，提供 `msi.h`、`msiquery.h`、`fdi.h`、`fci.h`、`Msi.Lib`、`Cabinet.Lib` |
 | 构建工具 | `build.bat`（调用 `cl.exe`）或 CMake 3.20+ |
@@ -127,7 +127,7 @@ build\msitool_x64.exe gui setup.msi         :: 启动 GUI 并直接打开一个�
 | SQL 查询 | MSI SQL 编辑器、示例查询、结果网格与耗时 |
 | 解包 | **整页是文件资源管理器**：命令 / 地址栏（后退、前进、上一级、刷新、可点击面包屑、搜索框、解包全部、解包选中、选项、日志）+ 左侧导航树 + 右侧详细信息列表（文件夹与文件混排、图标、类型列、点击表头排序、双击进入目录 / 双击文件解包、右键菜单）；常驻「解包到」位置条可直接编辑路径、点「浏览…」选目录、从「最近」下拉复用历史目录、点「打开」查看，默认自动填 `<包名>_files`；六个开关、MST transform 与基准 MSI 收进可折叠「选项」，运行日志收进可折叠「日志」抽屉（展开后按窗口高度自适应，约占页面 1/3，最大化时更高） |
 | 导出 | CAB / 完整归档两种模式、运行日志 |
-| 打包 | 「基本 / 高级 / 签名」三个标签页，字段按窗口尺寸自适应两列排布（基本页含源目录、输出 MSI、产品名称、产品版本、安装目录）；右上角「开始打包」常驻，完成后自动打开新 MSI；文件 / 文件夹可直接拖入（见 [拖放](#拖放)） |
+| 打包 | 「基本 / 高级 / 签名 / 快捷方式」四个标签页，字段按窗口尺寸自适应两列排布（基本页含源目录、输出 MSI、产品名称、产品版本、安装目录；高级页含 CAB 分卷、XML 清单、UI 模板与语言；快捷方式页含主程序、桌面 / 开始菜单勾选与额外的逐行快捷方式编辑器）；右上角「开始打包」常驻，完成后自动打开新 MSI；文件 / 文件夹可直接拖入（见 [拖放](#拖放)） |
 | 验证 | 签名 / `MsiOpenDatabase` / `MsiVerifyPackage` / `_Tables` / 媒体检查报告 |
 | 设置 | 主题、DPI 信息、可自定义快捷键（点击按键框重新录制、Backspace 清除、一键恢复默认）与关于（版本 / 协议 / 可点击项目主页 / 构建信息） |
 
@@ -139,11 +139,12 @@ build\msitool_x64.exe gui setup.msi         :: 启动 GUI 并直接打开一个�
 | --- | --- | --- |
 | 打包 · 源目录 | 直接作为源目录 | 取所在目录（打包以目录为单位，会包含其中全部内容） |
 | 打包 · 输出 MSI | 在该目录下按产品名生成 `<产品名>.msi` | `.msi` 直接作为输出路径 |
-| 打包 · 配置文件 | 查找目录里的 `pack.ini` / `msitool.ini` / `manifest.ini` / `pack.cfg` | 作为清单文件 |
+| 打包 · 配置文件 | 查找目录里的 `pack.xml` / `msitool.xml` / `manifest.xml` | 作为 XML 清单文件 |
+| 打包 · UI 模板 | — | `.msi` 作为 UI 模板 |
 | 打包 · 签名证书 | — | `.pfx` / `.p12` |
 | 解包 · 解包到 / 导出 · 输出目录 | 作为输出目录（同时记入「最近」） | 取所在目录 |
-| 打包页空白处 | 源目录 | `.ini` / `.cfg` → 清单，`.pfx` → 证书，其余 → 源目录（取所在目录）；`.msi` / `.msp` 不打开，只提示去查看 / 解包页 |
-| 其他页面空白处 | 作为打包源目录并切到「打包」页 | `.ini` / `.cfg` → 清单，`.pfx` → 证书，`.msi` / `.msp` → 打开，其余 → 源目录（取所在目录） |
+| 打包页空白处 | 源目录 | `.xml` → 清单，`.pfx` → 证书，其余 → 源目录（取所在目录）；`.msi` / `.msp` 不打开，只提示去查看 / 解包页 |
+| 其他页面空白处 | 作为打包源目录并切到「打包」页 | `.xml` → 清单，`.pfx` → 证书，`.msi` / `.msp` → 打开，其余 → 源目录（取所在目录） |
 
 解包页与导出页的输出目录投放区是该行的「解包到」/「输出目录」字段，拖到页面其它空白处同样按上面的规则进入打包流程。多项目同时拖放时取它们的**最深共同目录**作为源目录；若两项不在同一磁盘则拒绝并提示。拖放只写入字段并记一行日志，不会自动开始打包，也不会移动 / 删除源文件（`IDropTarget` 只报告 `DROPEFFECT_COPY`）。
 
@@ -299,8 +300,14 @@ msitool pack <源目录> <输出.msi> [选项]
 | `--cab-size <n>[M\|G]` | `0` | 按未压缩字节把文件切到多个内嵌 CAB；`0` = 单 CAB。支持 `64K` / `16M` / `1G` 等后缀 |
 | `--no-empty-dirs` | — | 不写 `CreateFolder` 表，空目录不会在安装时创建 |
 | `--large-files <mode>` | `layout` | > 2 GiB 文件：`layout` 写成 MSI 同目录的未压缩伴随文件；`error` 直接拒绝 |
-| `--ui <none\|basic\|minimal>` | `none` | 安装界面：无 UI / Windows Installer 基础进度条 / 自带的欢迎·进度·完成向导 |
-| `--config <file>` | — | INI 清单：多 Feature、快捷方式、注册表、服务、环境变量、签名、默认值 |
+| `--ui <none\|basic\|minimal\|wizard\|custom>` | `none` | 安装界面：无 UI / Windows Installer 基础进度条 / 旧的紧凑向导 / **内置多页向导**（欢迎·许可·目录·确认·进度·完成 + 维护模式）/ XML 自定义（可 `base="wizard"` 复用布局） |
+| `--ui-template <file.msi>` | — | 用现有 MSI 的 UI 表作为基座（`Dialog` / `Control` / `ControlEvent` / `CheckBox` / `RadioButton` / `Binary` / `InstallUISequence` 等） |
+| `--ui-locale <en\|zh-CN>` | 跟随 `--language` | 内置向导文案语言（1033 → en，2052 / 1028 → zh-CN） |
+| `--desktop-shortcut` | — | 为主程序创建桌面快捷方式 |
+| `--start-menu-shortcut` | — | 为主程序创建开始菜单快捷方式 |
+| `--main-exe <相对路径>` | 自动 | 快捷方式指向的主程序；省略时取源根的唯一 `.exe`，否则取最大的 `.exe` |
+| `--dump-ui <目录>` | — | 把内置向导的 XML / EULA / banner 导出到目录后退出 |
+| `--config <file.xml>` | — | XML 清单：多 Feature、快捷方式、注册表、服务、环境变量、UI、签名、默认值（**不再支持 INI**） |
 | `--sign-cert <pfx>` | — | 提交后用 `signtool.exe` 写入 `\x05DigitalSignature` 流 |
 | `--sign-password <text>` | — | PFX 密码 |
 | `--sign-timestamp <url>` | — | RFC 3161 时间戳服务 |
@@ -327,7 +334,7 @@ MsiVerifyPackage: OK (Windows Installer accepts this package)
 Done      : E:\work\winmsi\app.msi
 ```
 
-基础包含 9 张表：`Directory`、`Component`、`File`、`Media`、`Feature`、`FeatureComponents`、`Property`、`InstallExecuteSequence`、`AdminExecuteSequence`，以及完整 SummaryInformation；按需再加 `CreateFolder`、`Shortcut`、`Icon`、`Registry`、`ServiceInstall`、`ServiceControl`、`Environment`、`InstallUISequence` 与 UI 的 `Dialog` / `Control` / `ControlEvent` / `TextStyle`。因为带 `AdminExecuteSequence`，可以用不写注册表的方式让 Windows Installer 自己验证：
+基础包含 9 张表：`Directory`、`Component`、`File`、`Media`、`Feature`、`FeatureComponents`、`Property`、`InstallExecuteSequence`、`AdminExecuteSequence`，以及完整 SummaryInformation 和供 ICE / smoke 校验用的空 `_Validation` 表；按需再加 `CreateFolder`、`Shortcut`、`Icon`、`MsiShortcutProperty`、`RemoveFile`、`Registry`、`ServiceInstall`、`ServiceControl`、`Environment`，以及 UI 的 `InstallUISequence` / `AdminUISequence` / `Dialog` / `Control` / `ControlEvent` / `ControlCondition` / `CheckBox` / `RadioButton` / `ComboBox` / `ListBox` / `ListView` / `TextStyle` / `Binary` / `Error` / `Billboard`。因为带 `AdminExecuteSequence`，可以用不写注册表的方式让 Windows Installer 自己验证：
 
 ```bat
 msiexec /a app.msi /qn TARGETDIR=C:\out\admin
@@ -365,33 +372,79 @@ msiexec /a app.msi /qn TARGETDIR=C:\out\admin
 msiexec /i app.msi /qb INSTALLFOLDER="D:\Apps\My App"
 ```
 
-清单 `[pack]` 段同样接受 `install-dir`，命令行同名选项优先。
+清单的 `<pack installDir="...">` 同样接受安装位置，命令行同名选项优先。
 
 #### UI
 
-`--ui none`（默认，不建 `InstallUISequence`）/ `basic`（只加 `CostInitialize`、`FileCost`、`CostFinalize`、`ExecuteAction`，用 Windows Installer 自带进度条）/ `minimal`（再生成 `Dialog`、`Control`、`ControlEvent`、`TextStyle` 和欢迎 / 进度 / 完成 / 取消 / 错误五个对话框，以及 `DefaultUIFont` 属性）。无论哪种，包都能用 `/qn`、`/qb`、`/a` 安装。
+`--ui` 决定安装界面，五种模式可以组合 `--ui-template` / `--ui-locale`：
+
+| 模式 | 行为 |
+| --- | --- |
+| `none`（默认） | 不建 `InstallUISequence`，`/qn` 静默安装 |
+| `basic` | 只加 `CostInitialize` / `FileCost` / `CostFinalize` / `ExecuteAction`，用 Windows Installer 自带进度条 |
+| `minimal` | 旧的紧凑向导：欢迎 / 进度 / 完成 / 取消 / 错误五页（保持向后兼容） |
+| `wizard` | **内置多页向导**：欢迎 → 许可协议 → 目标文件夹（含 BrowseDlg 目录浏览）→ 确认 → 进度 → 完成；已安装时进入维护模式（修复 / 删除）；共 12 个对话框 |
+| `custom` | 对话框全部来自 XML；写 `base="wizard"` 可复用内置布局，只覆盖需要的行 |
+
+- **中英两套**：`--language 1033` → en，`2052` / `1028` → zh-CN，`--ui-locale en|zh-CN` 可显式覆盖。文案与布局分离（`wizard.layout.xml` + `wizard.<locale>.xml`），字体随 locale 切换（Tahoma 8 / Microsoft YaHei 9）。
+- **BrowseDlg**：`DirectoryCombo` + `DirectoryList` + `PathEdit`，全部使用 `_BrowseProperty` + `Indirect`，`SetTargetPath` 写回 `INSTALLFOLDER`；没有自定义动作。
+- **许可页**：RTF 由 `ScrollableText` 显示，`CheckBox` 写 `LicenseAccepted`，未勾选时用 `ControlCondition` 禁用「下一步」。
+- **维护模式**：`InstallUISequence` 用 `Installed` / `NOT Installed` 条件在欢迎页与维护欢迎页之间切换；修复走 `Reinstall All` + `ReinstallMode ecmus`，删除走 `Remove All`。
+- **UI 模板**：`--ui-template <msi>` 读取现有包的 `Dialog` / `Control` / `ControlEvent` / `ControlCondition` / `CheckBox` / `RadioButton` / `Binary` / `TextStyle` / `Error` / `Billboard` 与 `InstallUISequence`，只保留标准动作；模板里的 `DoAction` 自定义动作（例如 WiX 的 `WixUIValidatePath` / `WixUIPrintEula`）会被丢弃并告警。
+- `--dump-ui <目录>` 导出内置 `wizard.layout.xml`、两个 locale、两份示例 EULA 与 banner / background 位图，便于二次修改。
+
+无论哪种模式，包都能用 `/qn`、`/qb`、`/a` 安装；`msiexec /a` 的 UI 走 `AdminUISequence`。
 
 #### 数字签名
 
-`--sign-cert <pfx>` 在数据库提交后调用 `signtool.exe sign /fd SHA256` 写入 `\x05DigitalSignature` 流，可用 `--sign-password`、`--sign-timestamp`、`--sign-tool` 补充参数；签名后再次用 `MsiVerifyPackageW` 自检。签名是**可选**的：仅在打包时需要 Windows SDK 的 `signtool.exe`（自动从 `PATH` 或 `%ProgramFiles(x86)%\Windows Kits\10\bin\*\x64` 查找），运行时依旧只依赖系统 `msi.dll` / `cabinet.dll`。
+`--sign-cert <pfx>` 在数据库提交后调用 `signtool.exe sign /fd SHA256` 写入 `\x05DigitalSignature` 流，可用 `--sign-password`、`--sign-timestamp`、`--sign-tool` 补充参数；签名后再次用 `MsiVerifyPackageW` 自检。签名是**可选**的：仅在打包时需要 Windows SDK 的 `signtool.exe`（自动从 `PATH` 或 `%ProgramFiles(x86)%\Windows Kits\10\bin\*\x64` 查找），运行时依旧只依赖系统 `msi.dll` / `cabinet.dll` / `msxml6.dll`。
 
-#### manifest：`--config`
+#### XML 清单：`--config`
 
-复杂资源用一个 INI 风格的 UTF-8 / UTF-16 清单描述，完整示例见 [examples/pack.ini](examples/pack.ini)。段名 `[类型:名称]`，键名不区分大小写；`;` / `#` 开头为注释；相对路径按源目录解析。**命令行的同名选项优先于 `[pack]` 段**。
+复杂资源用一个 XML 清单描述，完整示例见 [examples/pack.xml](examples/pack.xml)，自定义 UI 示例见 [examples/ui-custom.xml](examples/ui-custom.xml)。根元素必须带命名空间 `https://msitool.dev/schema/pack/v1`；载荷路径（feature 的 `dirs`、shortcut 的 `target` / `icon`）按源目录解析，资源文件（`binary file`、`sign cert`、`ui template`）按 XML 所在目录解析。**命令行的同名选项优先于 `<pack>` 属性**。INI 清单已移除，传 `.ini` 会直接报错。 编辑器可加载 [schemas/msitool-v1.xsd](schemas/msitool-v1.xsd) 做补全与校验。
 
-| 段 | 常用键 | 生成的表 / 作用 |
+| 元素 | 常用属性 | 生成的表 / 作用 |
 | --- | --- | --- |
-| `[pack]` | `cab-size`（MiB）、`ui`、`large-files`、`keep-empty-dirs`、`sign-cert` / `sign-password` / `sign-timestamp` / `sign-tool` | 填充命令行未指定的默认值 |
-| `[feature:名称]` | `title`、`description`、`dirs`（`;` 分隔的相对目录前缀）、`level`、`display`、`attributes` | `Feature` + `FeatureComponents`；未匹配的目录归 `MainFeature` |
-| `[shortcut:名称]` | `name`、`dir`（`ProgramMenuFolder` / `DesktopFolder` 等标准目录，或源内相对目录）、`target`（源内文件相对路径，自动转成 `[#FileKey]`）、`args`、`description`、`wkdir`、`icon`（.ico）、`component` | `Shortcut` + `Icon` |
-| `[registry:名称]` | `root`（`HKLM` / `HKCU` / `HKCR` / `HKU` / `auto`）、`key`、`name`、`value`、`type`（`string` / `integer` / `binary` / `expand` / `multi` / `key` / `keydelete` / `keycreatedelete`）、`component` | `Registry` |
-| `[service:名称]` | `name`、`displayname`、`image`（服务 exe 的源内相对路径，用于选组件）、`type`（`own` / `share` / `interactive`）、`start`（`auto` / `demand` / `disabled` / `system`）、`error`、`account`、`password`、`args`、`dependencies`、`description` | `ServiceInstall` + `ServiceControl` |
-| `[environment:名称]` | `name`、`value`、`action`（`set` / `create` / `append` / `prepend` / `remove`）、`separator`、`system`、`component` | `Environment` |
+| `<pack>` | `name`、`version`、`manufacturer`、`productCode`、`upgradeCode`、`platform`、`language`、`installDir`、`ui`、`cabSize`、`largeFiles`、`keepEmptyDirs` | 填充命令行未指定的默认值 |
+| `<features><feature>` | `id`、`title`、`description`、`dirs`（`;` 分隔）、`level`、`display`、`attributes` | `Feature` + `FeatureComponents`；未匹配的目录归 `MainFeature` |
+| `<shortcuts><shortcut>` | `id`、`name`、`directory`（标准目录 / 别名 / 子目录 / 源内目录）、`target`、`arguments`、`description`、`icon`、`iconIndex`、`workingDirectory`、`component`、`advertise` | `Shortcut` + `Icon` + 可选 `MsiShortcutProperty` |
+| `<registry><registryValue>` | `id`、`root`（`HKLM` / `HKCU` / `HKCR` / `HKU` / `auto`）、`key`、`name`、`value`、`type`（`string` / `integer` / `binary` / `expand` / `multi` / `key` / `keydelete` / `keycreatedelete`）、`component` | `Registry` |
+| `<services><service>` | `id`、`name`、`displayName`、`image`、`type`（`own` / `share` / `interactive`）、`start`（`auto` / `demand` / `disabled` / `system`）、`error`、`account`、`password`、`arguments`、`dependencies`、`description` | `ServiceInstall` + `ServiceControl` |
+| `<environment><variable>` | `id`、`name`、`value`、`action`（`set` / `create` / `append` / `prepend` / `remove`）、`separator`、`system` | `Environment` |
+| `<sign>` | `cert`、`password`、`timestamp`、`tool` | 与 `--sign-*` 等价 |
+| `<ui>` | `base`（`wizard` / `minimal`）、`locale`、`font`、`template` | UI 基座与增量段 |
+| `<ui><textstyle>` | `id`、`face`、`size`、`color`、`style` | `TextStyle` |
+| `<ui><dialog>` | `id`、`title`、`width`、`height`、`attributes` / `modeless`、`first`、`default`、`cancel`、`sequence`、`condition` | `Dialog` + `InstallUISequence` |
+| `<ui><control>` | `id`、`type`、`x/y/width/height`、`attributes` / `visible` / `enabled` / `sunken` / `indirect`、`property`、`text` / `textFile`、`binary`、`next`、`help` | `Control`；`RadioButtonGroup` / `CheckBox` / `ListBox` 等按需生成子表 |
+| `<ui><publish>` / `<setproperty>` | `event`、`value`、`condition`、`order` / `name`、`value` | `ControlEvent` |
+| `<ui><controlcondition>` | `action`（`enable` / `disable` / `show` / `hide` / `default`）、`condition` | `ControlCondition` |
+| `<ui><checkbox>` | `property`、`value` | `CheckBox` |
+| `<ui><binary>` | `id`、`file` | `Binary`（位图 / 图标 / RTF） |
+| `<ui><error>` | `id`、`text` | `Error` |
+| `<ui><billboard>` / `<billboardaction>` | `id`、`feature`、`action`、`ordering`、子 `<control>` | `Billboard` + `BBControl` |
+| `<ui><uisequence>` / `<adminuisequence>` | 子 `<action name value condition>` | `InstallUISequence` / `AdminUISequence` |
 
 `component` 可写组件键（`C1`）、目录键（`INSTALLFOLDER` / `D2`）、源内相对目录或文件相对路径；省略时资源挂到目标文件所属组件（无目标时挂到根组件）。标准动作 `CreateShortcuts`、`WriteRegistryValues`、`InstallServices`、`StartServices`、`WriteEnvironmentStrings`（以及卸载侧的 `RemoveShortcuts`、`RemoveRegistryValues`、`StopServices`、`DeleteServices`）已加入 `InstallExecuteSequence`。
 
+快捷方式的 `directory` 支持标准目录名与别名 `desktop` / `startmenu` / `startup` / `sendto`，也支持 `ProgramMenuFolder\厂商\产品` 这样的多级子目录：打包器会为每一级生成 `Directory` + 组件（HKLM 注册表 keypath，`RemoveFile` 负责卸载清理），因此子菜单目录会被真实创建。`advertise="true"` 时 `Target` 写 feature 名（由目标文件所在 feature 决定），并要求显式 `component`；`target` 为空且非广告式会直接报错。`icon` 接受 `.ico` / `.exe` / `.dll`，`iconIndex` 选择图标序号。`<shortcut>` 内可加 `<msishortcutproperty key="..." value="..."/>` 写 `MsiShortcutProperty`（任务栏 / 开始菜单固定）。
+
+```xml
+<msitool xmlns="https://msitool.dev/schema/pack/v1">
+  <pack name="My App" version="1.2.3" ui="wizard" language="2052"/>
+  <features>
+    <feature id="Core" title="核心文件" dirs="bin"/>
+  </features>
+  <shortcuts>
+    <shortcut id="Desktop" name="My App.lnk" directory="desktop"
+              target="bin\app.exe" icon="bin\app.exe" iconIndex="0"/>
+  </shortcuts>
+</msitool>
+```
+
 ```bat
-msitool pack C:\payload C:\out\app.msi --config examples\pack.ini --cab-size 16 --ui minimal
+msitool pack C:\payload C:\out\app.msi --config examples\pack.xml --cab-size 16 --ui wizard
+msitool pack C:\payload C:\out\app.msi --ui template --ui-template C:\templates\ui.msi
+msitool pack C:\payload C:\out\app.msi --ui custom --config examples\ui-custom.xml
 ```
 
 ### 退出码与输出约定
@@ -467,16 +520,31 @@ MSI SQL 是 SQL 的**子集**（例如没有 `COUNT(*)` 这类聚合函数），
 │   ├── msidb.h / msidb.cpp      Msi API RAII 封装：包预检、查询、列信息、流、摘要、导出
 │   ├── cab.h / cab.cpp          FDI 解压，回调式直接落盘
 │   ├── extract.h / extract.cpp  表解析、目录树、Media/Sequence 映射、CAB 导出与解包
-│   ├── pack.h / pack.cpp        FCI 多 CAB 压缩 + manifest + Msi 建库/建表/写流/签名/摘要
+│   ├── pack.h / pack.cpp        FCI 多 CAB 压缩 + Msi 建库/建表/写流/签名/摘要
+│   ├── pack_util.h / .cpp       MSI 行 / 标识符 / 标准目录等公共助手
+│   ├── pack_xml.h / .cpp        XML 清单解析、locale 替换、UI 模板导入
+│   ├── pack_ui.h / .cpp         UI 模型、合并、校验与表写入
+│   ├── pack_ui_builtin.cpp      内置 minimal / wizard（从 RCDATA 读取）
+│   ├── xml.h / .cpp             MSXML6 只读 DOM（禁 DTD / 外部实体）
 │   ├── ui.h                     UI 层接口：主题、GDI 绘制器、控件声明
 │   ├── ui_draw.cpp              主题 / DPI / 双缓冲绘制 / 矢量图标
 │   ├── ui_widgets.cpp           自绘控件：按钮、输入框、下拉、网格、日志、进度、导航
 │   ├── ui_app.cpp               主窗口、九个页面、业务逻辑与后台任务
 │   └── main.cpp                 入口：无参数进 GUI，带参数进 CLI（全部命令）
+├── resources/
+│   ├── msitool.rc               RCDATA 资源清单
+│   └── ui/                      wizard.layout.xml / 中英 locale / EULA / banner / background
+├── docs/
+│   └── PLAN-pack-xml-ui.md      打包 v2 设计（XML 清单 / 向导 / 快捷方式）
+├── schemas/
+│   └── msitool-v1.xsd           清单编辑器 schema
 ├── examples/
-│   └── pack.ini                 打包清单示例（features/shortcuts/registry/services/env）
+│   ├── pack.xml                 打包清单示例（features/shortcuts/registry/services/env）
+│   └── ui-custom.xml            base="wizard" 的自定义 UI 示例
 ├── tools/
-│   └── dpi_probe.py             GUI 高 DPI 截图 / 伪造跨屏切换的验证脚本
+│   ├── dpi_probe.py             GUI 高 DPI 截图 / 伪造跨屏切换的验证脚本
+│   ├── make_ui_art.ps1          生成内置 banner / background / 示例 EULA
+│   └── pack_regression.ps1      打包回归：全部 UI 模式 + verify + /a + dark.exe
 ├── build.bat                    MSVC 构建脚本（x64 / x86 / clean）
 ├── CMakeLists.txt               CMake 构建（MSVC）
 ├── CHANGELOG.md                 变更记录
@@ -502,12 +570,17 @@ build.bat clean      :: 清理
 核心命令等价于：
 
 ```bat
+rc /nologo /fo build\obj\x64\msitool.res resources\msitool.rc
 cl /std:c++17 /EHsc /W4 /O2 /utf-8 /DUNICODE /D_UNICODE ^
    /Isrc /Fobuild\obj\x64\ /Febuild\msitool_x64.exe ^
-   src\util.cpp src\msidb.cpp src\cab.cpp src\extract.cpp src\pack.cpp src\main.cpp ^
+   src\util.cpp src\msidb.cpp src\cab.cpp src\extract.cpp ^
+   src\pack.cpp src\pack_util.cpp src\xml.cpp src\pack_xml.cpp ^
+   src\pack_ui.cpp src\pack_ui_builtin.cpp src\main.cpp ^
    src\ui_draw.cpp src\ui_widgets.cpp src\ui_app.cpp ^
-   Msi.Lib Cabinet.Lib Shell32.Lib Ole32.Lib User32.Lib Gdi32.Lib Advapi32.Lib ^
-   Comdlg32.Lib Uuid.Lib /link /MACHINE:X64 /SUBSYSTEM:WINDOWS
+   build\obj\x64\msitool.res ^
+   Msi.Lib Cabinet.Lib Msxml6.Lib OleAut32.Lib Shell32.Lib Ole32.Lib ^
+   User32.Lib Gdi32.Lib Advapi32.Lib Comdlg32.Lib Uuid.Lib ^
+   /link /MACHINE:X64 /SUBSYSTEM:WINDOWS
 ```
 
 > `/SUBSYSTEM:WINDOWS` 让双击 exe 时没有控制台黑框；CLI 模式会 `AttachConsole(ATTACH_PARENT_PROCESS)`（失败则 `AllocConsole`）并重绑标准流，重定向到文件时也不会破坏管道。
@@ -516,6 +589,7 @@ cl /std:c++17 /EHsc /W4 /O2 /utf-8 /DUNICODE /D_UNICODE ^
 | --- | --- |
 | `Msi.Lib` | `MsiOpenDatabaseW` / `MsiDatabaseOpenViewW` / `MsiRecordReadStream` / … |
 | `Cabinet.Lib` | FDI（`FDICopy`）解压 + FCI（`FCIAddFile`）压缩 |
+| `Msxml6.Lib` / `OleAut32.Lib` | XML 清单解析（MSXML6 DOM，系统组件）/ `BSTR` 与 `VARIANT` |
 | `Shell32.Lib` / `Ole32.Lib` | `CommandLineToArgvW` / `IFileDialog` / `OleInitialize` / GUID |
 | `User32.Lib` / `Gdi32.Lib` | 自绘窗口、消息循环、DPI 与全部 GDI 绘制 |
 | `Advapi32.Lib` / `Comdlg32.Lib` / `Uuid.Lib` | 注册表设置 / 文件过滤器 / COM 接口 GUID |
@@ -561,7 +635,7 @@ build\msitool_x64.exe extract C:\out\app.msi C:\out\roundtrip
 :: 4) 进阶能力（分卷 / 清单 / UI / 签名）
 build\msitool_x64.exe pack C:\payload C:\out\split.msi --cab-size 64K --force
 build\msitool_x64.exe list C:\out\split.msi media --tsv
-build\msitool_x64.exe pack C:\payload C:\out\full.msi --config examples\pack.ini --ui minimal --force
+build\msitool_x64.exe pack C:\payload C:\out\full.msi --config examples\pack.xml --ui wizard --force
 build\msitool_x64.exe tables C:\out\full.msi
 build\msitool_x64.exe pack C:\payload C:\out\signed.msi --sign-cert C:\cert.pfx --force
 build\msitool_x64.exe list C:\out\signed.msi streams
@@ -577,6 +651,12 @@ build\msitool_x64.exe extract update.msp C:\out\patch --base-msi setup.msi
 
 ```bat
 msiexec /a C:\out\app.msi /qn TARGETDIR=C:\out\admin
+```
+
+打包侧的一键回归：`tools/pack_regression.ps1` 会自动生成临时载荷，依次打包 `none` / `basic` / `minimal` / `wizard`（中英）/ `custom` / XML 清单 / 快捷方式，逐个 `verify` + `msiexec /a`，并在安装了 WiX 3.x 时用 `dark.exe` 反编译检查表结构告警：
+
+```bat
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\pack_regression.ps1
 ```
 
 负向用例也应覆盖：非 MSI 文件、目录、伪造 CFB 头、缺失外部 CAB、中文/空格路径、`--dry-run`、`--force`。详见 [CONTRIBUTING.md](CONTRIBUTING.md)。
@@ -619,8 +699,9 @@ python tools\dpi_probe.py --dpi 96 --click 100,178 --transition 144 ^
 | KB2565063 `.msp` | 补丁包 | `verify` 判定 VALID（patch 模式），可读取 `MsiPatchMetadata` 等表 |
 | `pack` 往返（7 文件：中文名 / 空格 / 空文件 / 嵌套 / 1 MiB 随机数据） | 自包含 MSI | `MsiVerifyPackage` OK；`extract` 往返 sha256 完全一致；`ACTION=ADMIN` 让 Windows Installer 自身也解出全部文件 |
 | `pack --cab-size 64K`（5 文件） | 3 个内嵌 CAB | 3 条 `Media` 行 + 3 个 `_Streams`；`extract` 全量还原；`msiexec /a` 也解出全部文件 |
-| `pack --config` 全量清单 | 21 张表 | `Feature` 3 / `Shortcut` 2 + `Icon` 1 / `Registry` 2 / `ServiceInstall`+`ServiceControl` / `Environment` / 5 个 `Dialog`；`MsiVerifyPackage` OK，`msiexec /a` 成功 |
-| `pack --ui minimal` | 自包含向导 | 欢迎 / 进度 / 完成 / 取消 / 错误对话框；`msiexec /i /qb` 安装成功 |
+| `pack --config` 全量清单 | 3 个 Feature + 快捷方式 + 注册表 + 服务 + 环境变量 + 12 页向导 | `Shortcut` 2（桌面 / 开始菜单子目录）+ `Icon` 1 / `Registry` 3 / `ServiceInstall`+`ServiceControl` / `Environment` / `Dialog` 12 / `Control` 80+ / `ControlCondition` / `InstallUISequence` / `Binary` 2；`MsiVerifyPackage` OK，`msiexec /a` 成功 |
+| `pack --ui wizard`（en / zh-CN） | 自包含多页向导 | 欢迎 / 许可 / 目标文件夹 / 浏览 / 确认 / 进度 / 完成 / 取消 / 错误 / 维护共 12 个对话框；`msiexec /a` 成功，`dark.exe` 反编译无表结构告警 |
+| `pack --ui template ref.msi` | 复用 WiX UI 表 | 22 个对话框 + `CheckBox` / `RadioButton` / `Binary` 导入，自定义动作按白名单丢弃并告警 |
 | `pack --install-dir` | 自定义安装位置 | `Tools\MyApp` / `LocalAppDataFolder\My App\Sub` / `CommonAppDataFolder\Vendor\App`：`msiexec /i /qn` 后文件真的落在 `%LocalAppData%\My App\Sub` 等位置，`msiexec /a` 与 `extract` 也同构；绝对路径 `E:\...\MyApp` 通过 `Property` 行钉位，实测装到该目录，命令行 `INSTALLFOLDER=` 可再覆盖，`/a` 与 `extract` 仍还原相对树 |
 | `pack --sign-cert`（自签名 PFX） | 已签名 MSI | `\x05DigitalSignature` + `\x05MsiDigitalSignatureEx` 流写入，`MsiVerifyPackage` 仍 OK |
 | `pack`（2.3 GiB 稀疏文件） | 未压缩伴随 layout | `FileSize=0`、`Attributes=8192`、一条空 `Cabinet` 的 `Media` 行；`extract` 从伴随目录完整还原 2,300,000,000 字节 |
@@ -667,7 +748,10 @@ python tools\dpi_probe.py --dpi 96 --click 100,178 --transition 144 ^
 
 **打包**
 
-- 基础形态是单 Feature、单 CAB 的最小包；快捷方式 / 注册表 / 服务 / 环境变量 / 多 Feature / UI / 签名都通过 `--config` 或对应选项按需生成，不提供自定义动作与自定义 UI 皮肤（`--ui minimal` 是内置的固定向导）。
+- 基础形态是单 Feature、单 CAB 的最小包；快捷方式 / 注册表 / 服务 / 环境变量 / 多 Feature / UI / 签名都通过 XML 清单或对应选项按需生成。**不生成自定义动作**：UI 事件里的 `DoAction` 只接受标准动作，导入 UI 模板时未知自定义动作会被丢弃并告警。
+- UI 清单只支持自有 XML（不再支持 INI）；`_Validation` 表为空，`msiexec` / `MsiVerifyPackage` 不受影响，但 WiX `smoke.exe` 这类依赖验证元数据的工具可能无法跑完全部 ICE。
+- 向导的交互流程（点“下一步”触发 `NewDialog`、BrowseDlg 选目录、维护模式修复 / 删除）需要在真实桌面环境手工走查；自动化回归覆盖表结构、`MsiVerifyPackage`、`msiexec /a` 与 `dark.exe` 反编译。
+- `ALLUSERS=1` 写死，快捷方式位置按 per-machine 语义解析（`DesktopFolder` / `ProgramMenuFolder` 指向公共桌面 / 公共开始菜单）；不提供按用户安装或 `MSIINSTALLPERUSER` 开关。
 - 分卷按**未压缩**字节估算，压缩后的 CAB 可能小于或略大于阈值；不生成 CAB 之间的连续文件（一个文件不会跨 CAB 切分）。
 - > 2 GiB 的文件不能进 CAB（`File.FileSize` 是 32 位整数、FCI 的 seek 也是 32 位）：默认以未压缩伴随文件的方式保留，`FileSize` 记 0，安装 / 还原时必须同时分发伴随目录。
 - 数字签名是可选的，需要 Windows SDK 的 `signtool.exe` 与一张代码签名证书；不提供证书管理。
@@ -734,7 +818,7 @@ python tools\dpi_probe.py --dpi 96 --click 100,178 --transition 144 ^
 
 [MIT](LICENSE) © 2026 msitool contributors
 
-本项目使用 Windows SDK 提供的头文件与导入库（`Msi.Lib`、`Cabinet.Lib` 等），运行时依赖操作系统自带的 `msi.dll` / `cabinet.dll`；这些组件归 Microsoft 所有，不受本项目许可证约束。
+本项目使用 Windows SDK 提供的头文件与导入库（`Msi.Lib`、`Cabinet.Lib` 等），运行时依赖操作系统自带的 `msi.dll` / `cabinet.dll` / `msxml6.dll`；这些组件归 Microsoft 所有，不受本项目许可证约束。
 
 ---
 

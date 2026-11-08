@@ -1,6 +1,7 @@
 #pragma once
 
 #include "util.h"
+#include "pack_xml.h"
 
 namespace pack {
 
@@ -49,11 +50,21 @@ struct Options {
     // "error": reject such files (old behaviour).
     std::wstring largeFiles = L"layout";
 
-    // "none" | "basic" | "minimal".
+    // "none" | "basic" | "minimal" | "wizard" | "custom".
     std::wstring ui = L"none";
+    std::wstring uiTemplate;       // --ui-template <msi>
+    std::wstring uiLocale;         // --ui-locale en|zh-CN
+    std::wstring dumpUiDir;        // --dump-ui <dir>
+
+    // In-memory manifest entries (GUI: shortcut editor / "create desktop
+    // shortcut" checkboxes). They are merged with --config / --manifest.
+    std::vector<ShortcutDef> shortcuts;
+    bool         desktopShortcut = false;
+    bool         startMenuShortcut = false;
+    std::wstring mainExe;
 
     // Optional manifest describing features / shortcuts / registry / services
-    // / environment variables / [pack] overrides. See README.md.
+    // / environment variables / UI / <pack> overrides. XML only.
     std::wstring configFile;
 
     // Optional Authenticode signing of the finished package.
@@ -63,12 +74,20 @@ struct Options {
     std::wstring signTool;         // explicit path to signtool.exe
 
     // True when the corresponding value came from the command line (manifest
-    // [pack] values are only defaults, never override explicit CLI options).
+    // values are only defaults, never override explicit CLI options).
     bool        uiSet = false;
     bool        largeFilesSet = false;
     bool        cabSizeSet = false;
     bool        signCertSet = false;
     bool        installDirSet = false;
+    bool        uiTemplateSet = false;
+    bool        productNameSet = false;
+    bool        versionSet = false;
+    bool        manufacturerSet = false;
+    bool        productCodeSet = false;
+    bool        upgradeCodeSet = false;
+    bool        platformSet = false;
+    bool        languageSet = false;
 };
 
 struct Stats {
@@ -83,6 +102,7 @@ struct Stats {
     size_t          services = 0;
     size_t          environment = 0;
     size_t          externalFiles = 0;
+    size_t          uiPages = 0;
     unsigned long long cabBytes = 0;
     unsigned long long msiBytes = 0;
     std::wstring    output;
@@ -92,5 +112,8 @@ struct Stats {
 // Packs a directory tree into a self-contained .msi (one or more embedded
 // CABs, plus an optional uncompressed companion tree for > 2 GiB files).
 Stats pack(const Options& opt);
+
+// "16", "16M", "512K", "1G" (1024 based) -> bytes.
+unsigned long long parseSize(const std::wstring& text);
 
 }  // namespace pack

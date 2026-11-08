@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="utf-8"?>
+<strings>
+  <string id="FontFace">Microsoft YaHei</string>
+  <string id="FontSize">9</string>
+  <string id="FontTitleSize">10</string>
+  <string id="FontBiggerSize">14</string>
+
+  <string id="SetupTitle">[ProductName] 安装程序</string>
+
+  <string id="WelcomeTitle">欢迎使用 [ProductName] 安装向导</string>
+  <string id="WelcomeDescription">安装向导将在您的计算机上安装 [ProductName] [ProductVersion]。单击“下一步”继续，或单击“取消”退出。</string>
+
+  <string id="LicenseTitle">最终用户许可协议</string>
+  <string id="LicenseDescription">请仔细阅读以下许可协议。</string>
+  <string id="LicenseAccept">我接受许可协议中的条款(&amp;A)</string>
+
+  <string id="InstallDirTitle">目标文件夹</string>
+  <string id="InstallDirDescription">单击“下一步”安装到默认文件夹，或单击“更改”选择其他文件夹。</string>
+  <string id="InstallDirFolderLabel">将 [ProductName] 安装到：</string>
+  <string id="Change">更改(&amp;C)...</string>
+
+  <string id="VerifyTitle">准备安装 [ProductName]</string>
+  <string id="VerifyText">单击“安装”开始安装。单击“上一步”查看或更改安装设置，或单击“取消”退出向导。</string>
+  <string id="Install">安装(&amp;I)</string>
+
+  <string id="Back">上一步(&amp;B)</string>
+  <string id="Next">下一步(&amp;N)</string>
+  <string id="Cancel">取消</string>
+  <string id="Finish">完成(&amp;F)</string>
+
+  <string id="ProgressTitle">正在安装 [ProductName]</string>
+  <string id="ProgressText">安装向导正在安装 [ProductName]，这可能需要几分钟时间，请稍候。</string>
+  <string id="Status">状态：</string>
+
+  <string id="ExitTitle">[ProductName] 安装向导已完成</string>
+  <string id="ExitText">单击“完成”按钮退出安装向导。</string>
+
+  <string id="UserExitTitle">[ProductName] 安装向导被中断</string>
+  <string id="UserExitText">您的系统尚未修改。如需稍后安装此程序，请重新运行安装程序。</string>
+
+  <string id="FatalTitle">[ProductName] 安装向导提前结束</string>
+  <string id="FatalText">由于发生错误，[ProductName] 安装未能完成。您的系统尚未修改。</string>
+
+  <string id="CancelText">确定要取消 [ProductName] 的安装吗？</string>
+  <string id="Yes">是(&amp;Y)</string>
+  <string id="No">否(&amp;N)</string>
+
+  <string id="MaintenanceWelcomeTitle">欢迎使用 [ProductName] 维护向导</string>
+  <string id="MaintenanceWelcomeDescription">此向导允许您修复或删除 [ProductName]。单击“下一步”继续，或单击“取消”退出。</string>
+  <string id="MaintenanceTypeTitle">修复或删除 [ProductName]</string>
+  <string id="MaintenanceTypeDescription">请选择要执行的操作。</string>
+  <string id="Repair">修复(&amp;P)</string>
+  <string id="RepairText">修复最近一次安装中的错误，包括缺失的文件和注册表项。</string>
+  <string id="Remove">删除(&amp;R)</string>
+  <string id="RemoveText">从您的计算机中删除 [ProductName]。</string>
+
+  <string id="BrowseTitle">更改目标文件夹</string>
+  <string id="BrowseText">浏览并选择目标文件夹。</string>
+  <string id="LookIn">查找范围(&amp;L)：</string>
+  <string id="Up">上一级(&amp;U)</string>
+  <string id="NewFolder">新建(&amp;N)</string>
+  <string id="FolderName">文件夹名称(&amp;F)：</string>
+  <string id="OK">确定</string>
+</strings>

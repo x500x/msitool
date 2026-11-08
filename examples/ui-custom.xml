@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Example: custom installer UI.
+
+  Starts from the built-in wizard (base="wizard") and only overrides the
+  welcome and finish texts, which is the common "replace a few strings"
+  case. Add <dialog> / <control> rows to replace more, or drop base to
+  author every dialog yourself.
+-->
+<msitool xmlns="https://msitool.dev/schema/pack/v1" minVersion="1">
+  <pack name="Custom UI Demo" version="1.0.0" manufacturer="Acme"
+        language="1033" ui="custom"/>
+
+  <ui base="wizard">
+    <dialog id="WelcomeDlg">
+      <control id="Description" type="Text"
+               text="This text comes from examples/ui-custom.xml. The rest of the wizard is the built-in layout."/>
+    </dialog>
+    <dialog id="ExitDialog">
+      <control id="Description" type="Text"
+               text="Custom UI Demo is ready. Thanks for trying msitool!"/>
+    </dialog>
+  </ui>
+</msitool>

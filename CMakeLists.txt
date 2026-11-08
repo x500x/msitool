@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(msitool LANGUAGES CXX)
+project(msitool LANGUAGES CXX RC)
 
 # MSVC / Windows SDK only: Msi.Lib (Windows Installer) and Cabinet.Lib (FDI).
 if(NOT MSVC)
@@ -19,9 +19,15 @@ add_executable(msitool WIN32
     src/cab.cpp
     src/extract.cpp
     src/pack.cpp
+    src/pack_util.cpp
+    src/xml.cpp
+    src/pack_xml.cpp
+    src/pack_ui.cpp
+    src/pack_ui_builtin.cpp
     src/ui_draw.cpp
     src/ui_widgets.cpp
     src/ui_app.cpp
+    resources/msitool.rc
 )
 
 target_include_directories(msitool PRIVATE src)
@@ -33,6 +39,8 @@ target_compile_options(msitool PRIVATE /utf-8 /W4 /EHsc /permissive-)
 target_link_libraries(msitool PRIVATE
     msi        # Msi.Lib      : MsiOpenDatabaseW / MsiDatabaseOpenViewW / ...
     cabinet    # Cabinet.Lib  : FDI (FDICopy) + FCI (FCIAddFile)
+    msxml6     # MSXML6       : pack manifest XML parser (system component)
+    oleaut32   # SysAllocString / VariantInit (MSXML BSTR / VARIANT)
     shell32    # CommandLineToArgvW / IFileDialog / ShellExecuteW
     ole32      # CoCreateGuid / OleInitialize / COM
     user32     # owner-drawn HWNDs, message loop, DPI

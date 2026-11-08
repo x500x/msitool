@@ -1,0 +1,321 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Editor schema for msitool XML manifests (https://msitool.dev/schema/pack/v1).
+  Validate with any XML Schema 1.0 validator; unknown elements / attributes
+  are rejected by the packer at load time as well.
+-->
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema"
+           targetNamespace="https://msitool.dev/schema/pack/v1"
+           xmlns="https://msitool.dev/schema/pack/v1"
+           elementFormDefault="qualified"
+           attributeFormDefault="unqualified">
+
+  <xs:element name="msitool">
+    <xs:complexType>
+      <xs:choice minOccurs="0" maxOccurs="unbounded">
+        <xs:element name="pack" type="packType"/>
+        <xs:element name="features" type="featuresType"/>
+        <xs:element name="shortcuts" type="shortcutsType"/>
+        <xs:element name="registry" type="registryType"/>
+        <xs:element name="services" type="servicesType"/>
+        <xs:element name="environment" type="environmentType"/>
+        <xs:element name="sign" type="signType"/>
+        <xs:element name="ui" type="uiType"/>
+      </xs:choice>
+      <xs:attribute name="minVersion" type="xs:integer"/>
+    </xs:complexType>
+  </xs:element>
+
+  <xs:complexType name="packType">
+    <xs:attribute name="name" type="xs:string"/>
+    <xs:attribute name="version" type="xs:string"/>
+    <xs:attribute name="manufacturer" type="xs:string"/>
+    <xs:attribute name="productCode" type="xs:string"/>
+    <xs:attribute name="upgradeCode" type="xs:string"/>
+    <xs:attribute name="platform" type="xs:string"/>
+    <xs:attribute name="language" type="xs:integer"/>
+    <xs:attribute name="installDir" type="xs:string"/>
+    <xs:attribute name="ui" type="xs:string"/>
+    <xs:attribute name="cabSize" type="xs:string"/>
+    <xs:attribute name="largeFiles" type="xs:string"/>
+    <xs:attribute name="keepEmptyDirs" type="xs:boolean"/>
+  </xs:complexType>
+
+  <xs:complexType name="featuresType">
+    <xs:sequence>
+      <xs:element name="feature" minOccurs="0" maxOccurs="unbounded" type="featureType"/>
+    </xs:sequence>
+  </xs:complexType>
+  <xs:complexType name="featureType">
+    <xs:attribute name="id" type="xs:string"/>
+    <xs:attribute name="title" type="xs:string"/>
+    <xs:attribute name="description" type="xs:string"/>
+    <xs:attribute name="dirs" type="xs:string"/>
+    <xs:attribute name="level" type="xs:integer"/>
+    <xs:attribute name="display" type="xs:integer"/>
+    <xs:attribute name="attributes" type="xs:integer"/>
+  </xs:complexType>
+
+  <xs:complexType name="shortcutsType">
+    <xs:sequence>
+      <xs:element name="shortcut" minOccurs="0" maxOccurs="unbounded" type="shortcutType"/>
+    </xs:sequence>
+  </xs:complexType>
+  <xs:complexType name="shortcutType">
+    <xs:sequence>
+      <xs:element name="msishortcutproperty" minOccurs="0" maxOccurs="unbounded"
+                  type="shortcutPropertyType"/>
+    </xs:sequence>
+    <xs:attribute name="id" type="xs:string"/>
+    <xs:attribute name="name" type="xs:string"/>
+    <xs:attribute name="directory" type="xs:string"/>
+    <xs:attribute name="dir" type="xs:string"/>
+    <xs:attribute name="target" type="xs:string"/>
+    <xs:attribute name="arguments" type="xs:string"/>
+    <xs:attribute name="args" type="xs:string"/>
+    <xs:attribute name="description" type="xs:string"/>
+    <xs:attribute name="icon" type="xs:string"/>
+    <xs:attribute name="iconIndex" type="xs:integer"/>
+    <xs:attribute name="workingDirectory" type="xs:string"/>
+    <xs:attribute name="wkdir" type="xs:string"/>
+    <xs:attribute name="component" type="xs:string"/>
+    <xs:attribute name="advertise" type="xs:boolean"/>
+  </xs:complexType>
+  <xs:complexType name="shortcutPropertyType">
+    <xs:attribute name="key" type="xs:string" use="required"/>
+    <xs:attribute name="value" type="xs:string"/>
+  </xs:complexType>
+
+  <xs:complexType name="registryType">
+    <xs:sequence>
+      <xs:element name="registryValue" minOccurs="0" maxOccurs="unbounded"
+                  type="registryValueType"/>
+    </xs:sequence>
+  </xs:complexType>
+  <xs:complexType name="registryValueType">
+    <xs:attribute name="id" type="xs:string"/>
+    <xs:attribute name="root" type="xs:string"/>
+    <xs:attribute name="key" type="xs:string" use="required"/>
+    <xs:attribute name="name" type="xs:string"/>
+    <xs:attribute name="value" type="xs:string"/>
+    <xs:attribute name="type" type="xs:string"/>
+    <xs:attribute name="component" type="xs:string"/>
+  </xs:complexType>
+
+  <xs:complexType name="servicesType">
+    <xs:sequence>
+      <xs:element name="service" minOccurs="0" maxOccurs="unbounded" type="serviceType"/>
+    </xs:sequence>
+  </xs:complexType>
+  <xs:complexType name="serviceType">
+    <xs:attribute name="id" type="xs:string"/>
+    <xs:attribute name="name" type="xs:string"/>
+    <xs:attribute name="displayName" type="xs:string"/>
+    <xs:attribute name="image" type="xs:string"/>
+    <xs:attribute name="type" type="xs:string"/>
+    <xs:attribute name="start" type="xs:string"/>
+    <xs:attribute name="error" type="xs:string"/>
+    <xs:attribute name="account" type="xs:string"/>
+    <xs:attribute name="password" type="xs:string"/>
+    <xs:attribute name="arguments" type="xs:string"/>
+    <xs:attribute name="dependencies" type="xs:string"/>
+    <xs:attribute name="description" type="xs:string"/>
+    <xs:attribute name="component" type="xs:string"/>
+  </xs:complexType>
+
+  <xs:complexType name="environmentType">
+    <xs:sequence>
+      <xs:element name="variable" minOccurs="0" maxOccurs="unbounded"
+                  type="environmentVariableType"/>
+    </xs:sequence>
+  </xs:complexType>
+  <xs:complexType name="environmentVariableType">
+    <xs:attribute name="id" type="xs:string"/>
+    <xs:attribute name="name" type="xs:string"/>
+    <xs:attribute name="value" type="xs:string"/>
+    <xs:attribute name="action" type="xs:string"/>
+    <xs:attribute name="separator" type="xs:string"/>
+    <xs:attribute name="system" type="xs:string"/>
+    <xs:attribute name="component" type="xs:string"/>
+  </xs:complexType>
+
+  <xs:complexType name="signType">
+    <xs:attribute name="cert" type="xs:string"/>
+    <xs:attribute name="password" type="xs:string"/>
+    <xs:attribute name="timestamp" type="xs:string"/>
+    <xs:attribute name="tool" type="xs:string"/>
+  </xs:complexType>
+
+  <xs:complexType name="uiType">
+    <xs:choice minOccurs="0" maxOccurs="unbounded">
+      <xs:element name="strings" type="stringsType"/>
+      <xs:element name="textstyle" type="textStyleType"/>
+      <xs:element name="binary" type="binaryType"/>
+      <xs:element name="checkbox" type="checkboxType"/>
+      <xs:element name="property" type="uiPropertyType"/>
+      <xs:element name="dialog" type="dialogType"/>
+      <xs:element name="error" type="errorType"/>
+      <xs:element name="billboard" type="billboardType"/>
+      <xs:element name="billboardaction" type="billboardActionType"/>
+      <xs:element name="uisequence" type="sequenceType"/>
+      <xs:element name="adminuisequence" type="sequenceType"/>
+    </xs:choice>
+    <xs:attribute name="base" type="xs:string"/>
+    <xs:attribute name="locale" type="xs:string"/>
+    <xs:attribute name="font" type="xs:string"/>
+    <xs:attribute name="template" type="xs:string"/>
+  </xs:complexType>
+
+  <xs:complexType name="stringsType">
+    <xs:sequence>
+      <xs:element name="string" minOccurs="0" maxOccurs="unbounded" type="stringType"/>
+    </xs:sequence>
+  </xs:complexType>
+  <xs:complexType name="stringType">
+    <xs:simpleContent>
+      <xs:extension base="xs:string">
+        <xs:attribute name="id" type="xs:string" use="required"/>
+      </xs:extension>
+    </xs:simpleContent>
+  </xs:complexType>
+
+  <xs:complexType name="textStyleType">
+    <xs:attribute name="id" type="xs:string" use="required"/>
+    <xs:attribute name="face" type="xs:string" use="required"/>
+    <xs:attribute name="size" type="xs:string"/>
+    <xs:attribute name="color" type="xs:integer"/>
+    <xs:attribute name="style" type="xs:integer"/>
+  </xs:complexType>
+
+  <xs:complexType name="binaryType">
+    <xs:attribute name="id" type="xs:string" use="required"/>
+    <xs:attribute name="file" type="xs:string" use="required"/>
+  </xs:complexType>
+
+  <xs:complexType name="checkboxType">
+    <xs:attribute name="property" type="xs:string"/>
+    <xs:attribute name="name" type="xs:string"/>
+    <xs:attribute name="value" type="xs:string"/>
+  </xs:complexType>
+
+  <xs:complexType name="uiPropertyType">
+    <xs:attribute name="name" type="xs:string" use="required"/>
+    <xs:attribute name="value" type="xs:string"/>
+  </xs:complexType>
+
+  <xs:complexType name="dialogType">
+    <xs:sequence>
+      <xs:element name="control" minOccurs="0" maxOccurs="unbounded" type="controlType"/>
+    </xs:sequence>
+    <xs:attribute name="id" type="xs:string" use="required"/>
+    <xs:attribute name="title" type="xs:string"/>
+    <xs:attribute name="width" type="xs:integer"/>
+    <xs:attribute name="height" type="xs:integer"/>
+    <xs:attribute name="attributes" type="xs:integer"/>
+    <xs:attribute name="modeless" type="xs:boolean"/>
+    <xs:attribute name="first" type="xs:string"/>
+    <xs:attribute name="default" type="xs:string"/>
+    <xs:attribute name="cancel" type="xs:string"/>
+    <xs:attribute name="sequence" type="xs:integer"/>
+    <xs:attribute name="condition" type="xs:string"/>
+  </xs:complexType>
+
+  <xs:complexType name="controlType">
+    <xs:choice minOccurs="0" maxOccurs="unbounded">
+      <xs:element name="publish" type="publishType"/>
+      <xs:element name="setproperty" type="setPropertyType"/>
+      <xs:element name="controlcondition" type="controlConditionType"/>
+      <xs:element name="item" type="itemType"/>
+    </xs:choice>
+    <xs:attribute name="id" type="xs:string" use="required"/>
+    <xs:attribute name="type" type="xs:string" use="required"/>
+    <xs:attribute name="x" type="xs:integer"/>
+    <xs:attribute name="y" type="xs:integer"/>
+    <xs:attribute name="width" type="xs:integer"/>
+    <xs:attribute name="height" type="xs:integer"/>
+    <xs:attribute name="attributes" type="xs:integer"/>
+    <xs:attribute name="visible" type="xs:boolean"/>
+    <xs:attribute name="enabled" type="xs:boolean"/>
+    <xs:attribute name="sunken" type="xs:boolean"/>
+    <xs:attribute name="indirect" type="xs:boolean"/>
+    <xs:attribute name="property" type="xs:string"/>
+    <xs:attribute name="text" type="xs:string"/>
+    <xs:attribute name="textFile" type="xs:string"/>
+    <xs:attribute name="binary" type="xs:string"/>
+    <xs:attribute name="next" type="xs:string"/>
+    <xs:attribute name="help" type="xs:string"/>
+  </xs:complexType>
+
+  <xs:complexType name="publishType">
+    <xs:attribute name="event" type="xs:string" use="required"/>
+    <xs:attribute name="value" type="xs:string"/>
+    <xs:attribute name="argument" type="xs:string"/>
+    <xs:attribute name="condition" type="xs:string"/>
+    <xs:attribute name="order" type="xs:integer"/>
+  </xs:complexType>
+
+  <xs:complexType name="setPropertyType">
+    <xs:attribute name="name" type="xs:string" use="required"/>
+    <xs:attribute name="value" type="xs:string"/>
+    <xs:attribute name="condition" type="xs:string"/>
+    <xs:attribute name="order" type="xs:integer"/>
+  </xs:complexType>
+
+  <xs:complexType name="controlConditionType">
+    <xs:attribute name="action" type="xs:string" use="required"/>
+    <xs:attribute name="condition" type="xs:string" use="required"/>
+  </xs:complexType>
+
+  <xs:complexType name="itemType">
+    <xs:attribute name="value" type="xs:string" use="required"/>
+    <xs:attribute name="text" type="xs:string"/>
+    <xs:attribute name="help" type="xs:string"/>
+  </xs:complexType>
+
+  <xs:complexType name="errorType">
+    <xs:attribute name="id" type="xs:integer" use="required"/>
+    <xs:attribute name="text" type="xs:string"/>
+  </xs:complexType>
+
+  <xs:complexType name="billboardType">
+    <xs:sequence>
+      <xs:element name="control" minOccurs="0" maxOccurs="unbounded"
+                  type="billboardControlType"/>
+    </xs:sequence>
+    <xs:attribute name="id" type="xs:string" use="required"/>
+    <xs:attribute name="feature" type="xs:string"/>
+    <xs:attribute name="action" type="xs:string"/>
+    <xs:attribute name="ordering" type="xs:integer"/>
+  </xs:complexType>
+
+  <xs:complexType name="billboardActionType">
+    <xs:sequence>
+      <xs:element name="billboard" minOccurs="1" maxOccurs="unbounded" type="billboardType"/>
+    </xs:sequence>
+    <xs:attribute name="id" type="xs:string" use="required"/>
+  </xs:complexType>
+
+  <xs:complexType name="billboardControlType">
+    <xs:attribute name="id" type="xs:string" use="required"/>
+    <xs:attribute name="type" type="xs:string" use="required"/>
+    <xs:attribute name="x" type="xs:integer"/>
+    <xs:attribute name="y" type="xs:integer"/>
+    <xs:attribute name="width" type="xs:integer"/>
+    <xs:attribute name="height" type="xs:integer"/>
+    <xs:attribute name="attributes" type="xs:integer"/>
+    <xs:attribute name="text" type="xs:string"/>
+  </xs:complexType>
+
+  <xs:complexType name="sequenceType">
+    <xs:sequence>
+      <xs:element name="action" minOccurs="0" maxOccurs="unbounded" type="sequenceActionType"/>
+    </xs:sequence>
+  </xs:complexType>
+  <xs:complexType name="sequenceActionType">
+    <xs:attribute name="name" type="xs:string" use="required"/>
+    <xs:attribute name="value" type="xs:integer"/>
+    <xs:attribute name="sequence" type="xs:integer"/>
+    <xs:attribute name="condition" type="xs:string"/>
+  </xs:complexType>
+
+</xs:schema>

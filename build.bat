@@ -84,12 +84,20 @@ set "MACHINE=X64"
 if /I "%ARCH%"=="x86" set "MACHINE=X86"
 
 echo Building msitool ^(%ARCH%^) ...
+rc /nologo /fo build\obj\%ARCH%\msitool.res resources\msitool.rc
+if errorlevel 1 (
+    echo [!] Resource compilation FAILED.
+    exit /b 1
+)
 cl /nologo /std:c++17 /EHsc /W4 /O2 /utf-8 ^
    /DUNICODE /D_UNICODE /D_CRT_SECURE_NO_WARNINGS ^
    /Isrc /Fobuild\obj\%ARCH%\ /Febuild\msitool_%ARCH%.exe ^
-   src\util.cpp src\msidb.cpp src\cab.cpp src\extract.cpp src\pack.cpp src\main.cpp ^
+   src\util.cpp src\msidb.cpp src\cab.cpp src\extract.cpp ^
+   src\pack.cpp src\pack_util.cpp src\xml.cpp src\pack_xml.cpp ^
+   src\pack_ui.cpp src\pack_ui_builtin.cpp src\main.cpp ^
    src\ui_draw.cpp src\ui_widgets.cpp src\ui_app.cpp ^
-   Msi.Lib Cabinet.Lib Shell32.Lib Ole32.Lib User32.Lib Gdi32.Lib Advapi32.Lib Comdlg32.Lib Uuid.Lib ^
+   build\obj\%ARCH%\msitool.res ^
+   Msi.Lib Cabinet.Lib Msxml6.Lib OleAut32.Lib Shell32.Lib Ole32.Lib User32.Lib Gdi32.Lib Advapi32.Lib Comdlg32.Lib Uuid.Lib ^
    /link /MACHINE:%MACHINE% /SUBSYSTEM:WINDOWS
 if errorlevel 1 (
     echo [!] Build FAILED.

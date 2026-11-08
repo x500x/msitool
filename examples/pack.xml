@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  msitool pack manifest (XML only).
+
+    msitool pack .\payload app.msi  (plus the config option, see README)
+
+  Long options on the command line use two leading dashes; XML comments may
+  not contain two dashes in a row, so they are spelled out here in prose.
+  Relative payload paths (feature dirs, shortcut target/icon, service image)
+  are resolved against the source directory. Resource files (binary, sign
+  cert, UI template) are resolved against this file's directory.
+-->
+<msitool xmlns="https://msitool.dev/schema/pack/v1" minVersion="1">
+
+  <pack name="My App" version="1.2.3" manufacturer="Acme" platform="x64"
+        language="1033" ui="wizard" cabSize="16M" largeFiles="layout"
+        keepEmptyDirs="true"/>
+
+  <features>
+    <feature id="Core" title="Core files" description="The application binaries" dirs="bin" level="1"/>
+    <feature id="Extras" title="Extras" description="Documentation and samples" dirs="docs; samples" level="1"/>
+  </features>
+
+  <shortcuts>
+    <shortcut id="StartMenu" name="My App.lnk"
+              directory="ProgramMenuFolder\Acme\My App"
+              target="bin\app.exe" arguments="--start"
+              description="Launch My App" icon="bin\app.exe"
+              workingDirectory="INSTALLFOLDER"/>
+    <shortcut id="Desktop" name="My App.lnk" directory="desktop"
+              target="bin\app.exe" description="Launch My App"
+              icon="bin\app.exe"/>
+  </shortcuts>
+
+  <registry>
+    <registryValue id="Version" root="HKLM" key="Software\Acme\MyApp"
+                   name="Version" value="[ProductVersion]" type="string"/>
+    <registryValue id="Enabled" root="HKCU" key="Software\Acme\MyApp"
+                   name="Enabled" value="1" type="integer"/>
+  </registry>
+
+  <services>
+    <service id="MyService" name="MyService" displayName="My Service"
+             image="bin\app.exe" type="own" start="demand" error="normal"
+             description="Installed by msitool"/>
+  </services>
+
+  <environment>
+    <variable id="PathEntry" name="PATH" value="[INSTALLFOLDER]bin"
+              action="append" separator=";" system="no"/>
+  </environment>
+
+</msitool>

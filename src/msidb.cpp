@@ -11,15 +11,19 @@ namespace {
 constexpr UINT kStreamChunk = 64 * 1024;
 
 std::wstring recordString(MSIHANDLE rec, unsigned field) {
-    DWORD len = 512;
-    std::vector<wchar_t> buf(static_cast<size_t>(len) + 2, L'\0');
-    UINT rc = MsiRecordGetStringW(rec, field, buf.data(), &len);
-    if (rc == ERROR_MORE_DATA) {
-        buf.assign(static_cast<size_t>(len) + 2, L'\0');
-        rc = MsiRecordGetStringW(rec, field, buf.data(), &len);
+    // MsiRecordGetStringW reports the required size on ERROR_MORE_DATA; grow
+    // until it fits. LONGCHAR values (UI text, Property.Value, ...) easily
+    // exceed the initial 512 characters.
+    DWORD cap = 512;
+    for (int attempt = 0; attempt < 8; ++attempt) {
+        std::vector<wchar_t> buf(static_cast<size_t>(cap) + 2, L'\0');
+        DWORD len = cap;
+        UINT rc = MsiRecordGetStringW(rec, field, buf.data(), &len);
+        if (rc == ERROR_SUCCESS) return std::wstring(buf.data());
+        if (rc != ERROR_MORE_DATA) return L"";
+        cap = len + 1;
     }
-    if (rc != ERROR_SUCCESS) return L"";
-    return std::wstring(buf.data());
+    return L"";
 }
 
 std::wstring renderField(MSIHANDLE rec, unsigned field, const std::wstring& type) {
@@ -38,14 +42,8 @@ std::wstring renderField(MSIHANDLE rec, unsigned field, const std::wstring& type
     }
 
     // Strings first; MSI returns an error for integer fields, so fall back.
-    DWORD len = 512;
-    std::vector<wchar_t> buf(static_cast<size_t>(len) + 2, L'\0');
-    UINT rc = MsiRecordGetStringW(rec, field, buf.data(), &len);
-    if (rc == ERROR_MORE_DATA) {
-        buf.assign(static_cast<size_t>(len) + 2, L'\0');
-        rc = MsiRecordGetStringW(rec, field, buf.data(), &len);
-    }
-    if (rc == ERROR_SUCCESS) return std::wstring(buf.data());
+    std::wstring str = recordString(rec, field);
+    if (!str.empty()) return str;
 
     int v = MsiRecordGetInteger(rec, field);
     if (v != static_cast<int>(MSI_NULL_INTEGER)) return std::to_wstring(v);

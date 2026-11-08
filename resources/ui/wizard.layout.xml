@@ -1,0 +1,346 @@
+<?xml version="1.0" encoding="utf-8"?>
+<msitool xmlns="https://msitool.dev/schema/pack/v1">
+  <ui base="wizard" font="DlgFont8">
+
+    <textstyle id="DlgFont8"      face="$(FontFace)" size="$(FontSize)"       color="0"/>
+    <textstyle id="DlgFontTitle"  face="$(FontFace)" size="$(FontTitleSize)"  color="0" style="1"/>
+    <textstyle id="DlgFontBigger" face="$(FontFace)" size="$(FontBiggerSize)" color="0"/>
+
+    <binary id="UiBanner"     file="banner.bmp"/>
+    <binary id="UiBackground" file="background.bmp"/>
+
+    <property name="WIXUI_INSTALLDIR" value="INSTALLFOLDER"/>
+    <checkbox property="LicenseAccepted" value="1"/>
+
+    <!-- Welcome  -->
+    <dialog id="WelcomeDlg" title="$(SetupTitle)" width="370" height="270"
+            first="Next" default="Next" cancel="Cancel">
+      <control id="Bitmap" type="Bitmap" x="0" y="0" width="370" height="234"
+               attributes="1" binary="UiBackground"/>
+      <control id="BottomLine" type="Line" x="0" y="234" width="370" height="0"
+               attributes="1"/>
+      <control id="Title" type="Text" x="135" y="20" width="220" height="60"
+               attributes="196611" text="{\DlgFontBigger}$(WelcomeTitle)"/>
+      <control id="Description" type="Text" x="135" y="80" width="220" height="60"
+               attributes="196611" text="$(WelcomeDescription)"/>
+      <control id="Next" type="PushButton" x="236" y="243" width="56" height="17"
+               attributes="3" text="$(Next)" next="Cancel">
+        <publish event="NewDialog" value="LicenseAgreementDlg"/>
+      </control>
+      <control id="Cancel" type="PushButton" x="304" y="243" width="56" height="17"
+               attributes="3" text="$(Cancel)" next="Next">
+        <publish event="SpawnDialog" value="CancelDlg"/>
+      </control>
+    </dialog>
+
+    <!-- License  -->
+    <dialog id="LicenseAgreementDlg" title="$(SetupTitle)" width="370" height="270"
+            first="Next" default="Next" cancel="Cancel">
+      <control id="BannerBitmap" type="Bitmap" x="0" y="0" width="370" height="44"
+               attributes="1" binary="UiBanner"/>
+      <control id="BannerLine" type="Line" x="0" y="44" width="370" height="0"
+               attributes="1"/>
+      <control id="BottomLine" type="Line" x="0" y="234" width="370" height="0"
+               attributes="1"/>
+      <control id="Title" type="Text" x="15" y="6" width="340" height="15"
+               attributes="196611" text="{\DlgFontTitle}$(LicenseTitle)"/>
+      <control id="Description" type="Text" x="25" y="23" width="340" height="15"
+               attributes="196611" text="$(LicenseDescription)"/>
+      <control id="LicenseText" type="ScrollableText" x="20" y="60" width="330"
+               height="140" attributes="7" textFile="license.rtf"/>
+      <control id="LicenseAccepted" type="CheckBox" x="20" y="207" width="330"
+               height="18" attributes="3" property="LicenseAccepted"
+               text="$(LicenseAccept)" next="Back"/>
+      <control id="Back" type="PushButton" x="180" y="243" width="56" height="17"
+               attributes="3" text="$(Back)" next="Next">
+        <publish event="NewDialog" value="WelcomeDlg"/>
+      </control>
+      <control id="Next" type="PushButton" x="236" y="243" width="56" height="17"
+               attributes="3" text="$(Next)" next="Cancel">
+        <controlcondition action="disable" condition="LicenseAccepted &lt;&gt; &quot;1&quot;"/>
+        <controlcondition action="enable" condition="LicenseAccepted = &quot;1&quot;"/>
+        <publish event="NewDialog" value="InstallDirDlg"/>
+      </control>
+      <control id="Cancel" type="PushButton" x="304" y="243" width="56" height="17"
+               attributes="3" text="$(Cancel)" next="LicenseAccepted">
+        <publish event="SpawnDialog" value="CancelDlg"/>
+      </control>
+    </dialog>
+
+    <!-- Destination folder  -->
+    <dialog id="InstallDirDlg" title="$(SetupTitle)" width="370" height="270"
+            first="Next" default="Next" cancel="Cancel">
+      <control id="BannerBitmap" type="Bitmap" x="0" y="0" width="370" height="44"
+               attributes="1" binary="UiBanner"/>
+      <control id="BannerLine" type="Line" x="0" y="44" width="370" height="0"
+               attributes="1"/>
+      <control id="BottomLine" type="Line" x="0" y="234" width="370" height="0"
+               attributes="1"/>
+      <control id="Title" type="Text" x="15" y="6" width="340" height="15"
+               attributes="196611" text="{\DlgFontTitle}$(InstallDirTitle)"/>
+      <control id="Description" type="Text" x="25" y="23" width="340" height="30"
+               attributes="196611" text="$(InstallDirDescription)"/>
+      <control id="FolderLabel" type="Text" x="20" y="70" width="320" height="20"
+               attributes="196611" text="$(InstallDirFolderLabel)"/>
+      <control id="Folder" type="PathEdit" x="20" y="95" width="320" height="18"
+               attributes="11" property="WIXUI_INSTALLDIR" indirect="true"
+               next="ChangeFolder"/>
+      <control id="ChangeFolder" type="PushButton" x="20" y="118" width="80"
+               height="17" attributes="3" text="$(Change)" next="Back">
+        <setproperty name="_BrowseProperty" value="[WIXUI_INSTALLDIR]"/>
+        <publish event="SpawnDialog" value="BrowseDlg"/>
+      </control>
+      <control id="Back" type="PushButton" x="180" y="243" width="56" height="17"
+               attributes="3" text="$(Back)" next="Next">
+        <publish event="NewDialog" value="LicenseAgreementDlg"/>
+      </control>
+      <control id="Next" type="PushButton" x="236" y="243" width="56" height="17"
+               attributes="3" text="$(Next)" next="Cancel">
+        <publish event="SetTargetPath" value="[WIXUI_INSTALLDIR]" order="1"/>
+        <publish event="NewDialog" value="VerifyReadyDlg" order="2"/>
+      </control>
+      <control id="Cancel" type="PushButton" x="304" y="243" width="56" height="17"
+               attributes="3" text="$(Cancel)" next="Folder">
+        <publish event="SpawnDialog" value="CancelDlg"/>
+      </control>
+    </dialog>
+
+    <!-- Folder browser  -->
+    <dialog id="BrowseDlg" title="$(SetupTitle)" width="370" height="270"
+            first="PathEdit" default="OK" cancel="Cancel">
+      <control id="BannerBitmap" type="Bitmap" x="0" y="0" width="370" height="44"
+               attributes="1" binary="UiBanner"/>
+      <control id="BannerLine" type="Line" x="0" y="44" width="370" height="0"
+               attributes="1"/>
+      <control id="BottomLine" type="Line" x="0" y="234" width="370" height="0"
+               attributes="1"/>
+      <control id="Title" type="Text" x="15" y="6" width="340" height="15"
+               attributes="196611" text="{\DlgFontTitle}$(BrowseTitle)"/>
+      <control id="Description" type="Text" x="25" y="23" width="340" height="15"
+               attributes="196611" text="$(BrowseText)"/>
+      <control id="ComboLabel" type="Text" x="25" y="55" width="42" height="10"
+               attributes="3" text="$(LookIn)" next="DirectoryCombo"/>
+      <control id="DirectoryCombo" type="DirectoryCombo" x="70" y="55" width="220"
+               height="18" attributes="393227" property="_BrowseProperty"
+               indirect="true" next="Up"/>
+      <control id="Up" type="PushButton" x="296" y="55" width="56" height="17"
+               attributes="3" text="$(Up)" next="NewFolder">
+        <publish event="DirectoryListUp" value="0"/>
+      </control>
+      <control id="NewFolder" type="PushButton" x="296" y="75" width="56"
+               height="17" attributes="3" text="$(NewFolder)" next="DirectoryList">
+        <publish event="DirectoryListNew" value="0"/>
+      </control>
+      <control id="DirectoryList" type="DirectoryList" x="25" y="95" width="320"
+               height="86" attributes="15" property="_BrowseProperty"
+               indirect="true" next="PathEdit"/>
+      <control id="PathLabel" type="Text" x="25" y="188" width="320" height="10"
+               attributes="3" text="$(FolderName)"/>
+      <control id="PathEdit" type="PathEdit" x="25" y="200" width="320" height="18"
+               attributes="11" property="_BrowseProperty" indirect="true"
+               next="OK"/>
+      <control id="OK" type="PushButton" x="240" y="243" width="56" height="17"
+               attributes="3" text="$(OK)" next="Cancel">
+        <publish event="SetTargetPath" value="[_BrowseProperty]" order="1"/>
+        <publish event="EndDialog" value="Return" order="2"/>
+      </control>
+      <control id="Cancel" type="PushButton" x="304" y="243" width="56" height="17"
+               attributes="3" text="$(Cancel)" next="ComboLabel">
+        <publish event="EndDialog" value="Return"/>
+      </control>
+    </dialog>
+
+    <!-- Ready to install  -->
+    <dialog id="VerifyReadyDlg" title="$(SetupTitle)" width="370" height="270"
+            first="Install" default="Install" cancel="Cancel">
+      <control id="BannerBitmap" type="Bitmap" x="0" y="0" width="370" height="44"
+               attributes="1" binary="UiBanner"/>
+      <control id="BannerLine" type="Line" x="0" y="44" width="370" height="0"
+               attributes="1"/>
+      <control id="BottomLine" type="Line" x="0" y="234" width="370" height="0"
+               attributes="1"/>
+      <control id="Title" type="Text" x="15" y="6" width="340" height="15"
+               attributes="196611" text="{\DlgFontTitle}$(VerifyTitle)"/>
+      <control id="Description" type="Text" x="25" y="23" width="340" height="30"
+               attributes="196611" text="$(VerifyText)"/>
+      <control id="Install" type="PushButton" x="212" y="243" width="80"
+               height="17" attributes="3" text="$(Install)" next="Back">
+        <publish event="EndDialog" value="Return"/>
+      </control>
+      <control id="Back" type="PushButton" x="156" y="243" width="56" height="17"
+               attributes="3" text="$(Back)" next="Cancel">
+        <publish event="NewDialog" value="InstallDirDlg" condition="NOT Installed"/>
+        <publish event="NewDialog" value="MaintenanceTypeDlg" condition="Installed"/>
+      </control>
+      <control id="Cancel" type="PushButton" x="304" y="243" width="56" height="17"
+               attributes="3" text="$(Cancel)" next="Install">
+        <publish event="SpawnDialog" value="CancelDlg"/>
+      </control>
+    </dialog>
+
+    <!-- Progress  -->
+    <dialog id="ProgressDlg" title="$(SetupTitle)" width="370" height="270"
+            modeless="true" first="Cancel" default="Cancel" cancel="Cancel">
+      <control id="BannerBitmap" type="Bitmap" x="0" y="0" width="370" height="44"
+               attributes="1" binary="UiBanner"/>
+      <control id="BannerLine" type="Line" x="0" y="44" width="370" height="0"
+               attributes="1"/>
+      <control id="BottomLine" type="Line" x="0" y="234" width="370" height="0"
+               attributes="1"/>
+      <control id="Title" type="Text" x="20" y="15" width="330" height="15"
+               attributes="196611" text="{\DlgFontTitle}$(ProgressTitle)"
+               next="Description"/>
+      <control id="Description" type="Text" x="20" y="55" width="330" height="35"
+               attributes="196611" text="$(ProgressText)" next="Cancel"/>
+      <control id="StatusLabel" type="Text" x="20" y="100" width="48" height="10"
+               attributes="3" text="$(Status)"/>
+      <control id="ActionText" type="Text" x="70" y="100" width="285" height="10"
+               attributes="3" text=""/>
+      <control id="ProgressBar" type="ProgressBar" x="20" y="115" width="330"
+               height="10" attributes="65537" text="Progress done"/>
+      <control id="Cancel" type="PushButton" x="304" y="243" width="56" height="17"
+               attributes="3" text="$(Cancel)" next="Title">
+        <publish event="SpawnDialog" value="CancelDlg"/>
+      </control>
+    </dialog>
+
+    <!-- Exit pages  -->
+    <dialog id="ExitDialog" title="$(SetupTitle)" width="370" height="270"
+            first="Finish" default="Finish" cancel="Finish">
+      <control id="Bitmap" type="Bitmap" x="0" y="0" width="370" height="234"
+               attributes="1" binary="UiBackground"/>
+      <control id="BottomLine" type="Line" x="0" y="234" width="370" height="0"
+               attributes="1"/>
+      <control id="Title" type="Text" x="135" y="20" width="220" height="60"
+               attributes="196611" text="{\DlgFontBigger}$(ExitTitle)"
+               next="Description"/>
+      <control id="Description" type="Text" x="135" y="80" width="220" height="60"
+               attributes="196611" text="$(ExitText)" next="Finish"/>
+      <control id="Finish" type="PushButton" x="236" y="243" width="56" height="17"
+               attributes="3" text="$(Finish)" next="Title">
+        <publish event="EndDialog" value="Return"/>
+      </control>
+    </dialog>
+
+    <dialog id="UserExit" title="$(SetupTitle)" width="370" height="270"
+            first="Finish" default="Finish" cancel="Finish">
+      <control id="Bitmap" type="Bitmap" x="0" y="0" width="370" height="234"
+               attributes="1" binary="UiBackground"/>
+      <control id="BottomLine" type="Line" x="0" y="234" width="370" height="0"
+               attributes="1"/>
+      <control id="Title" type="Text" x="135" y="20" width="220" height="60"
+               attributes="196611" text="{\DlgFontBigger}$(UserExitTitle)"
+               next="Description"/>
+      <control id="Description" type="Text" x="135" y="80" width="220" height="60"
+               attributes="196611" text="$(UserExitText)" next="Finish"/>
+      <control id="Finish" type="PushButton" x="236" y="243" width="56" height="17"
+               attributes="3" text="$(Finish)" next="Title">
+        <publish event="EndDialog" value="Exit"/>
+      </control>
+    </dialog>
+
+    <dialog id="FatalError" title="$(SetupTitle)" width="370" height="270"
+            first="Finish" default="Finish" cancel="Finish">
+      <control id="Bitmap" type="Bitmap" x="0" y="0" width="370" height="234"
+               attributes="1" binary="UiBackground"/>
+      <control id="BottomLine" type="Line" x="0" y="234" width="370" height="0"
+               attributes="1"/>
+      <control id="Title" type="Text" x="135" y="20" width="220" height="60"
+               attributes="196611" text="{\DlgFontBigger}$(FatalTitle)"
+               next="Description"/>
+      <control id="Description" type="Text" x="135" y="80" width="220" height="60"
+               attributes="196611" text="$(FatalText)" next="Finish"/>
+      <control id="Finish" type="PushButton" x="236" y="243" width="56" height="17"
+               attributes="3" text="$(Finish)" next="Title">
+        <publish event="EndDialog" value="Exit"/>
+      </control>
+    </dialog>
+
+    <!-- Cancel confirmation  -->
+    <dialog id="CancelDlg" title="$(SetupTitle)" width="260" height="85"
+            first="No" default="No" cancel="No">
+      <control id="Text" type="Text" x="20" y="15" width="220" height="30"
+               attributes="196611" text="$(CancelText)"/>
+      <control id="No" type="PushButton" x="132" y="57" width="56" height="17"
+               attributes="3" text="$(No)" next="Yes">
+        <publish event="EndDialog" value="Return"/>
+      </control>
+      <control id="Yes" type="PushButton" x="72" y="57" width="56" height="17"
+               attributes="3" text="$(Yes)" next="No">
+        <publish event="EndDialog" value="Exit"/>
+      </control>
+    </dialog>
+
+    <!-- Maintenance  -->
+    <dialog id="MaintenanceWelcomeDlg" title="$(SetupTitle)" width="370" height="270"
+            first="Next" default="Next" cancel="Cancel">
+      <control id="Bitmap" type="Bitmap" x="0" y="0" width="370" height="234"
+               attributes="1" binary="UiBackground"/>
+      <control id="BottomLine" type="Line" x="0" y="234" width="370" height="0"
+               attributes="1"/>
+      <control id="Title" type="Text" x="135" y="20" width="220" height="60"
+               attributes="196611" text="{\DlgFontBigger}$(MaintenanceWelcomeTitle)"/>
+      <control id="Description" type="Text" x="135" y="80" width="220" height="60"
+               attributes="196611" text="$(MaintenanceWelcomeDescription)"/>
+      <control id="Next" type="PushButton" x="236" y="243" width="56" height="17"
+               attributes="3" text="$(Next)" next="Cancel">
+        <publish event="NewDialog" value="MaintenanceTypeDlg"/>
+      </control>
+      <control id="Cancel" type="PushButton" x="304" y="243" width="56" height="17"
+               attributes="3" text="$(Cancel)" next="Next">
+        <publish event="SpawnDialog" value="CancelDlg"/>
+      </control>
+    </dialog>
+
+    <dialog id="MaintenanceTypeDlg" title="$(SetupTitle)" width="370" height="270"
+            first="RepairButton" default="RepairButton" cancel="Cancel">
+      <control id="BannerBitmap" type="Bitmap" x="0" y="0" width="370" height="44"
+               attributes="1" binary="UiBanner"/>
+      <control id="BannerLine" type="Line" x="0" y="44" width="370" height="0"
+               attributes="1"/>
+      <control id="BottomLine" type="Line" x="0" y="234" width="370" height="0"
+               attributes="1"/>
+      <control id="Title" type="Text" x="15" y="6" width="340" height="15"
+               attributes="196611" text="{\DlgFontTitle}$(MaintenanceTypeTitle)"/>
+      <control id="Description" type="Text" x="25" y="23" width="340" height="20"
+               attributes="196611" text="$(MaintenanceTypeDescription)"/>
+      <control id="RepairButton" type="PushButton" x="40" y="90" width="80"
+               height="17" attributes="3" text="$(Repair)" next="RemoveButton">
+        <publish event="Reinstall" value="All" order="1"/>
+        <publish event="ReinstallMode" value="ecmus" order="2"/>
+        <publish event="NewDialog" value="VerifyReadyDlg" order="3"/>
+      </control>
+      <control id="RepairText" type="Text" x="130" y="90" width="210" height="30"
+               attributes="196611" text="$(RepairText)"/>
+      <control id="RemoveButton" type="PushButton" x="40" y="150" width="80"
+               height="17" attributes="3" text="$(Remove)" next="Back">
+        <publish event="Remove" value="All" order="1"/>
+        <publish event="NewDialog" value="VerifyReadyDlg" order="2"/>
+      </control>
+      <control id="RemoveText" type="Text" x="130" y="150" width="210" height="30"
+               attributes="196611" text="$(RemoveText)"/>
+      <control id="Back" type="PushButton" x="180" y="243" width="56" height="17"
+               attributes="3" text="$(Back)" next="Cancel">
+        <publish event="NewDialog" value="MaintenanceWelcomeDlg"/>
+      </control>
+      <control id="Cancel" type="PushButton" x="304" y="243" width="56" height="17"
+               attributes="3" text="$(Cancel)" next="RepairButton">
+        <publish event="SpawnDialog" value="CancelDlg"/>
+      </control>
+    </dialog>
+
+    <uisequence>
+      <action name="CostInitialize" value="800"/>
+      <action name="FileCost" value="900"/>
+      <action name="CostFinalize" value="1000"/>
+      <action name="MaintenanceWelcomeDlg" value="1250" condition="Installed"/>
+      <action name="WelcomeDlg" value="1290" condition="NOT Installed"/>
+      <action name="ProgressDlg" value="1299"/>
+      <action name="ExecuteAction" value="1300"/>
+      <action name="ExitDialog" value="-1"/>
+      <action name="UserExit" value="-2"/>
+      <action name="FatalError" value="-3"/>
+    </uisequence>
+
+  </ui>
+</msitool>

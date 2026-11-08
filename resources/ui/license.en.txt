@@ -1,0 +1,17 @@
+END-USER LICENSE AGREEMENT (SAMPLE)
+
+This is a sample agreement shipped with the built-in installer wizard of msitool.
+Replace resources/ui/license.en.rtf with your own agreement before shipping a product.
+
+1. Grant of license
+   You may install and use this software for the purpose described in its documentation.
+
+2. Ownership
+   The software is licensed, not sold. All rights remain with the copyright holder.
+
+3. No warranty
+   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED.
+
+4. Limitation of liability
+   In no event shall the author be liable for any claim, damages or other liability
+   arising from the use of the software.

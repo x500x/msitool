@@ -3,6 +3,7 @@
 #include "msidb.h"
 #include "extract.h"
 #include "pack.h"
+#include "pack_util.h"
 
 #include <objbase.h>
 #include <shobjidl_core.h>
@@ -340,7 +341,8 @@ enum DropKind {
     DkNone = 0,
     DkSourceDir,    // pack: source directory
     DkOutputMsi,    // pack: output .msi path
-    DkManifest,     // pack: pack.ini manifest
+    DkManifest,     // pack: XML manifest
+    DkUiTemplate,   // pack: UI template .msi
     DkCert,         // pack: .pfx signing certificate
     DkOutDir,       // extract / export: destination directory
     DkPackage,      // open an .msi / .msp (not used as a fallback any more)
@@ -610,6 +612,7 @@ public:
     Button* btnTabBasic_ = nullptr;
     Button* btnTabAdvanced_ = nullptr;
     Button* btnTabSign_ = nullptr;
+    Button* btnTabShortcut_ = nullptr;
     TextBox* tbSrcDir_ = nullptr;      Button* btnSrcBrowse_ = nullptr;
     TextBox* tbOutMsi_ = nullptr;      Button* btnOutMsiBrowse_ = nullptr;
     TextBox* tbName_ = nullptr;
@@ -619,6 +622,8 @@ public:
     DropDown* ddPlatform_ = nullptr;
     TextBox* tbLanguage_ = nullptr;
     DropDown* ddUi_ = nullptr;
+    TextBox* tbUiTemplate_ = nullptr;  Button* btnUiTemplateBrowse_ = nullptr;
+    TextBox* tbUiLocale_ = nullptr;
     TextBox* tbCabSize_ = nullptr;
     TextBox* tbConfig_ = nullptr;      Button* btnConfigBrowse_ = nullptr;
     DropDown* ddLargeFiles_ = nullptr;
@@ -629,6 +634,10 @@ public:
     Check* chkPackDry_ = nullptr;
     Check* chkPackVerbose_ = nullptr;
     Check* chkEmptyDirs_ = nullptr;
+    Check* chkDesktopShortcut_ = nullptr;
+    Check* chkStartMenuShortcut_ = nullptr;
+    TextBox* tbMainExe_ = nullptr;
+    TextBox* tbShortcuts_ = nullptr;
     Button* btnPack_ = nullptr;
     // drag & drop -----------------------------------------------------------
     // The pack form is split over three tabs, so the drop targets are
@@ -1113,6 +1122,8 @@ public:
                                      [this] { setPackTab(1); });
         btnTabSign_ = makeButton(PgPack, L"签名", Ic::Shield, false,
                                  [this] { setPackTab(2); });
+        btnTabShortcut_ = makeButton(PgPack, L"快捷方式", Ic::Bolt, false,
+                                     [this] { setPackTab(3); });
         btnTabBasic_->accent = true;
 
         tbSrcDir_ = makeText(PgPack, L"要打包的源目录");
@@ -1133,12 +1144,19 @@ public:
         tbLanguage_ = makeText(PgPack, L"1033");
         tbLanguage_->setValue(L"1033");
         ddUi_ = add<DropDown>(PgPack);
-        ddUi_->setItems({L"none（无安装界面）", L"basic（基础进度）", L"minimal（内置向导）"});
+        ddUi_->setItems({L"none（无安装界面）", L"basic（基础进度）",
+                         L"minimal（紧凑向导）", L"wizard（多页向导）",
+                         L"custom（XML 自定义）"});
+        tbUiTemplate_ = makeText(PgPack, L"可选：现有 MSI 的 UI 模板");
+        btnUiTemplateBrowse_ = makeButton(PgPack, L"浏览", Ic::Folder, false,
+                                          [this] { browseFileFor(tbUiTemplate_, false,
+                                              L"选择 UI 模板", L"MSI 安装包", L"*.msi"); });
+        tbUiLocale_ = makeText(PgPack, L"auto / en / zh-CN");
         tbCabSize_ = makeText(PgPack, L"留空为单个 CAB，例如 16M / 1G");
-        tbConfig_ = makeText(PgPack, L"可选：pack.ini 清单");
+        tbConfig_ = makeText(PgPack, L"可选：pack.xml 清单");
         btnConfigBrowse_ = makeButton(PgPack, L"浏览", Ic::Folder, false,
                                       [this] { browseFileFor(tbConfig_, false,
-                                          L"选择清单", L"INI 清单", L"*.ini"); });
+                                          L"选择清单", L"XML 清单", L"*.xml"); });
         ddLargeFiles_ = add<DropDown>(PgPack);
         ddLargeFiles_->setItems({L"layout（>2GiB 作为伴随文件）", L"error（拒绝大文件）"});
         tbSignCert_ = makeText(PgPack, L"可选：.pfx 代码签名证书");
@@ -1151,6 +1169,11 @@ public:
         chkPackDry_ = makeCheck(PgPack, L"仅预览 (dry-run)", false);
         chkPackVerbose_ = makeCheck(PgPack, L"详细日志", true);
         chkEmptyDirs_ = makeCheck(PgPack, L"保留空目录", true);
+        chkDesktopShortcut_ = makeCheck(PgPack, L"创建桌面快捷方式", true);
+        chkStartMenuShortcut_ = makeCheck(PgPack, L"创建开始菜单快捷方式", true);
+        tbMainExe_ = makeText(PgPack, L"留空自动选择源目录中的 .exe");
+        tbShortcuts_ = makeText(PgPack,
+            L"每行一条：名称 | 位置 | 目标 | 参数 | 图标 | 图标索引 | 说明", true);
         btnPack_ = makeButton(PgPack, L"开始打包", Ic::Pack, true,
                               [this] { startPack(); });
 
@@ -1161,8 +1184,11 @@ public:
                 tbName_, tbVersion_, tbManufacturer_, ddPlatform_,
                 tbLanguage_, ddUi_, tbInstallDir_});
         tag(1, {tbCabSize_, tbConfig_, btnConfigBrowse_, ddLargeFiles_,
+                tbUiTemplate_, btnUiTemplateBrowse_, tbUiLocale_,
                 chkForce_, chkPackDry_, chkPackVerbose_, chkEmptyDirs_});
         tag(2, {tbSignCert_, btnSignCertBrowse_, tbSignPassword_, tbSignTime_});
+        tag(3, {tbMainExe_, tbShortcuts_, chkDesktopShortcut_,
+                chkStartMenuShortcut_});
 
         // ---- Verify -------------------------------------------------------
         gridVerify_ = add<DataGrid>(PgVerify);
@@ -1611,13 +1637,14 @@ public:
         RECT logCard = R(body.left, form.bottom + gap, W(body), logH);
         packForm_ = form;        // drop fallback target of this page
 
-        static const wchar_t* kTitle[3] = {
-            L"基本信息", L"高级选项", L"代码签名（可选）"};
-        static const wchar_t* kSub[3] = {
+        static const wchar_t* kTitle[4] = {
+            L"基本信息", L"高级选项", L"代码签名（可选）", L"快捷方式"};
+        static const wchar_t* kSub[4] = {
             L"源目录、输出路径与产品标识 · 支持拖放",
-            L"分卷、清单、大文件与构建开关 · 支持拖放",
-            L"Authenticode 签名需要 signtool.exe 与证书 · 支持拖放"};
-        static const Ic kIcon[3] = {Ic::Pack, Ic::Settings, Ic::Shield};
+            L"分卷、清单、UI 模板与构建开关 · 支持拖放",
+            L"Authenticode 签名需要 signtool.exe 与证书 · 支持拖放",
+            L"桌面 / 开始菜单快捷方式与主程序 · 支持拖放"};
+        static const Ic kIcon[4] = {Ic::Pack, Ic::Settings, Ic::Shield, Ic::Bolt};
         addCard(tabBar, L"", L"");
         addCard(form, kTitle[packTab_], kSub[packTab_], kIcon[packTab_]);
         addCard(logCard, L"运行日志", L"FCI 压缩与 Msi 建库过程", Ic::Terminal);
@@ -1628,6 +1655,7 @@ public:
         btnTabBasic_->setRect(R(tx, ty, tw, th));
         btnTabAdvanced_->setRect(R(tx + tw + S(8), ty, tw, th));
         btnTabSign_->setRect(R(tx + (tw + S(8)) * 2, ty, tw, th));
+        btnTabShortcut_->setRect(R(tx + (tw + S(8)) * 3, ty, tw, th));
         btnPack_->setRect(R(tabBar.right - S(10) - S(170), ty, S(170), th));
 
         // Two adaptive columns inside the form card.
@@ -1637,7 +1665,7 @@ public:
         int leftX = form.left + padX;
         int rightX = leftX + colW + colGap;
         const int headerPad = S(58);
-        const int rows = packTab_ == 0 ? 5 : 4;
+        const int rows = (packTab_ == 0 || packTab_ == 3) ? 5 : 4;
         int usable = std::max(S(120), H(form) - headerPad - S(16));
         int rowH = std::min(S(76), std::max(S(34), usable / rows));
         int labelH = S(18);
@@ -1679,17 +1707,34 @@ public:
                           L"LocalAppDataFolder\\App 或绝对路径 D:\\Apps\\App。");
         } else if (packTab_ == 1) {
             field(0, 0, L"CAB 分卷大小", tbCabSize_, nullptr);
-            field(0, 1, L"配置文件 (pack.ini)", tbConfig_, btnConfigBrowse_);
+            field(0, 1, L"配置文件 (pack.xml)", tbConfig_, btnConfigBrowse_);
+            field(1, 0, L"UI 模板 (.msi)", tbUiTemplate_, btnUiTemplateBrowse_);
+            field(1, 1, L"UI 语言", tbUiLocale_, nullptr);
             field(0, 2, L"大文件处理", ddLargeFiles_, nullptr);
-            note(0, 3, 1, L"留空表示单个 CAB；支持 16M / 1G 等形式。清单可描述 Feature、快捷方式、注册表、服务与环境变量。");
+            note(0, 3, 1, L"留空表示单个 CAB；支持 16M / 1G 等形式。清单可描述 Feature、快捷方式、注册表、服务、UI 与环境变量。");
             int cbw = colW / 2 - S(6);
-            int cbh = std::min(S(38), rowH);
-            int cby = form.top + headerPad;
+            int cbh = std::max(S(18), std::min(S(30), rowH / 2 - S(2)));
+            int cby = form.top + headerPad + rowH * 2;
             chkForce_->setRect(R(rightX, cby, cbw, cbh));
             chkPackDry_->setRect(R(rightX + colW / 2, cby, cbw, cbh));
             chkPackVerbose_->setRect(R(rightX, cby + cbh, cbw, cbh));
             chkEmptyDirs_->setRect(R(rightX + colW / 2, cby + cbh, cbw, cbh));
-            note(1, 2, 2, L"开关作用于本次打包：dry-run 只打印计划不写文件；详细日志会把每个文件与 CAB 的构建过程输出到右侧日志。");
+            note(1, 2, 1, L"UI 模板会替换内置向导；UI 语言 auto = 跟随 --language。");
+        } else if (packTab_ == 3) {
+            field(0, 0, L"主程序（留空自动识别）", tbMainExe_, nullptr);
+            int cbw = colW - S(12);
+            int cbh = std::min(S(38), rowH);
+            int cby = form.top + headerPad;
+            chkDesktopShortcut_->setRect(R(rightX, cby, cbw, cbh));
+            chkStartMenuShortcut_->setRect(R(rightX, cby + cbh, cbw, cbh));
+            int y = form.top + headerPad + rowH;
+            int x = leftX;
+            addLabel(R(x, y, colW, labelH),
+                     L"额外快捷方式：名称 | 位置 | 目标 | 参数 | 图标 | 图标索引 | 说明",
+                     t.fSmall, t.subText);
+            int by = y + labelH + S(2);
+            int bh = std::max(S(80), static_cast<int>(form.bottom - by - S(14)));
+            tbShortcuts_->setRect(R(x, by, colW, bh));
         } else {
             field(0, 0, L"签名证书 (.pfx)", tbSignCert_, btnSignCertBrowse_);
             field(0, 1, L"证书密码", tbSignPassword_, nullptr);
@@ -1841,9 +1886,11 @@ public:
         btnTabBasic_->accent = (tab == 0);
         btnTabAdvanced_->accent = (tab == 1);
         btnTabSign_->accent = (tab == 2);
+        btnTabShortcut_->accent = (tab == 3);
         btnTabBasic_->invalidate();
         btnTabAdvanced_->invalidate();
         btnTabSign_->invalidate();
+        btnTabShortcut_->invalidate();
         setVisibility();
         layout();
     }
@@ -3191,16 +3238,29 @@ public:
         o.manufacturer = util::trim(tbManufacturer_->value());
         if (o.manufacturer.empty()) o.manufacturer = L"msitool";
         o.platform = ddPlatform_->index == 1 ? L"x64" : L"Intel";
+        o.platformSet = true;
         o.language = _wtoi(tbLanguage_->value().c_str());
         if (o.language <= 0) o.language = 1033;
-        static const wchar_t* uiNames[] = {L"none", L"basic", L"minimal"};
-        o.ui = uiNames[std::min(2, std::max(0, ddUi_->index))];
+        o.languageSet = true;
+        o.productNameSet = !o.productName.empty();
+        o.versionSet = true;
+        o.manufacturerSet = true;
+        static const wchar_t* uiNames[] = {L"none", L"basic", L"minimal",
+                                           L"wizard", L"custom"};
+        o.ui = uiNames[std::min(4, std::max(0, ddUi_->index))];
         o.uiSet = true;
+        o.uiTemplate = util::trim(tbUiTemplate_->value());
+        o.uiTemplateSet = !o.uiTemplate.empty();
+        o.uiLocale = util::trim(tbUiLocale_->value());
+        if (util::iequals(o.uiLocale, L"auto")) o.uiLocale.clear();
         o.largeFiles = ddLargeFiles_->index == 1 ? L"error" : L"layout";
         o.largeFilesSet = true;
         o.cabSize = parseSize(tbCabSize_->value());
         o.cabSizeSet = true;
         o.configFile = util::trim(tbConfig_->value());
+        o.desktopShortcut = chkDesktopShortcut_->checked;
+        o.startMenuShortcut = chkStartMenuShortcut_->checked;
+        o.mainExe = util::trim(tbMainExe_->value());
         o.signCert = util::trim(tbSignCert_->value());
         o.signCertSet = !o.signCert.empty();
         o.signPassword = tbSignPassword_->value();
@@ -3209,6 +3269,44 @@ public:
         o.dryRun = chkPackDry_->checked;
         o.verbose = chkPackVerbose_->checked;
         o.keepEmptyDirs = chkEmptyDirs_->checked;
+
+        // Additional shortcuts: one per line, pipe separated.
+        auto splitPipes = [](const std::wstring& line) {
+            std::vector<std::wstring> out;
+            std::wstring cur;
+            for (wchar_t c : line) {
+                if (c == L'|') { out.push_back(util::trim(cur)); cur.clear(); }
+                else cur.push_back(c);
+            }
+            out.push_back(util::trim(cur));
+            return out;
+        };
+        std::wstring lines = tbShortcuts_->value();
+        size_t pos = 0;
+        while (pos <= lines.size()) {
+            size_t end = lines.find_first_of(L"\r\n", pos);
+            std::wstring line = util::trim(lines.substr(
+                pos, end == std::wstring::npos ? std::wstring::npos : end - pos));
+            pos = end == std::wstring::npos ? lines.size() + 1 : end + 1;
+            if (line.empty() || line[0] == L';' || line[0] == L'#') continue;
+            std::vector<std::wstring> parts = splitPipes(line);
+            if (parts.size() < 3 || parts[0].empty() || parts[2].empty()) {
+                toast(L"快捷方式格式：名称 | 位置 | 目标 | 参数 | 图标 | 图标索引 | 说明", 1);
+                return;
+            }
+            pack::ShortcutDef d;
+            d.name = parts[0];
+            d.id = pack::toIdentifier(L"Gui" + parts[0]);
+            d.dir = parts.size() > 1 && !parts[1].empty() ? parts[1] : L"desktop";
+            d.target = parts[2];
+            if (parts.size() > 3) d.args = parts[3];
+            if (parts.size() > 4) d.icon = parts[4];
+            if (parts.size() > 5 && !parts[5].empty())
+                d.iconIndex = _wtoi(parts[5].c_str());
+            if (parts.size() > 6) d.description = parts[6];
+            o.shortcuts.push_back(std::move(d));
+        }
+
         lastOutputDir_ = util::path::dirName(util::path::full(o.outputMsi));
         lastPackOutput_ = util::path::full(o.outputMsi);
         startTask([o] { pack::pack(o); },
@@ -3273,6 +3371,7 @@ public:
             field(tbSrcDir_,   DkSourceDir,  L"源目录",  {btnSrcBrowse_});
             field(tbOutMsi_,   DkOutputMsi,  L"输出 MSI", {btnOutMsiBrowse_});
             field(tbConfig_,   DkManifest,   L"配置文件", {btnConfigBrowse_});
+            field(tbUiTemplate_, DkUiTemplate, L"UI 模板", {btnUiTemplateBrowse_});
             field(tbSignCert_, DkCert,       L"签名证书", {btnSignCertBrowse_});
             fallback(rc, packForm_, DkAuto, L"自动分配");
             break;
@@ -3337,7 +3436,7 @@ public:
             if (util::path::isDirectory(p)) { hasDir = true; continue; }
             if (extIs(p, {L".msi", L".msp"})) hasPackage = true;
             else if (extIs(p, {L".pfx", L".p12"})) hasCert = true;
-            else if (extIs(p, {L".ini", L".cfg", L".conf"})) hasManifest = true;
+            else if (extIs(p, {L".xml"})) hasManifest = true;
         }
         if (hasDir)
             return page_ == PgPack ? L"松开：设为「源目录」"
@@ -3427,6 +3526,7 @@ public:
         case DkSourceDir:  dropSource(paths);  break;
         case DkOutputMsi:  dropOutputMsi(paths); break;
         case DkManifest:   dropManifest(paths); break;
+        case DkUiTemplate: dropUiTemplate(paths); break;
         case DkCert:       dropCert(paths);   break;
         case DkOutDir:     dropOutDir(paths); break;
         case DkAuto:       dropAuto(paths);   break;
@@ -3490,11 +3590,11 @@ public:
         toast(L"「输出 MSI」需要 .msi 文件，或一个用于存放包的目录", 2);
     }
 
-    // "配置文件": an INI manifest; dropping a directory looks for the
+    // "配置文件": an XML manifest; dropping a directory looks for the
     // well-known manifest names inside it.
     void dropManifest(const std::vector<std::wstring>& paths) {
-        static const wchar_t* kNames[] = {L"pack.ini", L"msitool.ini",
-                                          L"manifest.ini", L"pack.cfg"};
+        static const wchar_t* kNames[] = {L"pack.xml", L"msitool.xml",
+                                          L"manifest.xml"};
         std::wstring file;
         for (const std::wstring& p : paths) {
             if (util::path::isDirectory(p)) {
@@ -3508,18 +3608,33 @@ public:
             if (!file.empty()) break;
         }
         if (file.empty()) {
-            toast(L"没找到清单：拖入 .ini / .cfg / .txt，或含 pack.ini 的目录", 2);
+            toast(L"没找到清单：拖入 .xml，或含 pack.xml 的目录", 2);
             return;
         }
         std::wstring full = util::path::full(file);
-        bool known = extIs(full, {L".ini", L".cfg", L".conf", L".txt"});
+        bool known = extIs(full, {L".xml"});
         if (page_ != PgPack) switchPage(PgPack);   // the form is pack input
         if (packTab_ != 1) setPackTab(1);
         tbConfig_->setValue(full);
         logLine(L"[drop] 清单 = " + full);
         toast(L"配置文件：" + util::path::fileName(full) +
-                  (known ? L"" : L"（清单为 INI 格式）"),
+                  (known ? L"" : L"（清单必须为 XML 格式）"),
               known ? 3 : 1);
+    }
+
+    void dropUiTemplate(const std::vector<std::wstring>& paths) {
+        for (const std::wstring& p : paths) {
+            if (util::path::isDirectory(p)) continue;
+            if (!extIs(p, {L".msi"})) continue;
+            std::wstring full = util::path::full(p);
+            if (page_ != PgPack) switchPage(PgPack);
+            if (packTab_ != 1) setPackTab(1);
+            tbUiTemplate_->setValue(full);
+            logLine(L"[drop] UI 模板 = " + full);
+            toast(L"UI 模板：" + util::path::fileName(full), 3);
+            return;
+        }
+        toast(L"请拖入一个 .msi 作为 UI 模板", 2);
     }
 
     void dropCert(const std::vector<std::wstring>& paths) {
@@ -3568,7 +3683,7 @@ public:
         }
         const std::wstring& p = paths.front();
         if (extIs(p, {L".pfx", L".p12"})) { dropCert(paths); return; }
-        if (extIs(p, {L".ini", L".cfg", L".conf"})) { dropManifest(paths); return; }
+        if (extIs(p, {L".xml"})) { dropManifest(paths); return; }
         if (extIs(p, {L".msi", L".msp"})) {
             if (page_ == PgPack) {
                 toast(L"打包页不打开安装包：这里只接收源目录 / 清单 / 证书；"

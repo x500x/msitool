@@ -1,5 +1,9 @@
 #include "pack.h"
+
 #include "msidb.h"
+#include "pack_ui.h"
+#include "pack_util.h"
+#include "pack_xml.h"
 
 #include <fci.h>
 
@@ -247,383 +251,6 @@ bool createCabinet(const std::wstring& cabPath, const std::vector<std::wstring>&
 }
 
 // ---------------------------------------------------------------------------
-// MSI helpers
-// ---------------------------------------------------------------------------
-
-std::wstring newGuid() {
-    GUID g{};
-    if (FAILED(CoCreateGuid(&g))) util::fail(L"CoCreateGuid failed");
-    wchar_t buf[64] = {};
-    if (StringFromGUID2(g, buf, 64) <= 0) util::fail(L"StringFromGUID2 failed");
-    return std::wstring(buf);
-}
-
-std::wstring normalizeGuid(std::wstring s) {
-    s = util::trim(s);
-    if (s.empty()) return newGuid();
-    if (s.front() != L'{') s.insert(s.begin(), L'{');
-    if (s.back() != L'}') s.push_back(L'}');
-    return s;
-}
-
-void execSql(MSIHANDLE db, const std::wstring& sql) {
-    msi::Handle view;
-    util::checkMsi(MsiDatabaseOpenViewW(db, sql.c_str(), view.out()), L"SQL: " + sql);
-    util::checkMsi(MsiViewExecute(view.get(), 0), L"SQL: " + sql);
-}
-
-struct Cell {
-    bool        isNull = true;
-    bool        isInt = false;
-    int         i = 0;
-    std::wstring s;
-};
-Cell S(std::wstring v) { Cell c; c.isNull = false; c.s = std::move(v); return c; }
-Cell I(int v)          { Cell c; c.isNull = false; c.isInt = true; c.i = v; return c; }
-Cell Null()            { return Cell{}; }
-
-void insertRow(MSIHANDLE db, const std::wstring& table,
-               const std::vector<std::wstring>& cols,
-               const std::vector<Cell>& cells) {
-    if (cols.size() != cells.size()) util::fail(L"insertRow: column/value mismatch");
-    std::wstring sql = L"INSERT INTO " + msi::quoteIdent(table) + L" (";
-    for (size_t i = 0; i < cols.size(); ++i)
-        sql += (i ? L", " : L"") + msi::quoteIdent(cols[i]);
-    sql += L") VALUES (";
-    for (size_t i = 0; i < cols.size(); ++i) sql += (i ? L", ?" : L"?");
-    sql += L")";
-
-    msi::Handle view, rec(MsiCreateRecord(static_cast<UINT>(cells.size())));
-    if (!rec) util::fail(L"MsiCreateRecord failed");
-    util::checkMsi(MsiDatabaseOpenViewW(db, sql.c_str(), view.out()),
-                   L"INSERT into " + table);
-    for (size_t i = 0; i < cells.size(); ++i) {
-        if (cells[i].isNull) continue;
-        UINT rc = cells[i].isInt
-                      ? MsiRecordSetInteger(rec.get(), static_cast<UINT>(i + 1), cells[i].i)
-                      : MsiRecordSetStringW(rec.get(), static_cast<UINT>(i + 1),
-                                            cells[i].s.c_str());
-        util::checkMsi(rc, L"setting value " + cols[i] + L" in " + table);
-    }
-    util::checkMsi(MsiViewExecute(view.get(), rec.get()),
-                   L"INSERT into " + table + L" row " +
-                       (cells.empty() ? L"" : cells[0].s));
-}
-
-void insertStreamRow(MSIHANDLE db, const std::wstring& table,
-                     const std::wstring& nameCol, const std::wstring& dataCol,
-                     const std::wstring& name, const std::wstring& file) {
-    msi::Handle view, rec(MsiCreateRecord(2));
-    if (!rec) util::fail(L"MsiCreateRecord failed");
-    std::wstring sql = L"SELECT " + msi::quoteIdent(nameCol) + L", " +
-                       msi::quoteIdent(dataCol) + L" FROM " + msi::quoteIdent(table);
-    util::checkMsi(MsiDatabaseOpenViewW(db, sql.c_str(), view.out()),
-                   L"open " + table + L" view");
-    util::checkMsi(MsiViewExecute(view.get(), 0), L"execute " + table + L" view");
-    util::checkMsi(MsiRecordSetStringW(rec.get(), 1, name.c_str()),
-                   L"set " + table + L" name");
-    util::checkMsi(MsiRecordSetStreamW(rec.get(), 2, file.c_str()),
-                   L"set " + table + L" stream " + name);
-    util::checkMsi(MsiViewModify(view.get(), MSIMODIFY_INSERT, rec.get()),
-                   L"insert " + table + L" stream " + name);
-}
-
-struct SequenceAction {
-    const wchar_t* name;
-    int            seq;
-};
-
-const SequenceAction kSequence[] = {
-    {L"CostInitialize",   800}, {L"FileCost",         900}, {L"CostFinalize",   1000},
-    {L"InstallValidate", 1400}, {L"InstallInitialize",1500}, {L"ProcessComponents",1600},
-    {L"UnpublishFeatures",1800},{L"StopServices",    1900}, {L"DeleteServices", 2000},
-    {L"RemoveRegistryValues",2600}, {L"RemoveShortcuts", 3500}, {L"RemoveFiles", 3500},
-    {L"CreateFolders",   3700}, {L"InstallFiles",    4000}, {L"CreateShortcuts", 4500},
-    {L"WriteRegistryValues",5000}, {L"WriteEnvironmentStrings", 5200},
-    {L"InstallServices", 5800}, {L"StartServices",   5900}, {L"RegisterProduct", 6100},
-    {L"PublishFeatures", 6300}, {L"PublishProduct",  6400}, {L"InstallExecute",  6500},
-    {L"InstallFinalize", 6600},
-};
-
-// Administrative install (msiexec /a or ACTION=ADMIN) unpacks the CAB
-// without writing registry/ARP state.
-const SequenceAction kAdminSequence[] = {
-    {L"CostInitialize",     800}, {L"FileCost",           900}, {L"CostFinalize",    1000},
-    {L"InstallValidate",   1400}, {L"InstallInitialize", 1500},
-    {L"CreateFolders",     3700},
-    {L"InstallAdminPackage",3900},{L"InstallFiles",      4000},{L"InstallFinalize", 6600},
-};
-
-const SequenceAction kUiSequenceBasic[] = {
-    {L"CostInitialize", 800}, {L"FileCost", 900}, {L"CostFinalize", 1000},
-    {L"ExecuteAction", 1300},
-};
-
-const SequenceAction kUiSequenceMinimal[] = {
-    {L"CostInitialize",  800}, {L"FileCost",     900}, {L"CostFinalize", 1000},
-    {L"WelcomeDlg",     1290}, {L"ProgressDlg", 1299}, {L"ExecuteAction", 1300},
-    {L"FatalError",       -3}, {L"UserExit",      -2}, {L"ExitDialog",     -1},
-};
-
-// ---------------------------------------------------------------------------
-// Optional manifest (INI-like UTF-8 / UTF-16 file)
-// ---------------------------------------------------------------------------
-
-struct Section {
-    std::wstring type;
-    std::wstring name;
-    std::map<std::wstring, std::wstring> values;
-};
-
-std::wstring readConfigFile(const std::wstring& path) {
-    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
-                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (h == INVALID_HANDLE_VALUE)
-        util::fail(L"Cannot open config file: " + path + L": " +
-                   util::winError(GetLastError()));
-    DWORD hi = 0;
-    DWORD size = GetFileSize(h, &hi);
-    if (hi || size > 64 * 1024 * 1024) {
-        CloseHandle(h);
-        util::fail(L"Config file is too large: " + path);
-    }
-    std::vector<unsigned char> buf(size + 1, 0);
-    DWORD got = 0;
-    if (size && !ReadFile(h, buf.data(), size, &got, nullptr)) {
-        CloseHandle(h);
-        util::fail(L"Cannot read config file: " + path);
-    }
-    CloseHandle(h);
-    buf.resize(got);
-
-    if (buf.size() >= 3 && buf[0] == 0xEF && buf[1] == 0xBB && buf[2] == 0xBF) {
-        return util::widen(std::string(buf.begin() + 3, buf.end()), CP_UTF8);
-    }
-    if (buf.size() >= 2 && buf[0] == 0xFF && buf[1] == 0xFE) {
-        std::wstring s;
-        for (size_t i = 2; i + 1 < buf.size(); i += 2)
-            s.push_back(static_cast<wchar_t>(buf[i] | (buf[i + 1] << 8)));
-        return s;
-    }
-    return util::widen(std::string(buf.begin(), buf.end()), CP_UTF8);
-}
-
-Section parseSectionHeader(const std::wstring& text) {
-    Section s;
-    std::wstring body = util::trim(text.substr(1, text.size() - 2));
-    size_t colon = body.find(L':');
-    if (colon == std::wstring::npos) {
-        s.type = util::toLower(body);
-    } else {
-        s.type = util::toLower(util::trim(body.substr(0, colon)));
-        s.name = util::trim(body.substr(colon + 1));
-    }
-    return s;
-}
-
-std::vector<Section> parseConfig(const std::wstring& text) {
-    std::vector<Section> sections;
-    Section* cur = nullptr;
-    size_t start = 0;
-    while (start <= text.size()) {
-        size_t end = text.find_first_of(L"\r\n", start);
-        std::wstring line = text.substr(start, end == std::wstring::npos
-                                                     ? std::wstring::npos : end - start);
-        start = end == std::wstring::npos ? text.size() + 1 : end + 1;
-        line = util::trim(line);
-        if (line.empty() || line.front() == L';' || line.front() == L'#') continue;
-        if (line.size() >= 2 && line.front() == L'[' && line.back() == L']') {
-            sections.push_back(parseSectionHeader(line));
-            cur = &sections.back();
-            continue;
-        }
-        size_t eq = line.find(L'=');
-        if (eq == std::wstring::npos || !cur) continue;
-        std::wstring key = util::toLower(util::trim(line.substr(0, eq)));
-        std::wstring val = util::trim(line.substr(eq + 1));
-        cur->values[key] = val;
-    }
-    return sections;
-}
-
-std::wstring cfg(const Section& s, const wchar_t* key, const std::wstring& dflt = L"") {
-    auto it = s.values.find(key);
-    return it == s.values.end() ? dflt : it->second;
-}
-
-bool parseBool(const std::wstring& s, bool dflt) {
-    std::wstring v = util::toLower(util::trim(s));
-    if (v == L"yes" || v == L"true" || v == L"1" || v == L"on") return true;
-    if (v == L"no" || v == L"false" || v == L"0" || v == L"off") return false;
-    return dflt;
-}
-
-int parseInt(const std::wstring& s, int dflt) {
-    std::wstring v = util::trim(s);
-    if (v.empty()) return dflt;
-    return _wtoi(v.c_str());
-}
-
-std::vector<std::wstring> splitList(const std::wstring& s) {
-    std::vector<std::wstring> out;
-    std::wstring cur;
-    for (wchar_t c : s) {
-        if (c == L';' || c == L',') {
-            cur = util::trim(cur);
-            if (!cur.empty()) out.push_back(cur);
-            cur.clear();
-        } else cur.push_back(c);
-    }
-    cur = util::trim(cur);
-    if (!cur.empty()) out.push_back(cur);
-    return out;
-}
-
-std::wstring normRel(std::wstring s) {
-    s = util::trim(s);
-    std::replace(s.begin(), s.end(), L'/', L'\\');
-    while (!s.empty() && s.front() == L'\\') s.erase(s.begin());
-    while (!s.empty() && s.back() == L'\\') s.pop_back();
-    return s;
-}
-
-std::wstring toIdentifier(std::wstring s, size_t maxLen = 72) {
-    for (wchar_t& c : s) {
-        bool ok = (c >= L'a' && c <= L'z') || (c >= L'A' && c <= L'Z') ||
-                  (c >= L'0' && c <= L'9') || c == L'_' || c == L'.';
-        if (!ok) c = L'_';
-    }
-    if (!s.empty() && s[0] >= L'0' && s[0] <= L'9') s.insert(s.begin(), L'_');
-    if (s.empty()) s = L"_";
-    if (s.size() > maxLen) s.resize(maxLen);
-    return s;
-}
-
-struct FeatureDef {
-    std::wstring id, title, description, dirs;
-    int level = 1, display = 0, attributes = 0;
-};
-struct ShortcutDef {
-    std::wstring id, name, dir, target, args, description, icon, wkdir, component;
-};
-struct RegistryDef {
-    std::wstring id, root, key, name, value, type, component;
-};
-struct ServiceDef {
-    std::wstring id, name, displayName, image, type, start, error, account,
-                 password, args, dependencies, description, component;
-};
-struct EnvDef {
-    std::wstring id, name, value, action, separator, system, component;
-};
-
-struct Manifest {
-    std::wstring ui, largeFiles, signCert, signPassword, signTimestamp, signTool;
-    std::wstring installDir;
-    unsigned long long cabSize = 0;
-    bool keepEmptyDirs = true;
-    std::vector<FeatureDef> features;
-    std::vector<ShortcutDef> shortcuts;
-    std::vector<RegistryDef> registry;
-    std::vector<ServiceDef> services;
-    std::vector<EnvDef> environment;
-};
-
-Manifest loadManifest(const std::wstring& path) {
-    Manifest m;
-    std::vector<Section> sections = parseConfig(readConfigFile(path));
-    for (const Section& s : sections) {
-        if (s.type == L"pack") {
-            m.ui = cfg(s, L"ui", m.ui);
-            m.largeFiles = cfg(s, L"large-files", m.largeFiles);
-            m.signCert = cfg(s, L"sign-cert", m.signCert);
-            m.signPassword = cfg(s, L"sign-password", m.signPassword);
-            m.signTimestamp = cfg(s, L"sign-timestamp", m.signTimestamp);
-            m.signTool = cfg(s, L"sign-tool", m.signTool);
-            m.installDir = cfg(s, L"install-dir", m.installDir);
-            m.keepEmptyDirs = parseBool(cfg(s, L"keep-empty-dirs"), m.keepEmptyDirs);
-            unsigned long long mib = static_cast<unsigned long long>(
-                parseInt(cfg(s, L"cab-size"), 0));
-            m.cabSize = mib * 1024ULL * 1024ULL;
-        } else if (s.type == L"feature") {
-            FeatureDef f;
-            f.id = toIdentifier(s.name.empty() ? L"Feature" : s.name, 38);
-            f.title = cfg(s, L"title", f.id);
-            f.description = cfg(s, L"description", f.title);
-            f.dirs = cfg(s, L"dirs");
-            f.level = parseInt(cfg(s, L"level"), 1);
-            f.display = parseInt(cfg(s, L"display"), 0);
-            f.attributes = parseInt(cfg(s, L"attributes"), 0);
-            m.features.push_back(std::move(f));
-        } else if (s.type == L"shortcut") {
-            ShortcutDef d;
-            d.id = toIdentifier(s.name.empty() ? L"Shortcut" : s.name);
-            d.name = cfg(s, L"name", d.id + L".lnk");
-            d.dir = cfg(s, L"dir", L"ProgramMenuFolder");
-            d.target = cfg(s, L"target");
-            d.args = cfg(s, L"args");
-            d.description = cfg(s, L"description");
-            d.icon = cfg(s, L"icon");
-            d.wkdir = cfg(s, L"wkdir");
-            d.component = cfg(s, L"component");
-            m.shortcuts.push_back(std::move(d));
-        } else if (s.type == L"registry") {
-            RegistryDef d;
-            d.id = toIdentifier(s.name.empty() ? L"Reg" : s.name);
-            d.root = cfg(s, L"root", L"auto");
-            d.key = cfg(s, L"key");
-            d.name = cfg(s, L"name");
-            d.value = cfg(s, L"value");
-            d.type = util::toLower(cfg(s, L"type", L"string"));
-            d.component = cfg(s, L"component");
-            m.registry.push_back(std::move(d));
-        } else if (s.type == L"service") {
-            ServiceDef d;
-            d.id = toIdentifier(s.name.empty() ? L"Service" : s.name);
-            d.name = cfg(s, L"name", d.id);
-            d.displayName = cfg(s, L"displayname", d.name);
-            d.image = cfg(s, L"image");
-            d.type = util::toLower(cfg(s, L"type", L"own"));
-            d.start = util::toLower(cfg(s, L"start", L"demand"));
-            d.error = util::toLower(cfg(s, L"error", L"normal"));
-            d.account = cfg(s, L"account");
-            d.password = cfg(s, L"password");
-            d.args = cfg(s, L"args");
-            d.dependencies = cfg(s, L"dependencies");
-            d.description = cfg(s, L"description");
-            d.component = cfg(s, L"component");
-            m.services.push_back(std::move(d));
-        } else if (s.type == L"environment") {
-            EnvDef d;
-            d.id = toIdentifier(s.name.empty() ? L"Env" : s.name);
-            d.name = cfg(s, L"name", d.id);
-            d.value = cfg(s, L"value");
-            d.action = util::toLower(cfg(s, L"action", L"set"));
-            d.separator = cfg(s, L"separator", L";");
-            d.system = cfg(s, L"system", L"no");
-            d.component = cfg(s, L"component");
-            m.environment.push_back(std::move(d));
-        } else {
-            util::fail(L"Unknown section in config: [" + s.type + L"]");
-        }
-    }
-    // De-duplicate generated identifiers.
-    std::set<std::wstring> seen;
-    auto unique = [&seen](std::wstring id) {
-        std::wstring base = id;
-        for (int n = 2; !seen.insert(id).second; ++n)
-            id = base + L"_" + std::to_wstring(n);
-        return id;
-    };
-    for (auto& f : m.features) f.id = unique(f.id);
-    for (auto& d : m.shortcuts) d.id = unique(d.id);
-    for (auto& d : m.registry) d.id = unique(d.id);
-    for (auto& d : m.services) d.id = unique(d.id);
-    for (auto& d : m.environment) d.id = unique(d.id);
-    return m;
-}
-
-// ---------------------------------------------------------------------------
 // Directory enumeration / layout
 // ---------------------------------------------------------------------------
 
@@ -684,16 +311,11 @@ unsigned long long statSize(const std::wstring& p) {
     return (static_cast<unsigned long long>(fd.nFileSizeHigh) << 32) | fd.nFileSizeLow;
 }
 
-// Resolve one selection entry: absolute paths are used as they are, relative
-// ones are looked up below the package root (like the paths in a manifest).
 std::wstring absOf(const std::wstring& inDir, const std::wstring& spec) {
     return util::path::full(absolutePath(spec) ? spec
                                                : util::path::join(inDir, spec));
 }
 
-// Path of `full` relative to the package root. A selection must live inside
-// inputDir: the Directory keys, the Feature tree and the companion layout are
-// all derived from that root, so an outside file has nowhere to install to.
 std::wstring relToRoot(const std::wstring& rootIn, const std::wstring& full) {
     std::wstring root = rootIn;
     if (!root.empty() && root.back() != L'\\' && root.back() != L'/') root += L'\\';
@@ -705,16 +327,12 @@ std::wstring relToRoot(const std::wstring& rootIn, const std::wstring& full) {
     return rel;
 }
 
-// Parent of a relative directory path; "" is the package root itself.
 std::wstring parentRel(const std::wstring& rel) {
     std::wstring r = normRel(rel);
     size_t pos = r.find_last_of(L"\\/");
     return pos == std::wstring::npos ? L"" : normRel(r.substr(0, pos));
 }
 
-// Collect exactly the selected entries. Files keep the path they have relative
-// to the root (so a subset still installs into the same directory tree), and a
-// directory entry brings its whole subtree by delegating to walk().
 void selectFiles(const std::wstring& inDir, const std::vector<std::wstring>& specs,
                  std::vector<Entry>& out, std::vector<std::wstring>& dirs,
                  bool verbose) {
@@ -750,12 +368,9 @@ void selectFiles(const std::wstring& inDir, const std::vector<std::wstring>& spe
                                        (e.relDir.empty() ? L"" : e.relDir + L"\\") +
                                        e.fileName + L" (" +
                                        std::to_wstring(e.size) + L" B)");
-        // Every ancestor of a selected file has to exist in the tree, even
-        // when nothing else was picked from it.
         for (std::wstring d = e.relDir; !d.empty(); d = parentRel(d))
             if (seenDir.insert(util::toLower(d)).second) dirs.push_back(d);
     }
-    // A directory entry and a file listed inside it must not be packed twice.
     std::set<std::wstring> unique;
     out.erase(std::remove_if(out.begin(), out.end(),
                              [&unique](const Entry& e) {
@@ -772,21 +387,11 @@ struct DirInfo {
     std::wstring keyPath;
 };
 
-std::wstring sanitizeName(std::wstring name) {
-    // MSI identifiers for directory/file names must not contain path syntax
-    // or the short|long separator.
-    for (wchar_t& c : name) {
-        if (c < 0x20 || wcschr(L"\\/:*?\"<>|", c) != nullptr) c = L'_';
-    }
-    while (!name.empty() && (name.back() == L' ' || name.back() == L'.')) name.pop_back();
-    return name.empty() ? L"_" : name;
-}
-
 class LayoutBuilder {
 public:
     std::map<std::wstring, DirInfo> dirs;  // lower(relDir) -> info
-    std::wstring rootKey = L"ProgramFilesFolder";  // parent of INSTALLFOLDER
-    std::wstring installLeaf;                      // INSTALLFOLDER's DefaultDir
+    std::wstring rootKey = L"ProgramFilesFolder";
+    std::wstring installLeaf;
 
     std::wstring ensure(const std::wstring& rel) {
         std::wstring k = util::toLower(rel);
@@ -797,7 +402,6 @@ public:
         if (rel.empty()) {
             d.key = L"INSTALLFOLDER";
             d.parentKey = rootKey;
-            // "." means "same directory as the parent" and must stay as-is.
             d.leaf = installLeaf == L"." ? L"." : sanitizeName(installLeaf);
         } else {
             size_t pos = rel.rfind(L'\\');
@@ -817,17 +421,6 @@ public:
 
 // ---------------------------------------------------------------------------
 // Install location (--install-dir)
-//
-// The Directory tree is TARGETDIR -> <anchor> -> ... -> INSTALLFOLDER -> the
-// mirrored source tree. The anchor is a standard Windows Installer folder
-// (ProgramFilesFolder, LocalAppDataFolder, ...) or ProgramFilesFolder for a
-// plain relative path. INSTALLFOLDER always stays the directory that receives
-// the source root, so "msiexec INSTALLFOLDER=<path>" keeps working.
-//
-// An absolute path cannot be stored in Directory.DefaultDir (the ':' of the
-// drive letter is the target:source separator), so it is pinned through the
-// documented property override instead: a Property row for INSTALLFOLDER whose
-// value is the full path.
 // ---------------------------------------------------------------------------
 
 struct DirRow {
@@ -836,51 +429,11 @@ struct DirRow {
     std::wstring leaf;
 };
 
-struct StandardDir {
-    const wchar_t* key;
-    const wchar_t* parent;
-    const wchar_t* def;
-};
-
-// Windows Installer resolves these by their well-known property name, so the
-// placeholder row only has to exist with a "." DefaultDir.
-const StandardDir kStandardDirs[] = {
-    {L"ProgramFilesFolder",   L"TARGETDIR", L"."},
-    {L"ProgramFiles64Folder", L"TARGETDIR", L"."},
-    {L"CommonFilesFolder",    L"TARGETDIR", L"."},
-    {L"CommonFiles64Folder",  L"TARGETDIR", L"."},
-    {L"ProgramMenuFolder",    L"TARGETDIR", L"."},
-    {L"StartMenuFolder",      L"TARGETDIR", L"."},
-    {L"StartupFolder",        L"TARGETDIR", L"."},
-    {L"DesktopFolder",        L"TARGETDIR", L"."},
-    {L"AppDataFolder",        L"TARGETDIR", L"."},
-    {L"LocalAppDataFolder",   L"TARGETDIR", L"."},
-    {L"CommonAppDataFolder",  L"TARGETDIR", L"."},
-    {L"PersonalFolder",       L"TARGETDIR", L"."},
-    {L"SendToFolder",         L"TARGETDIR", L"."},
-    {L"TemplatesFolder",      L"TARGETDIR", L"."},
-    {L"FavoritesFolder",      L"TARGETDIR", L"."},
-    {L"FontsFolder",          L"TARGETDIR", L"."},
-    {L"MyPicturesFolder",     L"TARGETDIR", L"."},
-    {L"AdminToolsFolder",     L"TARGETDIR", L"."},
-    {L"TempFolder",           L"TARGETDIR", L"."},
-    {L"WindowsFolder",        L"TARGETDIR", L"."},
-    {L"WindowsVolume",        L"TARGETDIR", L"."},
-    {L"SystemFolder",         L"TARGETDIR", L"."},
-    {L"System64Folder",       L"TARGETDIR", L"."},
-};
-
-const StandardDir* findStandardDir(const std::wstring& name) {
-    for (const StandardDir& d : kStandardDirs)
-        if (util::iequals(name, d.key)) return &d;
-    return nullptr;
-}
-
 struct InstallTarget {
-    std::vector<DirRow> chain;  // TARGETDIR -> ... -> INSTALLFOLDER's parent
-    std::wstring leaf;          // INSTALLFOLDER's DefaultDir
-    std::wstring pinned;        // absolute target, written as a Property row
-    std::wstring display;       // resolved location, only used for logging
+    std::vector<DirRow> chain;
+    std::wstring leaf;
+    std::wstring pinned;
+    std::wstring display;
 };
 
 void checkInstallPart(const std::wstring& part, const std::wstring& spec) {
@@ -912,15 +465,6 @@ InstallTarget parseInstallTarget(const std::wstring& raw,
     for (wchar_t& c : spec)
         if (c == L'/') c = L'\\';
 
-    // An absolute path cannot live in Directory.DefaultDir: the ':' that starts
-    // a drive letter is the target:source separator, so "D:\Apps\App" would be
-    // read as target "D" + source "\Apps\App" (Windows Installer then reports
-    // 2714 or creates a folder literally named "D"). The documented way to pin
-    // a full path is the Directory key *property*: "The Directory column can
-    // contain the name of a property that is set to the full path of a target
-    // directory." So the Directory tree stays relative and a Property row
-    // INSTALLFOLDER=<path> fixes the location (still overridable on the
-    // command line).
     const bool absolute =
         (spec.size() >= 2 && spec[1] == L':') ||
         (spec.size() >= 2 && spec[0] == L'\\' && spec[1] == L'\\');
@@ -965,8 +509,6 @@ InstallTarget parseInstallTarget(const std::wstring& raw,
     }
     t.display = L"[" + parent + L"]";
     for (size_t i = next; i < parts.size(); ++i) t.display += L"\\" + parts[i];
-    // Everything between the anchor and the last segment becomes a plain
-    // directory row; the last segment is INSTALLFOLDER itself.
     for (size_t i = next; i + 1 < parts.size(); ++i) {
         std::wstring key = L"ID" + std::to_wstring(t.chain.size());
         t.chain.push_back({key, parent, parts[i]});
@@ -983,7 +525,7 @@ unsigned long long fileSize(const std::wstring& p) {
 }
 
 // ---------------------------------------------------------------------------
-// Base schema + optional extra tables
+// Schema
 // ---------------------------------------------------------------------------
 
 const wchar_t* kSchema[] = {
@@ -1011,155 +553,156 @@ const wchar_t* kSchema[] = {
     L"`Condition` CHAR(255), `Sequence` SHORT PRIMARY KEY `Action`)",
     L"CREATE TABLE `AdminExecuteSequence` (`Action` CHAR(72) NOT NULL, "
     L"`Condition` CHAR(255), `Sequence` SHORT PRIMARY KEY `Action`)",
+    // Metadata table used by the Windows Installer validation tools (ICE /
+    // msival2). msiexec itself does not need it, but without it smoke.exe
+    // cannot build its temporary _ICESequence table.
+    L"CREATE TABLE `_Validation` (`Table` CHAR(64) NOT NULL, `Column` CHAR(64) NOT NULL, "
+    L"`Nullable` CHAR(4), `MinValue` LONG, `MaxValue` LONG, `KeyTable` CHAR(64), "
+    L"`KeyColumn` SHORT, `Category` CHAR(32), `Set` CHAR(255), `Description` CHAR(255) "
+    L"PRIMARY KEY `Table`, `Column`)",
 };
 
-const wchar_t* kExtraSchema[] = {
-    L"CREATE TABLE `CreateFolder` (`Directory_` CHAR(72) NOT NULL, "
-    L"`Component_` CHAR(72) NOT NULL PRIMARY KEY `Directory_`, `Component_`)",
-    L"CREATE TABLE `Shortcut` (`Shortcut` CHAR(72) NOT NULL, `Directory_` CHAR(72) NOT NULL, "
-    L"`Name` CHAR(128) NOT NULL LOCALIZABLE, `Component_` CHAR(72) NOT NULL, "
-    L"`Target` CHAR(72) NOT NULL, `Arguments` CHAR(255) LOCALIZABLE, "
-    L"`Description` CHAR(255) LOCALIZABLE, `Hotkey` SHORT, `Icon_` CHAR(72), "
-    L"`IconIndex` SHORT, `ShowCmd` SHORT, `WkDir` CHAR(72), "
-    L"`DisplayResourceDLL` CHAR(255), `DisplayResourceId` SHORT, "
-    L"`DescriptionResourceDLL` CHAR(255), `DescriptionResourceId` SHORT "
-    L"PRIMARY KEY `Shortcut`)",
-    L"CREATE TABLE `Icon` (`Name` CHAR(72) NOT NULL, `Data` OBJECT NOT NULL "
-    L"PRIMARY KEY `Name`)",
-    L"CREATE TABLE `Registry` (`Registry` CHAR(72) NOT NULL, `Root` SHORT NOT NULL, "
-    L"`Key` CHAR(255) NOT NULL LOCALIZABLE, `Name` CHAR(255) LOCALIZABLE, "
-    L"`Value` LONGCHAR LOCALIZABLE, `Component_` CHAR(72) NOT NULL "
-    L"PRIMARY KEY `Registry`)",
-    L"CREATE TABLE `ServiceInstall` (`ServiceInstall` CHAR(72) NOT NULL, "
-    L"`Name` CHAR(255) NOT NULL, `DisplayName` CHAR(255) LOCALIZABLE, "
-    L"`ServiceType` LONG NOT NULL, `StartType` LONG NOT NULL, `ErrorControl` LONG NOT NULL, "
-    L"`LoadOrderGroup` CHAR(255), `Dependencies` CHAR(255), `StartName` CHAR(255), "
-    L"`Password` CHAR(255), `Arguments` CHAR(255), `Component_` CHAR(72) NOT NULL, "
-    L"`Description` LONGCHAR LOCALIZABLE PRIMARY KEY `ServiceInstall`)",
-    L"CREATE TABLE `ServiceControl` (`ServiceControl` CHAR(72) NOT NULL, "
-    L"`Name` CHAR(255) NOT NULL LOCALIZABLE, `Event` SHORT NOT NULL, "
-    L"`Arguments` CHAR(255) LOCALIZABLE, `Wait` SHORT, "
-    L"`Component_` CHAR(72) NOT NULL PRIMARY KEY `ServiceControl`)",
-    L"CREATE TABLE `Environment` (`Environment` CHAR(72) NOT NULL, "
-    L"`Name` CHAR(255) NOT NULL LOCALIZABLE, `Value` LONGCHAR LOCALIZABLE, "
-    L"`Component_` CHAR(72) NOT NULL PRIMARY KEY `Environment`)",
-    L"CREATE TABLE `InstallUISequence` (`Action` CHAR(72) NOT NULL, "
-    L"`Condition` CHAR(255), `Sequence` SHORT PRIMARY KEY `Action`)",
-    L"CREATE TABLE `Dialog` (`Dialog` CHAR(72) NOT NULL, `HCentering` SHORT NOT NULL, "
-    L"`VCentering` SHORT NOT NULL, `Width` SHORT NOT NULL, `Height` SHORT NOT NULL, "
-    L"`Attributes` LONG, `Title` CHAR(128) LOCALIZABLE, `Control_First` CHAR(50) NOT NULL, "
-    L"`Control_Default` CHAR(50), `Control_Cancel` CHAR(50) PRIMARY KEY `Dialog`)",
-    L"CREATE TABLE `Control` (`Dialog_` CHAR(72) NOT NULL, `Control` CHAR(50) NOT NULL, "
-    L"`Type` CHAR(20) NOT NULL, `X` SHORT NOT NULL, `Y` SHORT NOT NULL, "
-    L"`Width` SHORT NOT NULL, `Height` SHORT NOT NULL, `Attributes` LONG, "
-    L"`Property` CHAR(72), `Text` LONGCHAR LOCALIZABLE, `Control_Next` CHAR(50), "
-    L"`Help` CHAR(50) LOCALIZABLE PRIMARY KEY `Dialog_`, `Control`)",
-    L"CREATE TABLE `ControlEvent` (`Dialog_` CHAR(72) NOT NULL, `Control_` CHAR(50) NOT NULL, "
-    L"`Event` CHAR(50) NOT NULL, `Argument` CHAR(255) NOT NULL, `Condition` CHAR(255), "
-    L"`Ordering` SHORT PRIMARY KEY `Dialog_`, `Control_`, `Event`, `Argument`, `Condition`)",
-    L"CREATE TABLE `TextStyle` (`TextStyle` CHAR(72) NOT NULL, `FaceName` CHAR(32) NOT NULL, "
-    L"`Size` SHORT NOT NULL, `Color` LONG, `StyleBits` SHORT PRIMARY KEY `TextStyle`)",
-};
-
-struct UiDialog {
+struct ExtraTable {
     const wchar_t* name;
-    int            attributes;
-    const wchar_t* title;
-    const wchar_t* text;
-    const wchar_t* first;
-    const wchar_t* def;
-    const wchar_t* cancel;
-    int            seq;   // InstallUISequence sequence (0 = termination only)
+    const wchar_t* ddl;
 };
 
-// A compact, self-contained wizard: welcome -> (modeless progress) -> exit.
-const UiDialog kMinimalDialogs[] = {
-    {L"WelcomeDlg", 7, L"[ProductName] Setup",
-     L"Welcome to the [ProductName] [ProductVersion] Setup. Click Install to continue or Cancel to exit.",
-     L"Next", L"Next", L"Cancel", 1290},
-    {L"ProgressDlg", 5, L"[ProductName] Setup",
-     L"Please wait while Setup installs [ProductName]...",
-     L"Cancel", L"Cancel", L"Cancel", 1299},
-    {L"ExitDialog", 7, L"[ProductName] Setup",
-     L"[ProductName] [ProductVersion] setup is complete.",
-     L"Finish", L"Finish", L"Finish", -1},
-    {L"UserExit", 7, L"[ProductName] Setup",
-     L"[ProductName] setup was cancelled. Your system has not been modified.",
-     L"Finish", L"Finish", L"Finish", -2},
-    {L"FatalError", 7, L"[ProductName] Setup",
-     L"[ProductName] setup ended prematurely because of an error.",
-     L"Finish", L"Finish", L"Finish", -3},
+const ExtraTable kExtraTables[] = {
+    {L"CreateFolder",
+     L"CREATE TABLE `CreateFolder` (`Directory_` CHAR(72) NOT NULL, "
+     L"`Component_` CHAR(72) NOT NULL PRIMARY KEY `Directory_`, `Component_`)"},
+    {L"Shortcut",
+     L"CREATE TABLE `Shortcut` (`Shortcut` CHAR(72) NOT NULL, `Directory_` CHAR(72) NOT NULL, "
+     L"`Name` CHAR(128) NOT NULL LOCALIZABLE, `Component_` CHAR(72) NOT NULL, "
+     L"`Target` CHAR(72) NOT NULL, `Arguments` CHAR(255) LOCALIZABLE, "
+     L"`Description` CHAR(255) LOCALIZABLE, `Hotkey` SHORT, `Icon_` CHAR(72), "
+     L"`IconIndex` SHORT, `ShowCmd` SHORT, `WkDir` CHAR(72), "
+     L"`DisplayResourceDLL` CHAR(255), `DisplayResourceId` SHORT, "
+     L"`DescriptionResourceDLL` CHAR(255), `DescriptionResourceId` SHORT "
+     L"PRIMARY KEY `Shortcut`)"},
+    {L"Icon",
+     L"CREATE TABLE `Icon` (`Name` CHAR(72) NOT NULL, `Data` OBJECT NOT NULL "
+     L"PRIMARY KEY `Name`)"},
+    {L"Registry",
+     L"CREATE TABLE `Registry` (`Registry` CHAR(72) NOT NULL, `Root` SHORT NOT NULL, "
+     L"`Key` CHAR(255) NOT NULL LOCALIZABLE, `Name` CHAR(255) LOCALIZABLE, "
+     L"`Value` LONGCHAR LOCALIZABLE, `Component_` CHAR(72) NOT NULL "
+     L"PRIMARY KEY `Registry`)"},
+    {L"ServiceInstall",
+     L"CREATE TABLE `ServiceInstall` (`ServiceInstall` CHAR(72) NOT NULL, "
+     L"`Name` CHAR(255) NOT NULL, `DisplayName` CHAR(255) LOCALIZABLE, "
+     L"`ServiceType` LONG NOT NULL, `StartType` LONG NOT NULL, `ErrorControl` LONG NOT NULL, "
+     L"`LoadOrderGroup` CHAR(255), `Dependencies` CHAR(255), `StartName` CHAR(255), "
+     L"`Password` CHAR(255), `Arguments` CHAR(255), `Component_` CHAR(72) NOT NULL, "
+     L"`Description` LONGCHAR LOCALIZABLE PRIMARY KEY `ServiceInstall`)"},
+    {L"ServiceControl",
+     L"CREATE TABLE `ServiceControl` (`ServiceControl` CHAR(72) NOT NULL, "
+     L"`Name` CHAR(255) NOT NULL LOCALIZABLE, `Event` SHORT NOT NULL, "
+     L"`Arguments` CHAR(255) LOCALIZABLE, `Wait` SHORT, "
+     L"`Component_` CHAR(72) NOT NULL PRIMARY KEY `ServiceControl`)"},
+    {L"Environment",
+     L"CREATE TABLE `Environment` (`Environment` CHAR(72) NOT NULL, "
+     L"`Name` CHAR(255) NOT NULL LOCALIZABLE, `Value` LONGCHAR LOCALIZABLE, "
+     L"`Component_` CHAR(72) NOT NULL PRIMARY KEY `Environment`)"},
+    {L"MsiShortcutProperty",
+     L"CREATE TABLE `MsiShortcutProperty` (`MsiShortcutProperty` CHAR(72) NOT NULL, "
+     L"`Shortcut_` CHAR(72) NOT NULL, `PropertyKey` CHAR(0) NOT NULL, "
+     L"`PropVariantValue` CHAR(0) NOT NULL PRIMARY KEY `MsiShortcutProperty`)"},
+    {L"RemoveFile",
+     L"CREATE TABLE `RemoveFile` (`FileKey` CHAR(72) NOT NULL, `Component_` CHAR(72) NOT NULL, "
+     L"`FileName` CHAR(255), `DirProperty` CHAR(72), `InstallMode` SHORT NOT NULL "
+     L"PRIMARY KEY `FileKey`)"},
+    {L"InstallUISequence",
+     L"CREATE TABLE `InstallUISequence` (`Action` CHAR(72) NOT NULL, "
+     L"`Condition` CHAR(255), `Sequence` SHORT PRIMARY KEY `Action`)"},
+    {L"AdminUISequence",
+     L"CREATE TABLE `AdminUISequence` (`Action` CHAR(72) NOT NULL, "
+     L"`Condition` CHAR(255), `Sequence` SHORT PRIMARY KEY `Action`)"},
+    {L"Dialog",
+     L"CREATE TABLE `Dialog` (`Dialog` CHAR(72) NOT NULL, `HCentering` SHORT NOT NULL, "
+     L"`VCentering` SHORT NOT NULL, `Width` SHORT NOT NULL, `Height` SHORT NOT NULL, "
+     L"`Attributes` LONG, `Title` CHAR(128) LOCALIZABLE, `Control_First` CHAR(50) NOT NULL, "
+     L"`Control_Default` CHAR(50), `Control_Cancel` CHAR(50) PRIMARY KEY `Dialog`)"},
+    {L"Control",
+     L"CREATE TABLE `Control` (`Dialog_` CHAR(72) NOT NULL, `Control` CHAR(50) NOT NULL, "
+     L"`Type` CHAR(20) NOT NULL, `X` SHORT NOT NULL, `Y` SHORT NOT NULL, "
+     L"`Width` SHORT NOT NULL, `Height` SHORT NOT NULL, `Attributes` LONG, "
+     L"`Property` CHAR(72), `Text` LONGCHAR LOCALIZABLE, `Control_Next` CHAR(50), "
+     L"`Help` CHAR(50) LOCALIZABLE PRIMARY KEY `Dialog_`, `Control`)"},
+    {L"ControlEvent",
+     L"CREATE TABLE `ControlEvent` (`Dialog_` CHAR(72) NOT NULL, `Control_` CHAR(50) NOT NULL, "
+     L"`Event` CHAR(50) NOT NULL, `Argument` CHAR(255) NOT NULL, `Condition` CHAR(255), "
+     L"`Ordering` SHORT PRIMARY KEY `Dialog_`, `Control_`, `Event`, `Argument`, `Condition`)"},
+    {L"ControlCondition",
+     L"CREATE TABLE `ControlCondition` (`Dialog_` CHAR(72) NOT NULL, "
+     L"`Control_` CHAR(50) NOT NULL, `Action` CHAR(64) NOT NULL, "
+     L"`Condition` CHAR(255) NOT NULL PRIMARY KEY `Dialog_`, `Control_`, `Action`, `Condition`)"},
+    {L"TextStyle",
+     L"CREATE TABLE `TextStyle` (`TextStyle` CHAR(72) NOT NULL, `FaceName` CHAR(32) NOT NULL, "
+     L"`Size` SHORT NOT NULL, `Color` LONG, `StyleBits` SHORT PRIMARY KEY `TextStyle`)"},
+    {L"Binary",
+     L"CREATE TABLE `Binary` (`Name` CHAR(72) NOT NULL, `Data` OBJECT NOT NULL "
+     L"PRIMARY KEY `Name`)"},
+    {L"RadioButton",
+     L"CREATE TABLE `RadioButton` (`Property` CHAR(72) NOT NULL, `Order` SHORT NOT NULL, "
+     L"`Value` CHAR(64) LOCALIZABLE, `X` SHORT NOT NULL, `Y` SHORT NOT NULL, "
+     L"`Width` SHORT NOT NULL, `Height` SHORT NOT NULL, `Text` CHAR(64) LOCALIZABLE, "
+     L"`Help` CHAR(50) LOCALIZABLE PRIMARY KEY `Property`, `Order`)"},
+    {L"ComboBox",
+     L"CREATE TABLE `ComboBox` (`Property` CHAR(72) NOT NULL, `Order` SHORT NOT NULL, "
+     L"`Value` CHAR(64) LOCALIZABLE, `Text` CHAR(64) LOCALIZABLE "
+     L"PRIMARY KEY `Property`, `Order`)"},
+    {L"ListBox",
+     L"CREATE TABLE `ListBox` (`Property` CHAR(72) NOT NULL, `Order` SHORT NOT NULL, "
+     L"`Value` CHAR(64) LOCALIZABLE, `Text` CHAR(64) LOCALIZABLE "
+     L"PRIMARY KEY `Property`, `Order`)"},
+    {L"ListView",
+     L"CREATE TABLE `ListView` (`Property` CHAR(72) NOT NULL, `Order` SHORT NOT NULL, "
+     L"`Value` CHAR(64) LOCALIZABLE, `Text` CHAR(64) LOCALIZABLE "
+     L"PRIMARY KEY `Property`, `Order`)"},
+    {L"Error",
+     L"CREATE TABLE `Error` (`Error` LONG NOT NULL, `Text` CHAR(255) LOCALIZABLE "
+     L"PRIMARY KEY `Error`)"},
+    {L"CheckBox",
+     L"CREATE TABLE `CheckBox` (`Property` CHAR(72) NOT NULL, `Value` CHAR(64) "
+     L"PRIMARY KEY `Property`)"},
+    {L"Billboard",
+     L"CREATE TABLE `Billboard` (`Billboard` CHAR(50) NOT NULL, `Feature_` CHAR(38) NOT NULL, "
+     L"`Action` CHAR(50), `Ordering` SHORT PRIMARY KEY `Billboard`)"},
+    {L"BBControl",
+     L"CREATE TABLE `BBControl` (`Billboard_` CHAR(50) NOT NULL, `BBControl` CHAR(50) NOT NULL, "
+     L"`Type` CHAR(50) NOT NULL, `X` SHORT NOT NULL, `Y` SHORT NOT NULL, "
+     L"`Width` SHORT NOT NULL, `Height` SHORT NOT NULL, `Attributes` LONG, "
+     L"`Text` CHAR(50) LOCALIZABLE PRIMARY KEY `Billboard_`, `BBControl`)"},
 };
 
-void addUiControl(MSIHANDLE db, const std::wstring& dialog, const std::wstring& name,
-                  const std::wstring& type, int x, int y, int w, int h, int attr,
-                  const std::wstring& text, const std::wstring& next) {
-    insertRow(db, L"Control",
-              {L"Dialog_", L"Control", L"Type", L"X", L"Y", L"Width", L"Height",
-               L"Attributes", L"Property", L"Text", L"Control_Next", L"Help"},
-              {S(dialog), S(name), S(type), I(x), I(y), I(w), I(h), I(attr),
-               Null(), text.empty() ? Null() : S(text),
-               next.empty() ? Null() : S(next), Null()});
-}
+struct SequenceAction {
+    const wchar_t* name;
+    int            seq;
+};
 
-void addUiEvent(MSIHANDLE db, const std::wstring& dialog, const std::wstring& control,
-                const std::wstring& event, const std::wstring& argument, int ordering) {
-    insertRow(db, L"ControlEvent",
-              {L"Dialog_", L"Control_", L"Event", L"Argument", L"Condition", L"Ordering"},
-              {S(dialog), S(control), S(event), S(argument), S(L"1"), I(ordering)});
-}
+const SequenceAction kSequence[] = {
+    {L"CostInitialize",   800}, {L"FileCost",         900}, {L"CostFinalize",   1000},
+    {L"InstallValidate", 1400}, {L"InstallInitialize",1500}, {L"ProcessComponents",1600},
+    {L"UnpublishFeatures",1800},{L"StopServices",    1900}, {L"DeleteServices", 2000},
+    {L"RemoveRegistryValues",2600}, {L"RemoveShortcuts", 3500}, {L"RemoveFiles", 3500},
+    {L"CreateFolders",   3700}, {L"InstallFiles",    4000}, {L"CreateShortcuts", 4500},
+    {L"WriteRegistryValues",5000}, {L"WriteEnvironmentStrings", 5200},
+    {L"InstallServices", 5800}, {L"StartServices",   5900}, {L"RegisterProduct", 6100},
+    {L"PublishFeatures", 6300}, {L"PublishProduct",  6400}, {L"InstallExecute",  6500},
+    {L"InstallFinalize", 6600},
+};
 
-void buildMinimalUi(MSIHANDLE db, const std::wstring& productName) {
-    (void)productName;
-    insertRow(db, L"TextStyle",
-              {L"TextStyle", L"FaceName", L"Size", L"Color", L"StyleBits"},
-              {S(L"DlgFont8"), S(L"Tahoma"), I(8), Null(), Null()});
+const SequenceAction kAdminSequence[] = {
+    {L"CostInitialize",     800}, {L"FileCost",           900}, {L"CostFinalize",    1000},
+    {L"InstallValidate",   1400}, {L"InstallInitialize", 1500},
+    {L"InstallAdminPackage",3900},{L"InstallFiles",      4000},{L"InstallFinalize", 6600},
+};
 
-    for (const auto& d : kMinimalDialogs) {
-        insertRow(db, L"Dialog",
-                  {L"Dialog", L"HCentering", L"VCentering", L"Width", L"Height",
-                   L"Attributes", L"Title", L"Control_First", L"Control_Default",
-                   L"Control_Cancel"},
-                  {S(d.name), I(50), I(50), I(370), I(270), I(d.attributes), S(d.title),
-                   S(d.first), S(d.def), S(d.cancel)});
-        const bool isWelcome = std::wstring(d.name) == L"WelcomeDlg";
-        const bool isProgress = std::wstring(d.name) == L"ProgressDlg";
-        // Windows Installer requires the Control_Next pointers of a dialog to
-        // form a single cycle. Previously Description and Cancel both pointed
-        // at Next, so the dialog refused to open with error 2810 and the
-        // whole install aborted ("unexpected error installing this package").
-        addUiControl(db, d.name, L"Title", L"Text", 20, 20, 330, 40, 196611,
-                     L"{\\DlgFont8}" + std::wstring(d.title), L"Description");
-        addUiControl(db, d.name, L"Description", L"Text", 20, 70, 330, 90, 196611,
-                     std::wstring(d.text), isWelcome ? L"Cancel" : d.first);
-        addUiControl(db, d.name, L"BottomLine", L"Line", 0, 234, 370, 0, 1, L"", L"");
-
-        if (isProgress) {
-            addUiControl(db, d.name, L"ActionText", L"Text", 20, 175, 330, 12, 3,
-                         L"", L"");
-            addUiControl(db, d.name, L"ProgressBar", L"ProgressBar", 20, 195, 330, 12,
-                         65537, L"Progress done", L"");
-            addUiControl(db, d.name, L"Cancel", L"PushButton", 304, 243, 56, 17, 3,
-                         L"Cancel", L"Title");
-            addUiEvent(db, d.name, L"Cancel", L"EndDialog", L"Exit", 1);
-            // Without these subscriptions the modeless progress dialog shows
-            // a frozen bar and an empty action line.
-            addUiEvent(db, d.name, L"ActionText", L"ActionText", L"[ActionText]", 1);
-            addUiEvent(db, d.name, L"ProgressBar", L"SetProgress", L"[Progress]", 1);
-        } else if (isWelcome) {
-            addUiControl(db, d.name, L"Next", L"PushButton", 236, 243, 56, 17, 3,
-                         L"&Install", L"Title");
-            addUiControl(db, d.name, L"Cancel", L"PushButton", 304, 243, 56, 17, 3,
-                         L"Cancel", L"Next");
-            addUiEvent(db, d.name, L"Next", L"EndDialog", L"Return", 1);
-            addUiEvent(db, d.name, L"Cancel", L"EndDialog", L"Exit", 1);
-        } else {
-            addUiControl(db, d.name, L"Finish", L"PushButton", 236, 243, 56, 17, 3,
-                         L"&Finish", L"Title");
-            addUiEvent(db, d.name, L"Finish", L"EndDialog", L"Exit", 1);
-        }
-    }
-}
+const SequenceAction kUiSequenceBasic[] = {
+    {L"CostInitialize", 800}, {L"FileCost", 900}, {L"CostFinalize", 1000},
+    {L"ExecuteAction", 1300},
+};
 
 // ---------------------------------------------------------------------------
 // Signing (optional, uses signtool.exe from the Windows SDK)
@@ -1252,10 +795,111 @@ void signPackage(const std::wstring& msiPath, const Options& opt) {
         util::fail(L"signtool.exe finished but the package has no DigitalSignature stream");
 }
 
+// ---------------------------------------------------------------------------
+// Manifest / UI preparation
+// ---------------------------------------------------------------------------
+
+void applyManifest(Options& o, const Manifest& m) {
+    if (!o.productNameSet && o.productName.empty() && !m.pack.name.empty())
+        o.productName = m.pack.name;
+    if (!o.versionSet && !m.pack.version.empty()) o.version = m.pack.version;
+    if (!o.manufacturerSet && !m.pack.manufacturer.empty())
+        o.manufacturer = m.pack.manufacturer;
+    if (!o.productCodeSet && !m.pack.productCode.empty())
+        o.productCode = m.pack.productCode;
+    if (!o.upgradeCodeSet && !m.pack.upgradeCode.empty())
+        o.upgradeCode = m.pack.upgradeCode;
+    if (!o.platformSet && !m.pack.platform.empty()) o.platform = m.pack.platform;
+    if (!o.languageSet && m.pack.hasLanguage) o.language = m.pack.language;
+    if (!o.installDirSet && o.installDir.empty() && !m.pack.installDir.empty())
+        o.installDir = m.pack.installDir;
+    if (!o.uiSet && !m.pack.ui.empty()) o.ui = m.pack.ui;
+    if (!o.cabSizeSet && o.cabSize == 0 && m.pack.hasCabSize) o.cabSize = m.pack.cabSize;
+    if (!o.largeFilesSet && !m.pack.largeFiles.empty()) o.largeFiles = m.pack.largeFiles;
+    if (!m.pack.keepEmptyDirs) o.keepEmptyDirs = false;
+    if (!o.signCertSet && o.signCert.empty() && m.sign.present) {
+        o.signCert = m.sign.cert;
+        o.signPassword = m.sign.password;
+        o.signTimestamp = m.sign.timestamp;
+        o.signTool = m.sign.tool;
+    }
+    if (!o.uiTemplateSet && o.uiTemplate.empty() && m.ui.hasTemplate)
+        o.uiTemplate = m.ui.templateMsi;
+}
+
+// Builds the final UI model: base (minimal / wizard / template) + XML delta.
+UiSpec buildUi(const Options& o, const Manifest& m, const std::wstring& tempDir,
+               bool& uiEnabled) {
+    UiSpec delta = m.ui;
+    UiSpec base;
+    uiEnabled = o.ui != L"none";
+
+    const std::wstring locale =
+        o.uiLocale.empty() ? localeForLanguage(o.language) : o.uiLocale;
+
+    if (!o.uiTemplate.empty()) {
+        base = loadUiTemplate(util::path::full(o.uiTemplate));
+        uiEnabled = true;
+    } else if (o.ui == L"wizard") {
+        base = builtinWizardUi(locale, tempDir);
+        uiEnabled = true;
+    } else if (o.ui == L"minimal") {
+        base = builtinMinimalUi();
+        uiEnabled = true;
+    } else if (o.ui == L"custom") {
+        uiEnabled = true;
+        if (util::iequals(delta.base, L"wizard"))
+            base = builtinWizardUi(locale, tempDir);
+        else if (util::iequals(delta.base, L"minimal"))
+            base = builtinMinimalUi();
+    } else if (o.ui == L"basic") {
+        if (!delta.empty())
+            util::fail(L"--ui basic cannot be combined with a <ui> section");
+        uiEnabled = false;
+    } else if (o.ui == L"none") {
+        if (!delta.empty())
+            util::fail(L"a <ui> section needs --ui wizard, custom, minimal or "
+                       L"--ui-template");
+        uiEnabled = false;
+    }
+
+    UiSpec spec = base;
+    mergeUi(spec, delta);
+
+    if (uiEnabled && spec.dialogs.empty())
+        util::fail(L"UI mode '" + o.ui + L"' produced no dialogs");
+    if (!uiEnabled) return UiSpec{};
+
+    if (!spec.hasSequence)
+        util::fail(L"the installer UI needs an InstallUISequence (add <uisequence> "
+                   L"or a dialog with sequence=...)");
+
+    std::vector<UiIssue> issues;
+    validateUi(spec, issues);
+    for (const auto& i : issues) {
+        if (i.error) util::errLine(L"[ui] " + i.message);
+        else util::errLine(L"[ui][warn] " + i.message);
+    }
+    for (const auto& i : issues)
+        if (i.error) util::fail(L"installer UI validation failed");
+    return spec;
+}
+
 }  // namespace
+
+// ---------------------------------------------------------------------------
+// pack
+// ---------------------------------------------------------------------------
 
 Stats pack(const Options& opt) {
     Stats st;
+    if (!opt.dumpUiDir.empty()) {
+        std::wstring error;
+        if (!dumpBuiltinUi(opt.dumpUiDir, error)) util::fail(error);
+        util::outLine(L"Built-in UI resources written to " + util::path::full(opt.dumpUiDir));
+        return st;
+    }
+
     std::wstring inDir = util::path::full(opt.inputDir);
     while (inDir.size() > 3 && (inDir.back() == L'\\' || inDir.back() == L'/'))
         inDir.pop_back();
@@ -1272,27 +916,27 @@ Stats pack(const Options& opt) {
     // Manifest values fill in the options the command line did not set.
     Options o = opt;
     Manifest cfgData;
-    if (!o.configFile.empty()) {
-        cfgData = loadManifest(util::path::full(o.configFile));
-        if (!o.uiSet && o.ui == L"none" && !cfgData.ui.empty()) o.ui = cfgData.ui;
-        if (!o.cabSizeSet && o.cabSize == 0 && cfgData.cabSize != 0) o.cabSize = cfgData.cabSize;
-        if (!o.largeFilesSet && !cfgData.largeFiles.empty())
-            o.largeFiles = cfgData.largeFiles;
-        if (!o.signCertSet && o.signCert.empty()) {
-            o.signCert = cfgData.signCert;
-            o.signPassword = cfgData.signPassword;
-            o.signTimestamp = cfgData.signTimestamp;
-            o.signTool = cfgData.signTool;
-        }
-        if (!cfgData.keepEmptyDirs) o.keepEmptyDirs = false;
-        if (!o.installDirSet && o.installDir.empty()) o.installDir = cfgData.installDir;
+    if (!util::trim(o.configFile).empty()) {
+        std::wstring cfgPath = util::path::full(o.configFile);
+        if (util::iequals(util::path::ext(cfgPath), L".ini"))
+            util::fail(L"INI manifests are no longer supported; use XML "
+                       L"(see examples/pack.xml): " + cfgPath);
+        cfgData = loadManifestXml(cfgPath);
+        applyManifest(o, cfgData);
     }
+
     o.ui = util::toLower(o.ui);
-    if (o.ui != L"none" && o.ui != L"basic" && o.ui != L"minimal")
-        util::fail(L"--ui must be none, basic or minimal: " + o.ui);
+    if (o.ui != L"none" && o.ui != L"basic" && o.ui != L"minimal" &&
+        o.ui != L"wizard" && o.ui != L"custom")
+        util::fail(L"--ui must be none, basic, minimal, wizard or custom: " + o.ui);
     o.largeFiles = util::toLower(o.largeFiles);
     if (o.largeFiles != L"layout" && o.largeFiles != L"error")
         util::fail(L"--large-files must be layout or error: " + o.largeFiles);
+
+    util::TempDir temp(L"msitool_pack");
+    bool uiEnabled = false;
+    UiSpec uiSpec = buildUi(o, cfgData, temp.path(), uiEnabled);
+
     std::wstring productName = o.productName.empty()
                                    ? util::path::fileName(inDir)
                                    : o.productName;
@@ -1319,7 +963,7 @@ Stats pack(const Options& opt) {
     std::vector<std::wstring> allDirs;
     const bool selecting = !o.inputFiles.empty();
     if (selecting) {
-        allDirs.push_back(L"");        // the root, exactly like walk() does
+        allDirs.push_back(L"");
         selectFiles(inDir, o.inputFiles, files, allDirs, o.verbose);
         util::outLine(L"selected " + std::to_wstring(files.size()) +
                       L" file(s) from " + std::to_wstring(o.inputFiles.size()) +
@@ -1336,9 +980,7 @@ Stats pack(const Options& opt) {
         return a.fileName < b.fileName;
     });
 
-    // Files above the 32-bit FileSize limit cannot go through FCI (its seek
-    // callback takes a 32-bit offset) and cannot be represented in the File
-    // table. Keep them as uncompressed companion files in a layout tree.
+    // > 2 GiB files cannot go through FCI / the 32-bit FileSize column.
     std::vector<Entry> cabFiles, externalFiles;
     for (auto& f : files) {
         if (f.size > 0x7FFFFFFFULL) {
@@ -1354,7 +996,6 @@ Stats pack(const Options& opt) {
                       L" file(s) exceed 2 GiB: stored as uncompressed companion files; "
                       L"File.FileSize is 0 (MSI stores it as a 32-bit integer).");
 
-    // File.Sequence: compressed files first (in CAB order), then layout files.
     for (size_t i = 0; i < cabFiles.size(); ++i)
         cabFiles[i].fileKey = L"F" + std::to_wstring(i + 1);
     for (size_t i = 0; i < externalFiles.size(); ++i)
@@ -1362,8 +1003,6 @@ Stats pack(const Options& opt) {
     std::vector<Entry> ordered = cabFiles;
     ordered.insert(ordered.end(), externalFiles.begin(), externalFiles.end());
 
-    // Split compressed files into cabinets of at most --cab-size bytes of
-    // uncompressed input. An oversized single file always gets its own CAB.
     std::vector<std::vector<size_t>> groups;
     if (!cabFiles.empty()) {
         std::vector<size_t> cur;
@@ -1394,6 +1033,50 @@ Stats pack(const Options& opt) {
         }
     }
 
+    // GUI shortcuts / "create desktop shortcut" checkboxes.
+    if (o.desktopShortcut || o.startMenuShortcut) {
+        const Entry* main = nullptr;
+        if (!o.mainExe.empty()) {
+            std::wstring want = normRel(o.mainExe);
+            for (const auto& f : ordered) {
+                std::wstring rel = normRel((f.relDir.empty() ? L"" : f.relDir + L"\\") +
+                                           f.fileName);
+                if (util::iequals(rel, want) || util::iequals(f.fileKey, want)) {
+                    main = &f;
+                    break;
+                }
+            }
+            if (!main) util::fail(L"main program not found in the payload: " + o.mainExe);
+        } else {
+            // Prefer a root-level .exe, otherwise the largest .exe.
+            for (const auto& f : ordered) {
+                if (!util::iequals(util::path::ext(f.fileName), L".exe")) continue;
+                if (f.relDir.empty()) { main = &f; break; }
+                if (!main || f.size > main->size) main = &f;
+            }
+            if (!main)
+                util::errLine(L"[warn] no .exe found; desktop / start menu shortcuts "
+                              L"were not created");
+        }
+        if (main) {
+            std::wstring rel = normRel((main->relDir.empty() ? L"" : main->relDir + L"\\") +
+                                       main->fileName);
+            auto add = [&](const wchar_t* dir, const wchar_t* suffix) {
+                ShortcutDef d;
+                d.id = toIdentifier(productName + suffix);
+                d.name = productName + L".lnk";
+                d.dir = dir;
+                d.target = rel;
+                d.icon = rel;
+                d.description = productName;
+                o.shortcuts.push_back(std::move(d));
+            };
+            if (o.desktopShortcut) add(L"DesktopFolder", L"Desktop");
+            if (o.startMenuShortcut) add(L"ProgramMenuFolder", L"StartMenu");
+        }
+    }
+    for (const auto& d : o.shortcuts) cfgData.shortcuts.push_back(d);
+
     st.files = ordered.size();
     st.directories = layout.dirs.size();
     st.components = layout.dirs.size();
@@ -1404,6 +1087,7 @@ Stats pack(const Options& opt) {
     st.registry = cfgData.registry.size();
     st.services = cfgData.services.size();
     st.environment = cfgData.environment.size();
+    st.uiPages = uiSpec.dialogs.size();
     for (const auto& kv : layout.dirs)
         if (kv.second.keyPath.empty()) ++st.emptyDirs;
 
@@ -1421,13 +1105,20 @@ Stats pack(const Options& opt) {
                             static_cast<unsigned long long>(st.features),
                             static_cast<unsigned long long>(st.emptyDirs),
                             static_cast<unsigned long long>(st.externalFiles)));
+    if (uiEnabled) {
+        std::wstring uiMode = o.uiTemplate.empty() ? o.ui : L"template";
+        util::outLine(util::fmt(L"UI        : %s (%llu dialog(s), locale %s)",
+                                uiMode.c_str(),
+                                static_cast<unsigned long long>(st.uiPages),
+                                (o.uiLocale.empty() ? localeForLanguage(o.language)
+                                                    : o.uiLocale).c_str()));
+    }
     if (o.dryRun) {
         util::outLine(L"[dry-run] No cabinet or database was written.");
         return st;
     }
 
     // --- 1. Build the embedded cabinet(s) ----------------------------------
-    util::TempDir temp(L"msitool_pack");
     std::vector<std::wstring> cabPaths(groups.size());
     for (size_t g = 0; g < groups.size(); ++g) {
         cabPaths[g] = util::path::join(temp.path(), L"cab" + std::to_wstring(g + 1) + L".cab");
@@ -1455,8 +1146,7 @@ Stats pack(const Options& opt) {
     const bool needRegistry = !cfgData.registry.empty();
     const bool needServices = !cfgData.services.empty();
     const bool needEnvironment = !cfgData.environment.empty();
-    const bool needUi = o.ui != L"none";
-    const bool needDialogs = o.ui == L"minimal";
+    const UiTables uiTables = uiTablesFor(uiSpec);
 
     UINT verifyRc = ERROR_SUCCESS;
     {
@@ -1467,27 +1157,43 @@ Stats pack(const Options& opt) {
 
         for (const wchar_t* ddl : kSchema) execSql(h, ddl);
         std::unordered_set<std::wstring> created;
-        auto create = [&](const wchar_t* ddl, const std::wstring& table) {
-            if (created.insert(table).second) execSql(h, ddl);
+        auto create = [&](const wchar_t* table) {
+            if (!created.insert(util::toLower(table)).second) return;
+            for (const ExtraTable& t : kExtraTables) {
+                if (util::iequals(t.name, table)) {
+                    execSql(h, t.ddl);
+                    return;
+                }
+            }
+            util::fail(L"internal error: no schema for table " + std::wstring(table));
         };
-        if (needCreateFolders) create(kExtraSchema[0], L"CreateFolder");
-        if (needShortcuts) { create(kExtraSchema[1], L"Shortcut");
-                             create(kExtraSchema[2], L"Icon"); }
-        if (needRegistry)   create(kExtraSchema[3], L"Registry");
-        if (needServices) { create(kExtraSchema[4], L"ServiceInstall");
-                            create(kExtraSchema[5], L"ServiceControl"); }
-        if (needEnvironment) create(kExtraSchema[6], L"Environment");
-        if (needUi)          create(kExtraSchema[7], L"InstallUISequence");
-        if (needDialogs) {
-            create(kExtraSchema[8], L"Dialog");
-            create(kExtraSchema[9], L"Control");
-            create(kExtraSchema[10], L"ControlEvent");
-            create(kExtraSchema[11], L"TextStyle");
+        if (needCreateFolders) create(L"CreateFolder");
+        if (needShortcuts) {
+            create(L"Shortcut");
+            create(L"Icon");
+            create(L"MsiShortcutProperty");
+            create(L"RemoveFile");
         }
+        if (needRegistry) create(L"Registry");
+        if (needServices) { create(L"ServiceInstall"); create(L"ServiceControl"); }
+        if (needEnvironment) create(L"Environment");
+        if (uiTables.installSequence || o.ui == L"basic") create(L"InstallUISequence");
+        if (uiTables.adminSequence) create(L"AdminUISequence");
+        if (uiTables.dialog) create(L"Dialog");
+        if (uiTables.control) create(L"Control");
+        if (uiTables.controlEvent) create(L"ControlEvent");
+        if (uiTables.controlCondition) create(L"ControlCondition");
+        if (uiTables.textStyle) create(L"TextStyle");
+        if (uiTables.binary) create(L"Binary");
+        if (uiTables.radioButton) create(L"RadioButton");
+        if (uiTables.comboBox) create(L"ComboBox");
+        if (uiTables.listBox) create(L"ListBox");
+        if (uiTables.listView) create(L"ListView");
+        if (uiTables.error) create(L"Error");
+        if (uiTables.checkBox) create(L"CheckBox");
+        if (uiTables.billboard) { create(L"Billboard"); create(L"BBControl"); }
 
-        // Directory table: TARGETDIR, the install location chain and one row
-        // per source directory. Directory_Parent is a foreign key, so parents
-        // must be inserted before their children.
+        // Directory table.
         std::unordered_set<std::wstring> knownDirs;
         auto ensureDirRow = [&](const std::wstring& key, const std::wstring& parent,
                                 const std::wstring& leaf) {
@@ -1501,27 +1207,7 @@ Stats pack(const Options& opt) {
         for (const auto& kv : layout.dirs)
             ensureDirRow(kv.second.key, kv.second.parentKey, kv.second.leaf);
 
-        // Extra directories for shortcut folders (standard Windows Installer
-        // folders resolve by their well-known Directory key).
-        int customDirNo = 0;
-        auto isStandardFolder = [&](const std::wstring& s) {
-            return findStandardDir(s) != nullptr;
-        };
-        auto shortcutDirKey = [&](const std::wstring& raw) {
-            if (raw.empty()) return std::wstring(L"INSTALLFOLDER");
-            if (isStandardFolder(raw)) {
-                ensureDirRow(raw, L"TARGETDIR", L".");
-                return raw;
-            }
-            for (const auto& kv : layout.dirs)
-                if (util::iequals(raw, kv.second.key) || util::iequals(raw, kv.first))
-                    return kv.second.key;
-            std::wstring key = L"SD" + std::to_wstring(++customDirNo);
-            ensureDirRow(key, L"INSTALLFOLDER", sanitizeName(raw));
-            return key;
-        };
-
-        // Component: one per directory, keyed by the first file it contains.
+        // Components: one per payload directory, keyed by its first file.
         const int compAttrs = util::iequals(platform, L"x64") ? 256 : 0;
         for (const auto& kv : layout.dirs) {
             const DirInfo& d = kv.second;
@@ -1539,7 +1225,7 @@ Stats pack(const Options& opt) {
             }
         }
 
-        // File: CAB-internal name is the File table primary key.
+        // File rows.
         for (size_t i = 0; i < ordered.size(); ++i) {
             const Entry& f = ordered[i];
             auto it = layout.dirs.find(util::toLower(f.relDir));
@@ -1553,8 +1239,7 @@ Stats pack(const Options& opt) {
                        I(static_cast<int>(i + 1))});
         }
 
-        // Media: one row per embedded cabinet + one uncompressed row for the
-        // > 2 GiB companion files (kept last so sequence ranges stay contiguous).
+        // Media rows.
         for (size_t g = 0; g < groups.size(); ++g) {
             int lastSeq = static_cast<int>(groups[g].back() + 1);
             insertRow(h, L"Media",
@@ -1571,10 +1256,7 @@ Stats pack(const Options& opt) {
                        I(static_cast<int>(ordered.size())), Null(), Null(), Null(), Null()});
         }
 
-        // Features: a default MainFeature plus any manifest-defined features.
-        std::vector<std::wstring> featureIds;
-        featureIds.push_back(L"MainFeature");
-        for (const auto& f : cfgData.features) featureIds.push_back(f.id);
+        // Features.
         auto featureOf = [&](const std::wstring& rel) {
             std::wstring best;
             size_t bestLen = 0;
@@ -1611,8 +1293,6 @@ Stats pack(const Options& opt) {
             insertRow(h, L"FeatureComponents", {L"Feature_", L"Component_"},
                       {S(p.first), S(p.second)});
 
-        // Resolve a manifest "component" (a rel path, a File key, a Component
-        // key or a Directory key) to a Component table key.
         auto componentFor = [&](const std::wstring& spec,
                                 const std::wstring& fallbackFile) {
             std::wstring want = normRel(spec);
@@ -1649,43 +1329,177 @@ Stats pack(const Options& opt) {
             fileByRel[util::toLower(rel)] = i;
             fileByRel[util::toLower(ordered[i].fileKey)] = i;
         }
-        auto targetFor = [&](const std::wstring& raw, std::wstring& comp,
-                             std::wstring& wkdir) {
-            std::wstring t = normRel(raw);
-            auto it = fileByRel.find(util::toLower(t));
+        struct TargetInfo {
+            std::wstring target;
+            std::wstring comp;
+            std::wstring wkdir;
+            std::wstring relDir;
+        };
+        auto targetFor = [&](const std::wstring& raw) {
+            TargetInfo t;
+            std::wstring want = normRel(raw);
+            auto it = fileByRel.find(util::toLower(want));
             if (it != fileByRel.end()) {
                 const Entry& f = ordered[it->second];
-                comp = layout.dirs[util::toLower(f.relDir)].componentKey;
-                wkdir = layout.dirs[util::toLower(f.relDir)].key;
-                return L"[#" + f.fileKey + L"]";
-            }
-            if (!t.empty() && (t.front() == L'[' || t.front() == L'#'))
+                const DirInfo& d = layout.dirs[util::toLower(f.relDir)];
+                t.comp = d.componentKey;
+                t.wkdir = d.key;
+                t.relDir = f.relDir;
+                t.target = L"[#" + f.fileKey + L"]";
                 return t;
-            return L"[INSTALLFOLDER]" + t;
+            }
+            if (!want.empty() && (want.front() == L'[' || want.front() == L'#')) {
+                t.target = want;
+                return t;
+            }
+            t.target = L"[INSTALLFOLDER]" + want;
+            return t;
         };
 
-        // Shortcuts + icons.
+        // Shortcut directories: standard folders (and aliases), sub-paths
+        // below them, existing layout directories, then INSTALLFOLDER.
+        int shortcutDirNo = 0;
+        int shortcutCompNo = 0;
+        std::map<std::wstring, std::wstring> shortcutDirComponents;
+        auto ensureShortcutDirComponent = [&](const std::wstring& dirKey,
+                                              const std::wstring& feature) {
+            std::wstring low = util::toLower(dirKey);
+            auto it = shortcutDirComponents.find(low);
+            if (it != shortcutDirComponents.end()) return it->second;
+            if (!created.count(L"registry")) create(L"Registry");
+            std::wstring comp = L"CS" + std::to_wstring(++shortcutCompNo);
+            std::wstring reg = L"RegShortcutDir" + std::to_wstring(shortcutCompNo);
+            insertRow(h, L"Component",
+                      {L"Component", L"ComponentId", L"Directory_", L"Attributes",
+                       L"Condition", L"KeyPath"},
+                      {S(comp), S(newGuid()), S(dirKey), I(compAttrs | 4), Null(), S(reg)});
+            insertRow(h, L"Registry",
+                      {L"Registry", L"Root", L"Key", L"Name", L"Value", L"Component_"},
+                      {S(reg), I(2), S(L"Software\\msitool\\ShortcutFolders"),
+                       S(reg), S(L"1"), S(comp)});
+            insertRow(h, L"FeatureComponents", {L"Feature_", L"Component_"},
+                      {S(feature), S(comp)});
+            insertRow(h, L"RemoveFile",
+                      {L"FileKey", L"Component_", L"FileName", L"DirProperty",
+                       L"InstallMode"},
+                      {S(L"RF" + comp), S(comp), Null(), S(dirKey), I(2)});
+            shortcutDirComponents[low] = comp;
+            return comp;
+        };
+        auto resolveShortcutDir = [&](const std::wstring& raw,
+                                      const std::wstring& feature,
+                                      std::wstring& outComponent) {
+            std::wstring spec = normRel(raw);
+            if (spec.empty()) return std::wstring(L"INSTALLFOLDER");
+            std::wstring first = spec;
+            size_t slash = spec.find(L'\\');
+            if (slash != std::wstring::npos) first = spec.substr(0, slash);
+            std::wstring alias = util::toLower(first);
+            std::wstring standard;
+            if (alias == L"desktop") standard = L"DesktopFolder";
+            else if (alias == L"startmenu") standard = L"ProgramMenuFolder";
+            else if (alias == L"startup") standard = L"StartupFolder";
+            else if (alias == L"sendto") standard = L"SendToFolder";
+            else if (findStandardDir(first)) standard = first;
+
+            if (!standard.empty()) {
+                const StandardDir* sd = findStandardDir(standard);
+                ensureDirRow(sd->key, sd->parent, sd->def);
+                std::wstring parent = sd->key;
+                size_t pos = slash == std::wstring::npos ? std::wstring::npos : slash + 1;
+                while (pos != std::wstring::npos && pos < spec.size()) {
+                    size_t next = spec.find(L'\\', pos);
+                    std::wstring leaf = sanitizeName(
+                        spec.substr(pos, next == std::wstring::npos
+                                             ? std::wstring::npos : next - pos));
+                    std::wstring key = L"SD" + std::to_wstring(++shortcutDirNo);
+                    ensureDirRow(key, parent, leaf);
+                    outComponent = ensureShortcutDirComponent(key, feature);
+                    parent = key;
+                    pos = next == std::wstring::npos ? std::wstring::npos : next + 1;
+                }
+                return parent;
+            }
+            for (const auto& kv : layout.dirs)
+                if (util::iequals(spec, kv.second.key) ||
+                    util::iequals(spec, kv.first))
+                    return kv.second.key;
+            // Relative path that is not part of the payload: create it below
+            // INSTALLFOLDER.
+            std::wstring parent = L"INSTALLFOLDER";
+            size_t pos = 0;
+            while (pos <= spec.size()) {
+                size_t next = spec.find(L'\\', pos);
+                std::wstring leaf = sanitizeName(
+                    spec.substr(pos, next == std::wstring::npos
+                                         ? std::wstring::npos : next - pos));
+                if (!leaf.empty()) {
+                    std::wstring key = L"SD" + std::to_wstring(++shortcutDirNo);
+                    ensureDirRow(key, parent, leaf);
+                    outComponent = ensureShortcutDirComponent(key, feature);
+                    parent = key;
+                }
+                if (next == std::wstring::npos) break;
+                pos = next + 1;
+            }
+            return parent;
+        };
+
+        std::map<std::wstring, std::wstring> iconKeys;
         for (const auto& d : cfgData.shortcuts) {
-            std::wstring comp, wkdir;
-            std::wstring target = targetFor(d.target, comp, wkdir);
+            TargetInfo ti = targetFor(d.target);
+            std::wstring comp = ti.comp;
             if (comp.empty()) comp = componentFor(d.component, d.target);
+            std::wstring wkdir = ti.wkdir;
             if (!d.wkdir.empty()) {
                 for (const auto& kv : layout.dirs)
                     if (util::iequals(d.wkdir, kv.first) ||
                         util::iequals(d.wkdir, kv.second.key)) wkdir = kv.second.key;
             }
-            std::wstring dirKey = shortcutDirKey(d.dir);
+            std::wstring feature = featureOf(ti.relDir.empty() ? L"" : ti.relDir);
+            if (!d.component.empty()) {
+                // An explicit component can belong to a custom feature; keep
+                // the shortcut in the same feature as the payload file.
+            }
+            std::wstring dirComp;
+            std::wstring dirKey = resolveShortcutDir(d.dir, feature, dirComp);
+            if (!dirComp.empty()) comp = dirComp;
+
+            std::wstring target = ti.target;
+            if (d.advertise) {
+                if (d.target.empty())
+                    util::fail(L"advertised shortcut " + d.id + L" needs a target file "
+                              L"to determine its feature");
+                // An advertised shortcut must belong to a component whose
+                // keypath is a file (ICE19); the synthetic folder component
+                // exists only to create the directory.
+                comp = ti.comp;
+                target = feature;
+            } else if (d.target.empty()) {
+                util::fail(L"shortcut " + d.id + L" needs a target (or advertise=\"true\")");
+            }
+
             std::wstring iconKey;
             if (!d.icon.empty()) {
-                std::wstring iconPath = util::path::isDirectory(d.icon)
-                                            ? d.icon : util::path::full(d.icon);
-                if (!util::path::exists(iconPath))
-                    iconPath = util::path::join(inDir, d.icon);
-                if (!util::path::exists(iconPath)) {
+                std::wstring iconPath = absolutePath(d.icon)
+                                            ? util::path::full(d.icon)
+                                            : util::path::join(inDir, d.icon);
+                if (!util::path::isDirectory(iconPath) && !util::path::exists(iconPath)) {
+                    std::wstring alt = util::path::full(d.icon);
+                    if (util::path::exists(alt) || util::path::isDirectory(alt)) iconPath = alt;
+                }
+                if (iconPath.empty() || (!util::path::isDirectory(iconPath) &&
+                                         !util::path::exists(iconPath))) {
                     util::errLine(L"[warn] shortcut icon not found: " + d.icon);
                 } else {
-                    iconKey = toIdentifier(d.id + L"Icon");
-                    insertStreamRow(h, L"Icon", L"Name", L"Data", iconKey, iconPath);
+                    auto it = iconKeys.find(util::toLower(iconPath));
+                    if (it != iconKeys.end()) {
+                        iconKey = it->second;
+                    } else {
+                        iconKey = toIdentifier(d.id + L"Icon");
+                        insertStreamRow(h, L"Icon", L"Name", L"Data", iconKey, iconPath);
+                        iconKeys[util::toLower(iconPath)] = iconKey;
+                    }
                 }
             }
             insertRow(h, L"Shortcut",
@@ -1696,9 +1510,17 @@ Stats pack(const Options& opt) {
                       {S(d.id), S(dirKey), S(sanitizeName(d.name)), S(comp), S(target),
                        d.args.empty() ? Null() : S(d.args),
                        d.description.empty() ? Null() : S(d.description), Null(),
-                       iconKey.empty() ? Null() : S(iconKey), iconKey.empty() ? Null() : I(0),
+                       iconKey.empty() ? Null() : S(iconKey),
+                       iconKey.empty() ? Null() : I(d.iconIndex),
                        Null(), wkdir.empty() ? Null() : S(wkdir), Null(), Null(), Null(),
                        Null()});
+            for (const auto& p : d.properties) {
+                std::wstring id = toIdentifier(d.id + L"Prop" + p.key);
+                insertRow(h, L"MsiShortcutProperty",
+                          {L"MsiShortcutProperty", L"Shortcut_", L"PropertyKey",
+                           L"PropVariantValue"},
+                          {S(id), S(d.id), S(p.key), S(p.value)});
+            }
         }
 
         // Registry values.
@@ -1715,7 +1537,6 @@ Stats pack(const Options& opt) {
             if (d.type == L"integer") value = L"#" + value;
             else if (d.type == L"binary") value = L"#x" + value;
             else if (d.type == L"expand") value = L"#%" + value;
-            else if (d.type == L"multi") value = d.value;
             else if (d.type == L"key") { name = L"+"; value.clear(); }
             else if (d.type == L"keydelete") { name = L"-"; value.clear(); }
             else if (d.type == L"keycreatedelete") { name = L"*"; value.clear(); }
@@ -1737,8 +1558,7 @@ Stats pack(const Options& opt) {
             if (d.error == L"ignore") error = 0;
             else if (d.error == L"severe") error = 2;
             else if (d.error == L"critical") error = 3;
-            std::wstring comp, wkdir;
-            std::wstring image = d.image.empty() ? L"" : targetFor(d.image, comp, wkdir);
+            TargetInfo ti = d.image.empty() ? TargetInfo{} : targetFor(d.image);
             std::wstring compKey = componentFor(d.component, d.image);
             insertRow(h, L"ServiceInstall",
                       {L"ServiceInstall", L"Name", L"DisplayName", L"ServiceType",
@@ -1752,7 +1572,7 @@ Stats pack(const Options& opt) {
                        d.password.empty() ? Null() : S(d.password),
                        d.args.empty() ? Null() : S(d.args), S(compKey),
                        d.description.empty() ? Null() : S(d.description)});
-            (void)image;
+            (void)ti;
             insertRow(h, L"ServiceControl",
                       {L"ServiceControl", L"Name", L"Event", L"Arguments", L"Wait",
                        L"Component_"},
@@ -1776,6 +1596,7 @@ Stats pack(const Options& opt) {
                        S(componentFor(d.component, L""))});
         }
 
+        // Properties.
         auto prop = [&](const wchar_t* name, const std::wstring& value) {
             insertRow(h, L"Property", {L"Property", L"Value"}, {S(name), S(value)});
         };
@@ -1787,33 +1608,31 @@ Stats pack(const Options& opt) {
         prop(L"ProductLanguage", std::to_wstring(o.language));
         prop(L"INSTALLLEVEL", L"1");
         prop(L"ALLUSERS", L"1");
-        // --install-dir with an absolute path: pin the resolved location of the
-        // INSTALLFOLDER directory (command line INSTALLFOLDER= still wins).
         if (!installTarget.pinned.empty()) prop(L"INSTALLFOLDER", installTarget.pinned);
-        if (needDialogs) prop(L"DefaultUIFont", L"DlgFont8");
 
+        // Execute sequences.
         for (const auto& a : kSequence)
             insertRow(h, L"InstallExecuteSequence", {L"Action", L"Condition", L"Sequence"},
                       {S(a.name), Null(), I(a.seq)});
         for (const auto& a : kAdminSequence)
             insertRow(h, L"AdminExecuteSequence", {L"Action", L"Condition", L"Sequence"},
                       {S(a.name), Null(), I(a.seq)});
-        if (needUi) {
-            const SequenceAction* seq = needDialogs ? kUiSequenceMinimal : kUiSequenceBasic;
-            size_t count = needDialogs ? sizeof(kUiSequenceMinimal) / sizeof(SequenceAction)
-                                       : sizeof(kUiSequenceBasic) / sizeof(SequenceAction);
-            for (size_t i = 0; i < count; ++i)
+
+        // UI: basic progress only, or the full dialog set.
+        if (o.ui == L"basic") {
+            for (const auto& a : kUiSequenceBasic)
                 insertRow(h, L"InstallUISequence", {L"Action", L"Condition", L"Sequence"},
-                          {S(seq[i].name), Null(), I(seq[i].seq)});
+                          {S(a.name), Null(), I(a.seq)});
+        } else if (uiEnabled) {
+            applyUi(h, uiSpec, temp.path(), productName);
         }
-        if (needDialogs) buildMinimalUi(h, productName);
 
         // Embedded cabinets as _Streams rows.
         for (size_t g = 0; g < cabPaths.size(); ++g)
             insertStreamRow(h, L"_Streams", L"Name", L"Data",
                             L"cab" + std::to_wstring(g + 1) + L".cab", cabPaths[g]);
 
-        // SummaryInformation (must be persisted before commit).
+        // SummaryInformation.
         msi::Handle sum;
         util::checkMsi(MsiGetSummaryInformationW(h, nullptr, 20, sum.out()),
                        L"MsiGetSummaryInformationW");
@@ -1826,19 +1645,19 @@ Stats pack(const Options& opt) {
             util::checkMsi(MsiSummaryInfoSetPropertyW(sum.get(), id, 3, v, nullptr, nullptr),
                            L"summary integer " + std::to_wstring(id));
         };
-        setStr(2, productName);                                   // Title
-        setStr(3, productName);                                   // Subject
-        setStr(4, o.manufacturer);                                // Author
-        setStr(7, platform + L";" + std::to_wstring(o.language));  // Template
-        setStr(9, productCode);                                   // Revision/PackageCode
-        setInt(14, 200);                                          // min. installer 2.0
-        setInt(15, 2);                                            // long names + compressed
-        setStr(18, L"msitool");                                   // Creating application
-        setInt(19, 2);                                            // read-only recommended
+        setStr(2, productName);
+        setStr(3, productName);
+        setStr(4, o.manufacturer);
+        setStr(7, platform + L";" + std::to_wstring(o.language));
+        setStr(9, productCode);
+        setInt(14, 200);
+        setInt(15, 2);
+        setStr(18, L"msitool");
+        setInt(19, 2);
         util::checkMsi(MsiSummaryInfoPersist(sum.get()), L"MsiSummaryInfoPersist");
 
         util::checkMsi(MsiDatabaseCommit(h), L"MsiDatabaseCommit");
-    }  // closes all MSI handles, flushing the file
+    }
 
     // --- 3. Companion layout tree for > 2 GiB files ------------------------
     if (!externalFiles.empty()) {
