@@ -289,10 +289,12 @@ const Ic kPageIcon[PgCount] = {
 // Drag & drop
 //
 // A drop is routed by *position first, content second*: every page publishes
-// the fields that accept a drop, the field under the cursor wins, and the
-// window-wide fallback decides by what was dragged. On the pack page a folder
-// becomes "源目录", a manifest goes to "配置文件", a .pfx to "签名证书" and
-// everything else keeps the long-standing "open the package" behaviour.
+// the fields that accept a drop, the field under the cursor wins, and every
+// other spot falls back to the payload itself. That fallback keeps the two
+// workflows strictly apart: a folder is always pack input (源目录, switching to
+// the pack page if needed) and an .msi / .msp is always read input (opened on
+// the read side). The pack page never opens a package, so the pack form can
+// never show the state of the read side.
 // ---------------------------------------------------------------------------
 enum DropKind {
     DkNone = 0,
@@ -301,8 +303,8 @@ enum DropKind {
     DkManifest,     // pack: pack.ini manifest
     DkCert,         // pack: .pfx signing certificate
     DkOutDir,       // extract / export: destination directory
-    DkPackage,      // open an .msi / .msp
-    DkAuto          // pack page background: route by content
+    DkPackage,      // open an .msi / .msp (not used as a fallback any more)
+    DkAuto          // page background: route by content
 };
 
 struct DropZone {
@@ -1086,10 +1088,12 @@ public:
         RECT filebar = R(left, header.bottom + S(10), right - left, S(76));
         // The extract page is an Explorer-like full-page browser: no page
         // title and no redundant "current package" bar, so the file list is
-        // the main subject and gets the whole client area.
+        // the main subject and gets the whole client area. The pack page is
+        // the other way round: it produces a package, it does not read one,
+        // so showing "当前包文件" there only mixes the two workflows.
         int bodyTop = page_ == PgExtract ? top
-                    : page_ == PgSettings ? header.bottom + S(16)
-                    : filebar.bottom + S(16);
+                    : showsFileBar() ? filebar.bottom + S(16)
+                                     : header.bottom + S(16);
         RECT body = R(left, bodyTop, right - left,
                       rc.bottom - statusH - S(16) - bodyTop);
         return {rc, header, filebar, body};
@@ -1132,7 +1136,7 @@ public:
                      kPageSubtitle[page_], t.fSmall, t.subText);
         }
 
-        if (page_ != PgSettings && page_ != PgExtract) {
+        if (showsFileBar()) {
             addCard(b.filebar, L"", L"");
             addLabel(R(b.filebar.left + S(16), b.filebar.top + S(8), S(240), S(18)),
                      L"当前包文件", t.fSmall, t.subText);
@@ -1606,12 +1610,19 @@ public:
         if (p == PgVerify && !package_.empty()) runVerify();
     }
 
+    // The "current package" bar belongs to the read side of the tool. It is
+    // hidden on 解包 (its own browser shows the package), on 打包 (which builds
+    // a package) and on 设置.
+    bool showsFileBar() const {
+        return page_ != PgSettings && page_ != PgExtract && page_ != PgPack;
+    }
+
     void setVisibility() {
         for (auto& w : widgets_) {
             int p = w->page();
             bool v = p >= 0 ? (p == page_)
                    : p == -1 ? true
-                   : p == -2 ? (page_ != PgSettings && page_ != PgExtract)
+                   : p == -2 ? showsFileBar()
                    : (page_ == PgExtract || page_ == PgExport || page_ == PgPack);
             if (page_ == PgPack && w->tab() >= 0 && w->tab() != packTab_)
                 v = false;
@@ -1891,6 +1902,10 @@ public:
         runVerify();
         status_ = L"已打开 " + util::path::fileName(full);
         toast(L"已载入 " + util::path::fileName(full), 3);
+        // A package belongs to the read / extract side. The pack page has no
+        // "current package" bar, so never leave a freshly opened package
+        // invisible behind the pack form.
+        if (page_ == PgPack && !running_) switchPage(PgInfo);
         layout();
     }
 
@@ -2279,6 +2294,9 @@ public:
             std::wstring packed = lastPackOutput_;
             lastPackOutput_.clear();
             loadPackage(packed);           // inspect the freshly built MSI
+            // The pack page itself no longer shows packages: follow the result
+            // to the summary page instead of hiding it behind the form.
+            if (res->ok && page_ == PgPack) switchPage(PgInfo);
         } else {
             lastPackOutput_.clear();
             if (!package_.empty()) populate();
@@ -3057,14 +3075,14 @@ public:
         case PgExtract:
             field(tbOutDir_, DkOutDir, L"解包到",
                   {btnOutBrowse_, btnRecentDirs_, btnExtractOpen_});
-            fallback(rc, {}, DkPackage, L"安装包");
+            fallback(rc, {}, DkAuto, L"自动分配");
             break;
         case PgExport:
             field(tbExportDir_, DkOutDir, L"输出目录", {btnExportBrowse_});
-            fallback(rc, {}, DkPackage, L"安装包");
+            fallback(rc, {}, DkAuto, L"自动分配");
             break;
         default:
-            fallback(rc, {}, DkPackage, L"安装包");
+            fallback(rc, {}, DkAuto, L"自动分配");
             break;
         }
     }
@@ -3104,11 +3122,32 @@ public:
         if (zoneHit_ < 0 || zoneHit_ >= static_cast<int>(zones_.size()))
             return L"";
         const DropZone& z = zones_[zoneHit_];
-        if (z.kind == DkAuto)
-            return L"松开：文件夹→源目录 · .ini→配置文件 · .pfx→证书";
-        if (z.kind == DkPackage)
-            return L"松开：打开安装包 (.msi / .msp)";
-        return util::fmt(L"松开：设为「%s」", z.name.c_str());
+        if (z.kind != DkAuto)
+            return util::fmt(L"松开：设为「%s」", z.name.c_str());
+        // Nothing but the page itself under the cursor: describe what the
+        // payload will become. The pack page never advertises "open package",
+        // and every other page states that a folder belongs to packing.
+        bool hasDir = false, hasPackage = false, hasManifest = false,
+             hasCert = false;
+        for (const std::wstring& p : dragPaths_) {
+            if (util::path::isDirectory(p)) { hasDir = true; continue; }
+            if (extIs(p, {L".msi", L".msp"})) hasPackage = true;
+            else if (extIs(p, {L".pfx", L".p12"})) hasCert = true;
+            else if (extIs(p, {L".ini", L".cfg", L".conf"})) hasManifest = true;
+        }
+        if (hasDir)
+            return page_ == PgPack ? L"松开：设为「源目录」"
+                                   : L"松开：设为「源目录」并切到「打包」页";
+        if (hasPackage)
+            return page_ == PgPack ? L"松开：打包页不打开安装包"
+                                   : L"松开：打开安装包 (.msi / .msp)";
+        if (hasCert)
+            return page_ == PgPack ? L"松开：设为「签名证书」"
+                                   : L"松开：设为「签名证书」并切到「打包」页";
+        if (hasManifest)
+            return page_ == PgPack ? L"松开：设为「配置文件」"
+                                   : L"松开：设为「配置文件」并切到「打包」页";
+        return L"松开：按内容分配";
     }
 
     void glowZones() {
@@ -3155,15 +3194,15 @@ public:
         *effect = DROPEFFECT_COPY;
     }
 
-    // What a landing point means. Outside every zone - the caption bar, a
-    // spot the layout does not claim - the pack page still auto-routes and
-    // the other pages keep the long-standing "open that package" behaviour.
+    // What a landing point means. A field keeps its own meaning; every other
+    // spot (page background, caption bar, a row the layout does not claim) is
+    // routed by content, on every page. That is what keeps the two workflows
+    // apart: a folder is always pack input, a package is always read input.
     DropKind dropKindAt(POINTL pt) const { return dropKindFor(toClient(pt)); }
 
     DropKind dropKindFor(POINT c) const {
         int hit = zoneAt(c);
-        if (hit >= 0) return zones_[hit].kind;
-        return page_ == PgPack ? DkAuto : DkPackage;
+        return hit >= 0 ? zones_[hit].kind : DkAuto;
     }
 
     void releaseDrag() {
@@ -3199,13 +3238,19 @@ public:
             toast(L"拖放的项不在同一个位置，无法确定源目录", 2);
             return;
         }
+        // A folder is pack input, no matter which page received the drop: the
+        // pack form is the only place where it becomes visible.
+        const bool movedToPack = page_ != PgPack && !running_;
+        if (page_ != PgPack) switchPage(PgPack);
         if (packTab_ != 0) setPackTab(0);
         tbSrcDir_->setValue(dir);
         suggestPackDefaults();
         bool oneDir = paths.size() == 1 && util::path::isDirectory(paths[0]);
         logLine(L"[drop] 源目录 = " + dir);
-        toast(oneDir ? L"源目录：" + dir
-                     : L"源目录：" + dir + L"（打包以目录为单位，含其下全部内容）",
+        std::wstring suffix = movedToPack ? L"（已切到「打包」页）" : L"";
+        toast(oneDir ? L"源目录：" + dir + suffix
+                     : L"源目录：" + dir +
+                           L"（打包以目录为单位，含其下全部内容）" + suffix,
               oneDir ? 3 : 1);
     }
 
@@ -3264,6 +3309,7 @@ public:
         }
         std::wstring full = util::path::full(file);
         bool known = extIs(full, {L".ini", L".cfg", L".conf", L".txt"});
+        if (page_ != PgPack) switchPage(PgPack);   // the form is pack input
         if (packTab_ != 1) setPackTab(1);
         tbConfig_->setValue(full);
         logLine(L"[drop] 清单 = " + full);
@@ -3277,6 +3323,7 @@ public:
             if (util::path::isDirectory(p)) continue;
             if (!extIs(p, {L".pfx", L".p12"})) continue;
             std::wstring full = util::path::full(p);
+            if (page_ != PgPack) switchPage(PgPack);   // the form is pack input
             if (packTab_ != 2) setPackTab(2);
             tbSignCert_->setValue(full);
             logLine(L"[drop] 证书 = " + full);
@@ -3304,21 +3351,36 @@ public:
         toast(L"输出目录：" + dir, 3);
     }
 
-    // Blank area of the pack page: the content picks the field.
+    // Blank area of any page: the content decides which workflow the drop
+    // belongs to. Folders build packages, packages are opened (read side),
+    // manifests and certificates fill the pack form. The pack page never
+    // opens a package, so a package dropped there cannot leak read-side state
+    // into the pack form.
     void dropAuto(const std::vector<std::wstring>& paths) {
-        for (const std::wstring& p : paths)
-            if (util::path::isDirectory(p)) { dropSource(paths); return; }
+        for (const std::wstring& p : paths) {
+            if (!util::path::isDirectory(p)) continue;
+            dropSource(paths);          // folder = source dir (switches page)
+            return;
+        }
         const std::wstring& p = paths.front();
         if (extIs(p, {L".pfx", L".p12"})) { dropCert(paths); return; }
         if (extIs(p, {L".ini", L".cfg", L".conf"})) { dropManifest(paths); return; }
-        if (extIs(p, {L".msi", L".msp"})) { dropOpen(paths); return; }
-        dropSource(paths);
+        if (extIs(p, {L".msi", L".msp"})) {
+            if (page_ == PgPack) {
+                toast(L"打包页不打开安装包：这里只接收源目录 / 清单 / 证书；"
+                      L"要查看或解包请用「概览」「包信息」「解包」", 1);
+                return;
+            }
+            dropOpen(paths);
+            return;
+        }
+        dropSource(paths);              // a single file = its folder
     }
 
     void dropOpen(const std::vector<std::wstring>& paths) {
         for (const std::wstring& p : paths)
             if (extIs(p, {L".msi", L".msp"})) { loadPackage(p); return; }
-        toast(L"请拖入 .msi / .msp 安装包，或把文件夹拖到「打包」页", 1);
+        toast(L"请拖入 .msi / .msp 安装包；文件夹会作为「打包」源目录", 1);
     }
 
     void logLine(const std::wstring& text) {
