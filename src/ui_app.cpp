@@ -3522,6 +3522,13 @@ public:
             mm->ptMinTrackSize.y = minH;
             return 0;
         }
+        case WM_MOVE:
+            // The toast is an owned top-most popup, not a child: Windows moves
+            // the owner but leaves the popup where it was. Re-anchor it on
+            // every move (including the moves made by the modal title-bar
+            // drag loop) so the notification follows the window.
+            if (toastVisible_) positionToast();
+            return 0;
         case WM_SIZE:
             btnMax_->icon = IsZoomed(hwnd_) ? Ic::Restore : Ic::Max;
             btnMax_->invalidate();
