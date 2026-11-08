@@ -110,6 +110,7 @@ build\msitool_x64.exe gui setup.msi         :: 启动 GUI 并直接打开一个�
 - 窗口、消息循环、拖拽、高 DPI（`SetProcessDpiAwarenessContext` / `GetDpiForWindow`）、系统文件对话框（`IFileDialog`）、剪贴板、注册表全部用 user32 / shell32 / ole32 / advapi32；
 - 所有像素由 gdi32 绘制到内存 DC 双缓冲：圆角卡片、渐变 Hero、导航选中态、数据网格、切换开关、进度条、日志、Toast、以及 30 多个用 `MoveToEx`/`LineTo`/`RoundRect`/`Ellipse` 画的矢量图标；
 - 每个控件都是一个自绘 `HWND`（共用一套窗口过程 + C++ 对象路由），只有文本输入使用系统原生 `EDIT` 子窗口以获得输入法、光标与选字能力，边框、占位文字、焦点强调线仍由 GDI 绘制；
+- 布局全部按当前客户区尺寸计算：列宽、行距、控件高度、日志高度随窗口缩放 / 最大化实时自适应；打包表单拆成 TabView 分页，小窗口下也不会字段堆叠；
 - 无边框标题栏通过 `WM_NCCALCSIZE` / `WM_NCHITTEST` 自绘，并动态加载 `dwmapi.dll` 设置 Win11 圆角与深色边框；
 - 亮/暗/跟随系统三套主题，主题设置与最近打开的包保存在 `HKCU\Software\msitool`；所有尺寸按 DPI 缩放；
 - 耗时的 `extract` / `export` / `pack` 在工作线程执行，通过 `PostMessage` 把日志与完成状态送回 UI 线程；`util::outLine` / `errLine` 新增可选日志钩子，让现有 CLI 代码的输出直接变成 GUI 日志。
@@ -124,7 +125,7 @@ build\msitool_x64.exe gui setup.msi         :: 启动 GUI 并直接打开一个�
 | SQL 查询 | MSI SQL 编辑器、示例查询、结果网格与耗时 |
 | 解包 | 输出目录、六个开关、MST transform、基准 MSI、运行日志 |
 | 导出 | CAB / 完整归档两种模式、运行日志 |
-| 打包 | 产品标识、平台、分卷、清单、签名、开关的完整表单，完成后自动打开新 MSI |
+| 打包 | 「基本 / 高级 / 签名」三个标签页，字段按窗口尺寸自适应两列排布；右上角「开始打包」常驻，完成后自动打开新 MSI |
 | 验证 | 签名 / `MsiOpenDatabase` / `MsiVerifyPackage` / `_Tables` / 媒体检查报告 |
 | 设置 | 主题、DPI 信息、关于与快捷键 |
 

@@ -302,6 +302,10 @@ public:
     Button* btnExportBrowse_ = nullptr;
     Button* btnExport_ = nullptr;
     // pack -----------------------------------------------------------------
+    int    packTab_ = 0;              // 0 basic, 1 advanced, 2 signing
+    Button* btnTabBasic_ = nullptr;
+    Button* btnTabAdvanced_ = nullptr;
+    Button* btnTabSign_ = nullptr;
     TextBox* tbSrcDir_ = nullptr;      Button* btnSrcBrowse_ = nullptr;
     TextBox* tbOutMsi_ = nullptr;      Button* btnOutMsiBrowse_ = nullptr;
     TextBox* tbName_ = nullptr;
@@ -607,6 +611,16 @@ public:
                                 [this] { startExport(); });
 
         // ---- Pack ---------------------------------------------------------
+        // The form is split into three tabs so every field stays readable at
+        // any window size; the action button lives in the tab bar.
+        btnTabBasic_ = makeButton(PgPack, L"基本", Ic::Pack, false,
+                                  [this] { setPackTab(0); });
+        btnTabAdvanced_ = makeButton(PgPack, L"高级", Ic::Settings, false,
+                                     [this] { setPackTab(1); });
+        btnTabSign_ = makeButton(PgPack, L"签名", Ic::Shield, false,
+                                 [this] { setPackTab(2); });
+        btnTabBasic_->accent = true;
+
         tbSrcDir_ = makeText(PgPack, L"要打包的源目录");
         btnSrcBrowse_ = makeButton(PgPack, L"浏览", Ic::Folder, false,
                                    [this] { browseFolderFor(tbSrcDir_, L"选择源目录");
@@ -644,6 +658,16 @@ public:
         chkEmptyDirs_ = makeCheck(PgPack, L"保留空目录", true);
         btnPack_ = makeButton(PgPack, L"开始打包", Ic::Pack, true,
                               [this] { startPack(); });
+
+        auto tag = [this](int tab, std::initializer_list<Widget*> ws) {
+            for (Widget* w : ws) w->setTab(tab);
+        };
+        tag(0, {tbSrcDir_, btnSrcBrowse_, tbOutMsi_, btnOutMsiBrowse_,
+                tbName_, tbVersion_, tbManufacturer_, ddPlatform_,
+                tbLanguage_, ddUi_});
+        tag(1, {tbCabSize_, tbConfig_, btnConfigBrowse_, ddLargeFiles_,
+                chkForce_, chkPackDry_, chkPackVerbose_, chkEmptyDirs_});
+        tag(2, {tbSignCert_, btnSignCertBrowse_, tbSignPassword_, tbSignTime_});
 
         // ---- Verify -------------------------------------------------------
         gridVerify_ = add<DataGrid>(PgVerify);
@@ -918,57 +942,115 @@ public:
 
     void layoutPack(const RECT& body) {
         Theme& t = theme();
-        int logH = S(132);
-        int cardsH = H(body) - logH - S(16);
-        int gap = S(16);
-        int colW = (W(body) - gap) / 2;
-        RECT c1 = R(body.left, body.top, colW, cardsH);
-        RECT c2 = R(c1.right + gap, body.top, colW, cardsH);
-        RECT c3 = R(body.left, c1.bottom + S(16), W(body), logH);
-        addCard(c1, L"基本信息", L"目录、产品标识与平台", Ic::Pack);
-        addCard(c2, L"高级选项", L"分卷、清单、签名与开关", Ic::Settings);
-        addCard(c3, L"运行日志", L"FCI 压缩与 Msi 建库过程", Ic::Terminal);
-        log_->setRect(R(c3.left + S(12), c3.top + S(44),
-                        W(c3) - S(24), H(c3) - S(56)));
-        btnClearLog_->setRect(R(c3.right - S(96), c3.top + S(10), S(84), S(30)));
-        btnOpenFolder_->setRect(R(c3.right - S(212), c3.top + S(10), S(108), S(30)));
+        const int gap = S(16);
+        const int tabH = S(46);
 
-        // Compact Fluent form rows: label + 28px control, repeated in 2 columns.
-        auto field = [&](RECT c, int i, const wchar_t* label, Widget* ctrl,
+        // Everything below is derived from the current client size: log
+        // height, form height, row pitch, control height and column width all
+        // adapt when the window is resized / maximized.
+        int logH = std::min(S(170), std::max(S(96), H(body) * 22 / 100));
+        int formH = H(body) - tabH - gap - logH - gap;
+        const int minFormH = S(230);
+        if (formH < minFormH) {
+            logH = std::max(S(72), H(body) - tabH - gap * 2 - minFormH);
+            formH = H(body) - tabH - gap - logH - gap;
+        }
+        RECT tabBar  = R(body.left, body.top, W(body), tabH);
+        RECT form    = R(body.left, tabBar.bottom + gap, W(body), formH);
+        RECT logCard = R(body.left, form.bottom + gap, W(body), logH);
+
+        static const wchar_t* kTitle[3] = {
+            L"基本信息", L"高级选项", L"代码签名（可选）"};
+        static const wchar_t* kSub[3] = {
+            L"源目录、输出路径与产品标识",
+            L"分卷、清单、大文件与构建开关",
+            L"Authenticode 签名需要 signtool.exe 与代码签名证书"};
+        static const Ic kIcon[3] = {Ic::Pack, Ic::Settings, Ic::Shield};
+        addCard(tabBar, L"", L"");
+        addCard(form, kTitle[packTab_], kSub[packTab_], kIcon[packTab_]);
+        addCard(logCard, L"运行日志", L"FCI 压缩与 Msi 建库过程", Ic::Terminal);
+
+        // Tab strip + always-visible primary action.
+        int tw = S(112), th = tabH - S(10), tx = tabBar.left + S(10);
+        int ty = tabBar.top + S(5);
+        btnTabBasic_->setRect(R(tx, ty, tw, th));
+        btnTabAdvanced_->setRect(R(tx + tw + S(8), ty, tw, th));
+        btnTabSign_->setRect(R(tx + (tw + S(8)) * 2, ty, tw, th));
+        btnPack_->setRect(R(tabBar.right - S(10) - S(170), ty, S(170), th));
+
+        // Two adaptive columns inside the form card.
+        const int padX = S(18), colGap = S(28);
+        int innerW = W(form) - padX * 2 - colGap;
+        int colW = innerW / 2;
+        int leftX = form.left + padX;
+        int rightX = leftX + colW + colGap;
+        const int headerPad = S(58);
+        const int rows = 4;
+        int usable = std::max(S(120), H(form) - headerPad - S(16));
+        int rowH = std::min(S(76), std::max(S(34), usable / rows));
+        int labelH = S(18);
+        // Keep a little breathing room between a control and the next row's
+        // label even when the window is at its minimum size.
+        int ctrlH = std::min(S(32), std::max(S(20), rowH - labelH - S(6)));
+
+        auto field = [&](int col, int row, const wchar_t* label, Widget* ctrl,
                          Button* browse) {
-            int y = c.top + S(44) + i * S(44);
-            addLabel(R(c.left + S(16), y, W(c) - S(32), S(16)),
-                     label, t.fSmall, t.subText);
-            int cy = y + S(18);
-            int bw = browse ? S(72) : 0;
-            ctrl->setRect(R(c.left + S(16), cy,
-                            W(c) - S(32) - bw - (bw ? S(8) : 0), S(28)));
-            if (browse) browse->setRect(R(c.right - S(16) - bw, cy, bw, S(28)));
+            int x = col == 0 ? leftX : rightX;
+            int y = form.top + headerPad + row * rowH;
+            addLabel(R(x, y, colW, labelH), label, t.fSmall, t.subText);
+            int cy = y + labelH + S(2);
+            int bw = browse ? S(78) : 0;
+            ctrl->setRect(R(x, cy, colW - bw - (bw ? S(8) : 0), ctrlH));
+            if (browse) browse->setRect(R(x + colW - bw, cy, bw, ctrlH));
         };
-        field(c1, 0, L"源目录", tbSrcDir_, btnSrcBrowse_);
-        field(c1, 1, L"输出 MSI", tbOutMsi_, btnOutMsiBrowse_);
-        field(c1, 2, L"产品名称", tbName_, nullptr);
-        field(c1, 3, L"产品版本", tbVersion_, nullptr);
-        field(c1, 4, L"制造商", tbManufacturer_, nullptr);
-        field(c1, 5, L"平台", ddPlatform_, nullptr);
-        field(c1, 6, L"语言 (LCID)", tbLanguage_, nullptr);
-        field(c1, 7, L"安装界面", ddUi_, nullptr);
+        auto note = [&](int col, int row, int spanRows, const wchar_t* text) {
+            int x = col == 0 ? leftX : rightX;
+            int y = form.top + headerPad + row * rowH + S(6);
+            int h = std::min(rowH * spanRows,
+                             static_cast<int>(form.bottom - y - S(10)));
+            if (h > S(16))
+                addLabel(R(x, y, colW, h), text, t.fSmall, t.muted,
+                         DT_LEFT | DT_TOP | DT_WORDBREAK);
+        };
 
-        field(c2, 0, L"CAB 分卷大小", tbCabSize_, nullptr);
-        field(c2, 1, L"配置文件 (pack.ini)", tbConfig_, btnConfigBrowse_);
-        field(c2, 2, L"大文件处理", ddLargeFiles_, nullptr);
-        field(c2, 3, L"签名证书 (.pfx)", tbSignCert_, btnSignCertBrowse_);
-        field(c2, 4, L"证书密码", tbSignPassword_, nullptr);
-        field(c2, 5, L"时间戳 URL", tbSignTime_, nullptr);
-        int cy = c2.top + S(44) + 6 * S(44) + S(18);
-        int cw = (W(c2) - S(32)) / 4;
-        chkForce_->setRect(R(c2.left + S(16), cy, cw - S(6), S(28)));
-        chkPackDry_->setRect(R(c2.left + S(16) + cw, cy, cw - S(6), S(28)));
-        chkPackVerbose_->setRect(R(c2.left + S(16) + cw * 2, cy, cw - S(6), S(28)));
-        chkEmptyDirs_->setRect(R(c2.left + S(16) + cw * 3, cy, cw - S(6), S(28)));
-        btnPack_->setRect(R(c2.left + S(16),
-                            std::min(cy + S(44), static_cast<int>(c2.bottom - S(50))),
-                            S(184), S(36)));
+        if (packTab_ == 0) {
+            field(0, 0, L"源目录", tbSrcDir_, btnSrcBrowse_);
+            field(0, 1, L"输出 MSI", tbOutMsi_, btnOutMsiBrowse_);
+            field(0, 2, L"产品名称", tbName_, nullptr);
+            field(0, 3, L"产品版本", tbVersion_, nullptr);
+            field(1, 0, L"制造商", tbManufacturer_, nullptr);
+            field(1, 1, L"平台", ddPlatform_, nullptr);
+            field(1, 2, L"语言 (LCID)", tbLanguage_, nullptr);
+            field(1, 3, L"安装界面", ddUi_, nullptr);
+        } else if (packTab_ == 1) {
+            field(0, 0, L"CAB 分卷大小", tbCabSize_, nullptr);
+            field(0, 1, L"配置文件 (pack.ini)", tbConfig_, btnConfigBrowse_);
+            field(0, 2, L"大文件处理", ddLargeFiles_, nullptr);
+            note(0, 3, 1, L"留空表示单个 CAB；支持 16M / 1G 等形式。清单可描述 Feature、快捷方式、注册表、服务与环境变量。");
+            int cbw = colW / 2 - S(6);
+            int cbh = std::min(S(38), rowH);
+            int cby = form.top + headerPad;
+            chkForce_->setRect(R(rightX, cby, cbw, cbh));
+            chkPackDry_->setRect(R(rightX + colW / 2, cby, cbw, cbh));
+            chkPackVerbose_->setRect(R(rightX, cby + cbh, cbw, cbh));
+            chkEmptyDirs_->setRect(R(rightX + colW / 2, cby + cbh, cbw, cbh));
+            note(1, 2, 2, L"开关作用于本次打包：dry-run 只打印计划不写文件；详细日志会把每个文件与 CAB 的构建过程输出到右侧日志。");
+        } else {
+            field(0, 0, L"签名证书 (.pfx)", tbSignCert_, btnSignCertBrowse_);
+            field(0, 1, L"证书密码", tbSignPassword_, nullptr);
+            field(0, 2, L"时间戳 URL", tbSignTime_, nullptr);
+            note(0, 3, 1, L"三项都留空即不签名；签名会写入 \\x05DigitalSignature 流并再次自检。");
+            note(1, 0, 4, L"打包完成后会自动打开生成的 MSI，方便立即检查表、CAB 与验证报告。\n\n源目录与输出 MSI 在「基本」标签页，构建开关在「高级」标签页；无论当前在哪个标签页，右上角的「开始打包」都会使用全部字段。");
+        }
+
+        // Log card is shared with the extract / export pages.
+        int logBody = std::max(S(24), H(logCard) - S(56));
+        log_->setRect(R(logCard.left + S(12), logCard.top + S(44),
+                        W(logCard) - S(24), logBody));
+        btnClearLog_->setRect(R(logCard.right - S(96), logCard.top + S(8),
+                                S(84), S(30)));
+        btnOpenFolder_->setRect(R(logCard.right - S(212), logCard.top + S(8),
+                                  S(108), S(30)));
     }
 
     void layoutVerify(const RECT& body) {
@@ -1038,8 +1120,22 @@ public:
                    : p == -2 ? (page_ != PgSettings)
                    : p == -4 ? toastVisible_
                    : (page_ == PgExtract || page_ == PgExport || page_ == PgPack);
+            if (page_ == PgPack && w->tab() >= 0 && w->tab() != packTab_)
+                v = false;
             w->setVisible(v);
         }
+    }
+
+    void setPackTab(int tab) {
+        packTab_ = tab;
+        btnTabBasic_->accent = (tab == 0);
+        btnTabAdvanced_->accent = (tab == 1);
+        btnTabSign_->accent = (tab == 2);
+        btnTabBasic_->invalidate();
+        btnTabAdvanced_->invalidate();
+        btnTabSign_->invalidate();
+        setVisibility();
+        layout();
     }
 
     // ---- painting --------------------------------------------------------

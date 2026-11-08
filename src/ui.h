@@ -141,6 +141,9 @@ public:
     bool enabled() const noexcept { return enabled_; }
     void setPage(int p) noexcept { page_ = p; }
     int  page() const noexcept { return page_; }
+    // Optional sub-tab on a page (used by the pack form). -1 = always shown.
+    void setTab(int t) noexcept { tab_ = t; }
+    int  tab() const noexcept { return tab_; }
     void setTip(const std::wstring& t) { tip_ = t; }
     virtual void invalidate();
     virtual void takeFocus();
@@ -174,6 +177,7 @@ protected:
     RECT  rc_{};
     int   id_ = 0;
     int   page_ = -1;
+    int   tab_ = -1;
     bool  visible_ = true;
     bool  enabled_ = true;
     bool  hover_ = false;
