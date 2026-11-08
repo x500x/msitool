@@ -50,8 +50,11 @@ void Widget::create(HWND parent, int id, const RECT& rc, bool popup) {
     rc_ = rc;
     popup_ = popup;
     DWORD ex = popup ? (WS_EX_TOOLWINDOW | WS_EX_TOPMOST) : 0;
-    DWORD style = popup ? (WS_POPUP | WS_VISIBLE)
-                        : (WS_CHILD | WS_VISIBLE | WS_TABSTOP);
+    // WS_CLIPSIBLINGS is essential for overlay widgets (toast, popup menu):
+    // without it, a repainting sibling covers a higher-Z child window even
+    // though the overlay was created later / raised with HWND_TOP.
+    DWORD style = popup ? (WS_POPUP | WS_VISIBLE | WS_CLIPSIBLINGS)
+                        : (WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_CLIPSIBLINGS);
     hwnd_ = CreateWindowExW(ex, widgetClassName(), L"", style,
                             rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top,
                             parent, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),

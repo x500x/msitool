@@ -110,6 +110,7 @@ build\msitool_x64.exe gui setup.msi         :: 启动 GUI 并直接打开一个�
 - 窗口、消息循环、拖拽、高 DPI（`SetProcessDpiAwarenessContext` / `GetDpiForWindow`）、系统文件对话框（`IFileDialog`）、剪贴板、注册表全部用 user32 / shell32 / ole32 / advapi32；
 - 所有像素由 gdi32 绘制到内存 DC 双缓冲：圆角卡片、渐变 Hero、导航选中态、数据网格、切换开关、进度条、日志、Toast、以及 30 多个用 `MoveToEx`/`LineTo`/`RoundRect`/`Ellipse` 画的矢量图标；
 - 每个控件都是一个自绘 `HWND`（共用一套窗口过程 + C++ 对象路由），只有文本输入使用系统原生 `EDIT` 子窗口以获得输入法、光标与选字能力，边框、占位文字、焦点强调线仍由 GDI 绘制；
+- Toast 通知是独立置顶的无焦点浮层（`WS_POPUP`），不会被内容区控件或布局重绘遮挡，随窗口尺寸自动定位；
 - 布局全部按当前客户区尺寸计算：列宽、行距、控件高度、日志高度随窗口缩放 / 最大化实时自适应；打包表单拆成 TabView 分页，小窗口下也不会字段堆叠；解包页隐去全局「当前包文件」栏与页面大标题，整页就是文件浏览器，选项与日志默认收起；
 - 无边框标题栏通过 `WM_NCCALCSIZE` / `WM_NCHITTEST` 自绘，并动态加载 `dwmapi.dll` 设置 Win11 圆角与深色边框；
 - 亮/暗/跟随系统三套主题，主题设置与最近打开的包保存在 `HKCU\Software\msitool`；所有尺寸按 DPI 缩放；

@@ -31,6 +31,9 @@
 
 ### Fixed
 
+- GUI Toast 通知会被内容区控件 / 卡片重绘遮挡：改为独立置顶 `WS_POPUP` 浮层（`WS_EX_TOPMOST | WS_EX_NOACTIVATE`，随窗口尺寸重新定位），所有子窗口补上 `WS_CLIPSIBLINGS`；隐藏时重绘下方控件，避免残影。
+- 折叠「选项」面板时第三行开关溢出面板、压到文件列表：开关改为 3 列 × 2 行并留足面板高度。
+
 - `DataGrid` 在窗口尺寸变化后未夹紧滚动位置，导致行被跳过、点击命中错行（解包页目录树右键会选中错误目录）：`setRect` 时重新钳制 `scrollX/scrollY`。
 
 - 解析 `Directory.DefaultDir` 的 `target:source` 双路径语法：未压缩 administrative layout 中 `.:x64`、`.:LANGS-~1|Langs-x64` 之类目录不再被误解析成 `._x64`，源文件能正确定位（NetLimiter x64 样例 147 个 `No source data` 警告 → 0）。

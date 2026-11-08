@@ -421,7 +421,10 @@ public:
     Button* btnLight_ = nullptr;
     Button* btnDark_ = nullptr;
     Button* btnSystem_ = nullptr;
-    ToastView* toastView_ = nullptr;  // created last = highest child Z-order
+    // A separate always-on-top popup window (like the context menu), so no
+    // sibling widget, card or layout repaint can ever cover the notification.
+    std::unique_ptr<ToastView> toastView_;
+    RECT toastClientRect_{};          // client-space rect, for repaint-on-hide
 
     // ---- creation --------------------------------------------------------
     template <class T> T* add(int page) {
@@ -501,6 +504,7 @@ public:
         theme().rebuild(hwnd_, dark);
         setDwmAttribute(hwnd_, 20 /*DWMWA_USE_IMMERSIVE_DARK_MODE*/, dark ? 1 : 0);
         for (auto& w : widgets_) { w->onThemeChanged(); w->invalidate(); }
+        if (toastView_) { toastView_->onThemeChanged(); toastView_->invalidate(); }
         if (btnTheme_) {
             btnTheme_->icon = dark ? Ic::Sun : Ic::Moon;
             btnTheme_->invalidate();
@@ -862,8 +866,7 @@ public:
 
         // Toast is a separate child window so it can float above the cards,
         // grids and every other widget.
-        toastView_ = add<ToastView>(-4);
-        toastView_->setVisible(false);
+        toastView_ = std::make_unique<ToastView>();
 
         applyTheme();
         layout();
@@ -930,10 +933,8 @@ public:
 
         progress_->setRect(R(b.client.right - S(220),
                              b.client.bottom - statusH + S(14), S(200), S(6)));
-        if (toastVisible_) {
-            toastView_->setRect(R(b.client.right - S(390),
-                                  b.client.bottom - statusH - S(76),
-                                  S(370), S(64)));
+        if (toastVisible_ && toastView_ && toastView_->hwnd()) {
+            positionToast();
         }
 
         // Static texts for caption / nav / header / file bar.
@@ -1097,7 +1098,7 @@ public:
         Theme& t = theme();
         const int gap = S(8);
         const int cmdH = S(46);
-        const int optH = extractAdv_ ? S(96) : 0;
+        const int optH = extractAdv_ ? S(104) : 0;
         const int logH = extractLog_ ? S(150) : 0;
         const int statusH = S(26);
 
@@ -1171,10 +1172,12 @@ public:
             int rx = ox + colW + S(16);
             Check* checks[] = {chkFlat_, chkDry_, chkSkip_, chkSource_,
                                chkKeepTemp_, chkVerbose_};
+            // 3 columns x 2 rows keeps the panel short enough that the last
+            // row can never spill into the file list below.
             for (int i = 0; i < 6; ++i) {
-                int c = i % 2, r = i / 2;
-                checks[i]->setRect(R(rx + c * (colW / 2), oy + r * S(40),
-                                     colW / 2 - S(8), S(34)));
+                int c = i % 3, r = i / 3;
+                checks[i]->setRect(R(rx + c * (colW / 3), oy + r * S(40),
+                                     colW / 3 - S(8), S(34)));
             }
             y += optH;
         }
@@ -1410,7 +1413,6 @@ public:
             bool v = p >= 0 ? (p == page_)
                    : p == -1 ? true
                    : p == -2 ? (page_ != PgSettings && page_ != PgExtract)
-                   : p == -4 ? toastVisible_
                    : (page_ == PgExtract || page_ == PgExport || page_ == PgPack);
             if (page_ == PgPack && w->tab() >= 0 && w->tab() != packTab_)
                 v = false;
@@ -1539,6 +1541,22 @@ public:
         g.flush();
     }
 
+    void positionToast() {
+        if (!toastView_ || !toastView_->hwnd()) return;
+        RECT rc{};
+        GetClientRect(hwnd_, &rc);
+        toastClientRect_ = R(rc.right - S(390),
+                             rc.bottom - S(34) - S(76), S(370), S(64));
+        POINT origin{toastClientRect_.left, toastClientRect_.top};
+        ClientToScreen(hwnd_, &origin);
+        RECT screen = R(origin.x, origin.y, W(toastClientRect_),
+                        H(toastClientRect_));
+        SetWindowPos(toastView_->hwnd(), HWND_TOP, screen.left, screen.top,
+                     W(screen), H(screen), SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        toastView_->setRect(screen);   // popup rects are screen coordinates
+        toastView_->invalidate();
+    }
+
     void toast(const std::wstring& text, int kind) {
         toastText_ = text;
         toastKind_ = kind;
@@ -1547,14 +1565,21 @@ public:
         if (toastView_) {
             toastView_->text = text;
             toastView_->kind = kind;
-            RECT rc{};
-            GetClientRect(hwnd_, &rc);
-            toastView_->setRect(R(rc.right - S(390), rc.bottom - S(34) - S(76),
-                                  S(370), S(64)));
+            if (!toastView_->hwnd()) {
+                RECT rc{};
+                GetClientRect(hwnd_, &rc);
+                POINT origin{rc.right - S(390), rc.bottom - S(34) - S(76)};
+                ClientToScreen(hwnd_, &origin);
+                toastView_->create(hwnd_, 0,
+                                   R(origin.x, origin.y, S(370), S(64)), true);
+                if (toastView_->hwnd()) {
+                    LONG ex = GetWindowLongW(toastView_->hwnd(), GWL_EXSTYLE);
+                    SetWindowLongW(toastView_->hwnd(), GWL_EXSTYLE,
+                                   ex | WS_EX_NOACTIVATE);
+                }
+            }
+            positionToast();
             toastView_->setVisible(true);
-            SetWindowPos(toastView_->hwnd(), HWND_TOP, 0, 0, 0, 0,
-                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-            toastView_->invalidate();
         }
         InvalidateRect(hwnd_, nullptr, TRUE);
     }
@@ -1562,7 +1587,19 @@ public:
     void hideToast() {
         toastVisible_ = false;
         toastText_.clear();
-        if (toastView_) toastView_->setVisible(false);
+        if (toastView_ && toastView_->hwnd())
+            toastView_->setVisible(false);
+        // Repaint the widgets that were underneath the popup.
+        RECT r = toastClientRect_;
+        if (r.right > r.left) {
+            for (auto& w : widgets_) {
+                if (!w->visible() || !w->hwnd()) continue;
+                RECT wr = w->rect();
+                RECT overlap{};
+                if (IntersectRect(&overlap, &wr, &r)) w->invalidate();
+            }
+            InvalidateRect(hwnd_, &r, TRUE);
+        }
         InvalidateRect(hwnd_, nullptr, TRUE);
     }
 
