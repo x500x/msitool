@@ -32,6 +32,8 @@
 
 ### Fixed
 
+- GUI / CLI `pack --ui minimal` 生成的 MSI 无法安装：`WelcomeDlg` 的 `Control_Next` 指针不成环（`Description` 与 `Cancel` 都指向 `Next`），Windows Installer 创建对话框时报 2810「next control pointers do not form a cycle」并中止安装（`MsiVerifyPackage` 检测不到这类 UI 表错误）。现在每个对话框的控件链改为单一环 `Title → Description → … → Title`，并补上进度对话框缺失的 `ActionText` / `SetProgress` 订阅，安装进度与动作文本可正常刷新。
+
 - GUI 拖放把「解包」与「打包」混在一起：在非打包页拖入文件夹只会提示「仅支持 `.msi` / `.msp`」，而「打包」页的「当前包文件」栏又始终显示上一个为解包打开的包。现在字段以外的落点按内容严格分流——文件夹永远作为打包源目录（必要时自动切到「打包」页并补齐产品名 / 输出路径），`.msi` / `.msp` 永远属于查看 / 解包；「打包」页不再打开安装包，也不再显示「当前包文件」栏，若在打包页显式打开包（Ctrl+O 或打开按钮）会切到「包信息」页。
 
 - GUI「运行日志」卡片副标题小字被下方日志框遮挡：解包页日志框从 `S(40)`、打包页从 `S(44)` 开始，早于卡片头部副标题的结束位置 `S(48)`；现统一钳制到 `S(54)` 并同步调整日志框高度，副标题绘制高度也收紧为 `S(16)` 留出间隙。

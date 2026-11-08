@@ -957,30 +957,40 @@ void buildMinimalUi(MSIHANDLE db, const std::wstring& productName) {
                    L"Control_Cancel"},
                   {S(d.name), I(50), I(50), I(370), I(270), I(d.attributes), S(d.title),
                    S(d.first), S(d.def), S(d.cancel)});
+        const bool isWelcome = std::wstring(d.name) == L"WelcomeDlg";
+        const bool isProgress = std::wstring(d.name) == L"ProgressDlg";
+        // Windows Installer requires the Control_Next pointers of a dialog to
+        // form a single cycle. Previously Description and Cancel both pointed
+        // at Next, so the dialog refused to open with error 2810 and the
+        // whole install aborted ("unexpected error installing this package").
         addUiControl(db, d.name, L"Title", L"Text", 20, 20, 330, 40, 196611,
                      L"{\\DlgFont8}" + std::wstring(d.title), L"Description");
         addUiControl(db, d.name, L"Description", L"Text", 20, 70, 330, 90, 196611,
-                     std::wstring(d.text), d.first);
+                     std::wstring(d.text), isWelcome ? L"Cancel" : d.first);
         addUiControl(db, d.name, L"BottomLine", L"Line", 0, 234, 370, 0, 1, L"", L"");
 
-        if (std::wstring(d.name) == L"ProgressDlg") {
+        if (isProgress) {
             addUiControl(db, d.name, L"ActionText", L"Text", 20, 175, 330, 12, 3,
                          L"", L"");
             addUiControl(db, d.name, L"ProgressBar", L"ProgressBar", 20, 195, 330, 12,
                          65537, L"Progress done", L"");
             addUiControl(db, d.name, L"Cancel", L"PushButton", 304, 243, 56, 17, 3,
-                         L"Cancel", L"");
+                         L"Cancel", L"Title");
             addUiEvent(db, d.name, L"Cancel", L"EndDialog", L"Exit", 1);
-        } else if (std::wstring(d.name) == L"WelcomeDlg") {
+            // Without these subscriptions the modeless progress dialog shows
+            // a frozen bar and an empty action line.
+            addUiEvent(db, d.name, L"ActionText", L"ActionText", L"[ActionText]", 1);
+            addUiEvent(db, d.name, L"ProgressBar", L"SetProgress", L"[Progress]", 1);
+        } else if (isWelcome) {
             addUiControl(db, d.name, L"Next", L"PushButton", 236, 243, 56, 17, 3,
-                         L"&Install", L"Cancel");
+                         L"&Install", L"Title");
             addUiControl(db, d.name, L"Cancel", L"PushButton", 304, 243, 56, 17, 3,
                          L"Cancel", L"Next");
             addUiEvent(db, d.name, L"Next", L"EndDialog", L"Return", 1);
             addUiEvent(db, d.name, L"Cancel", L"EndDialog", L"Exit", 1);
         } else {
             addUiControl(db, d.name, L"Finish", L"PushButton", 236, 243, 56, 17, 3,
-                         L"&Finish", L"");
+                         L"&Finish", L"Title");
             addUiEvent(db, d.name, L"Finish", L"EndDialog", L"Exit", 1);
         }
     }
