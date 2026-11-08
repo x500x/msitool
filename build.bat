@@ -88,8 +88,9 @@ cl /nologo /std:c++17 /EHsc /W4 /O2 /utf-8 ^
    /DUNICODE /D_UNICODE /D_CRT_SECURE_NO_WARNINGS ^
    /Isrc /Fobuild\obj\%ARCH%\ /Febuild\msitool_%ARCH%.exe ^
    src\util.cpp src\msidb.cpp src\cab.cpp src\extract.cpp src\pack.cpp src\main.cpp ^
-   Msi.Lib Cabinet.Lib Shell32.Lib Ole32.Lib ^
-   /link /MACHINE:%MACHINE% /SUBSYSTEM:CONSOLE
+   src\ui_draw.cpp src\ui_widgets.cpp src\ui_app.cpp ^
+   Msi.Lib Cabinet.Lib Shell32.Lib Ole32.Lib User32.Lib Gdi32.Lib Advapi32.Lib Comdlg32.Lib Uuid.Lib ^
+   /link /MACHINE:%MACHINE% /SUBSYSTEM:WINDOWS
 if errorlevel 1 (
     echo [!] Build FAILED.
     exit /b 1

@@ -1,0 +1,1869 @@
+#include "ui.h"
+
+#include "msidb.h"
+#include "extract.h"
+#include "pack.h"
+
+#include <objbase.h>
+#include <shobjidl_core.h>
+
+#include <chrono>
+#include <cmath>
+#include <cstdlib>
+#include <cwctype>
+#include <thread>
+
+namespace ui {
+namespace {
+
+// ---------------------------------------------------------------------------
+// Small helpers
+// ---------------------------------------------------------------------------
+RECT R(int x, int y, int w, int h) { return RECT{x, y, x + w, y + h}; }
+int W(const RECT& r) { return r.right - r.left; }
+int H(const RECT& r) { return r.bottom - r.top; }
+RECT shrink(const RECT& r, int x, int y) {
+    return RECT{r.left + x, r.top + y, r.right - x, r.bottom - y};
+}
+
+std::wstring humanSize(unsigned long long bytes) {
+    if (bytes < 1024) return std::to_wstring(bytes) + L" B";
+    if (bytes < 1024ULL * 1024)
+        return util::fmt(L"%.1f KiB", static_cast<double>(bytes) / 1024.0);
+    if (bytes < 1024ULL * 1024 * 1024)
+        return util::fmt(L"%.1f MiB", static_cast<double>(bytes) / (1024.0 * 1024.0));
+    return util::fmt(L"%.2f GiB", static_cast<double>(bytes) / (1024.0 * 1024.0 * 1024.0));
+}
+
+unsigned long long parseSize(const std::wstring& text) {
+    std::wstring s = util::trim(text);
+    if (s.empty()) return 0;
+    if (s.size() >= 2 && (s.back() == L'B' || s.back() == L'b')) {
+        s.pop_back();
+        if (!s.empty() && (s.back() == L'i' || s.back() == L'I')) s.pop_back();
+    }
+    unsigned long long mult = 1024ULL * 1024ULL;
+    if (!s.empty()) {
+        wchar_t last = s.back();
+        if (last == L'K' || last == L'k') { mult = 1024ULL; s.pop_back(); }
+        else if (last == L'M' || last == L'm') { mult = 1024ULL * 1024ULL; s.pop_back(); }
+        else if (last == L'G' || last == L'g') { mult = 1024ULL * 1024ULL * 1024ULL; s.pop_back(); }
+    }
+    if (s.empty() || !iswdigit(static_cast<wint_t>(s.front()))) return 0;
+    return _wcstoui64(s.c_str(), nullptr, 10) * mult;
+}
+
+std::vector<std::wstring> splitList(const std::wstring& text) {
+    std::vector<std::wstring> out;
+    std::wstring cur;
+    for (wchar_t c : text) {
+        if (c == L';' || c == L'\n') {
+            std::wstring v = util::trim(cur);
+            if (!v.empty()) out.push_back(v);
+            cur.clear();
+        } else cur += c;
+    }
+    std::wstring v = util::trim(cur);
+    if (!v.empty()) out.push_back(v);
+    return out;
+}
+
+LogView::Kind classifyLog(bool isError, const std::wstring& line) {
+    if (util::startsWith(line, L"[warn]")) return LogView::Kind::Warn;
+    if (util::startsWith(line, L"[v] ")) return LogView::Kind::Info;
+    if (isError || util::startsWith(line, L"error") || util::startsWith(line, L"FAIL"))
+        return LogView::Kind::Error;
+    if (line.find(L"Done") != std::wstring::npos ||
+        line.find(L"完成") != std::wstring::npos ||
+        line.find(L"VALID") != std::wstring::npos ||
+        line.find(L"OK") != std::wstring::npos)
+        return LogView::Kind::Ok;
+    return LogView::Kind::Info;
+}
+
+// ---- settings in HKCU\Software\msitool -------------------------------------
+const wchar_t* kSettingsKey = L"Software\\msitool";
+
+std::wstring loadSetting(const wchar_t* name) {
+    wchar_t buf[2048]{};
+    DWORD size = sizeof(buf);
+    if (RegGetValueW(HKEY_CURRENT_USER, kSettingsKey, name,
+                     RRF_RT_REG_SZ, nullptr, buf, &size) == ERROR_SUCCESS)
+        return buf;
+    return L"";
+}
+
+void saveSetting(const wchar_t* name, const std::wstring& value) {
+    HKEY key = nullptr;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, kSettingsKey, 0, nullptr, 0,
+                        KEY_SET_VALUE, nullptr, &key, nullptr) != ERROR_SUCCESS) return;
+    RegSetValueExW(key, name, 0, REG_SZ,
+                   reinterpret_cast<const BYTE*>(value.c_str()),
+                   static_cast<DWORD>((value.size() + 1) * sizeof(wchar_t)));
+    RegCloseKey(key);
+}
+
+int loadIntSetting(const wchar_t* name, int fallback) {
+    DWORD v = static_cast<DWORD>(fallback), size = sizeof(v);
+    if (RegGetValueW(HKEY_CURRENT_USER, kSettingsKey, name,
+                     RRF_RT_REG_DWORD, nullptr, &v, &size) == ERROR_SUCCESS)
+        return static_cast<int>(v);
+    return fallback;
+}
+
+void saveIntSetting(const wchar_t* name, int value) {
+    HKEY key = nullptr;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, kSettingsKey, 0, nullptr, 0,
+                        KEY_SET_VALUE, nullptr, &key, nullptr) != ERROR_SUCCESS) return;
+    DWORD v = static_cast<DWORD>(value);
+    RegSetValueExW(key, name, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&v), sizeof(v));
+    RegCloseKey(key);
+}
+
+// ---- modern IFileDialog based pickers --------------------------------------
+enum class Pick { Open, Folder, Save };
+
+bool pickPath(HWND owner, Pick kind, const wchar_t* title,
+              const COMDLG_FILTERSPEC* filters, UINT count,
+              const wchar_t* defaultExt, std::wstring& out) {
+    IFileDialog* dlg = nullptr;
+    CLSID clsid = kind == Pick::Save ? CLSID_FileSaveDialog : CLSID_FileOpenDialog;
+    if (FAILED(CoCreateInstance(clsid, nullptr, CLSCTX_INPROC_SERVER,
+                                IID_PPV_ARGS(&dlg))))
+        return false;
+    DWORD opts = 0;
+    dlg->GetOptions(&opts);
+    opts |= FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST | FOS_NOCHANGEDIR;
+    if (kind == Pick::Folder) opts |= FOS_PICKFOLDERS;
+    else if (kind == Pick::Open) opts |= FOS_FILEMUSTEXIST;
+    else opts |= FOS_OVERWRITEPROMPT;
+    dlg->SetOptions(opts);
+    if (title) dlg->SetTitle(title);
+    if (filters && count) dlg->SetFileTypes(count, filters);
+    if (kind == Pick::Save && defaultExt) {
+        IFileSaveDialog* save = nullptr;
+        if (SUCCEEDED(dlg->QueryInterface(IID_PPV_ARGS(&save)))) {
+            save->SetDefaultExtension(defaultExt);
+            save->Release();
+        }
+    }
+    bool ok = false;
+    if (SUCCEEDED(dlg->Show(owner))) {
+        IShellItem* item = nullptr;
+        if (SUCCEEDED(dlg->GetResult(&item))) {
+            wchar_t* path = nullptr;
+            if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &path)) && path) {
+                out = path;
+                CoTaskMemFree(path);
+                ok = true;
+            }
+            item->Release();
+        }
+    }
+    dlg->Release();
+    return ok;
+}
+
+// ---- DWM (loaded dynamically: no extra import library required) -----------
+void setDwmAttribute(HWND hwnd, int attribute, int value) {
+    HMODULE dwm = LoadLibraryW(L"dwmapi.dll");
+    if (!dwm) return;
+    using Fn = HRESULT(WINAPI*)(HWND, DWORD, LPCVOID, DWORD);
+    auto fn = reinterpret_cast<Fn>(GetProcAddress(dwm, "DwmSetWindowAttribute"));
+    if (fn) {
+        int v = value;
+        fn(hwnd, static_cast<DWORD>(attribute), &v, sizeof(v));
+    }
+    FreeLibrary(dwm);
+}
+
+constexpr UINT kTimer = 1;
+constexpr int kIdOpen = 40001;
+constexpr int kIdRefresh = 40002;
+
+enum Page {
+    PgHome = 0, PgInfo, PgTables, PgQuery, PgExtract,
+    PgExport, PgPack, PgVerify, PgSettings, PgCount
+};
+
+const wchar_t* kPageTitle[PgCount] = {
+    L"概览", L"包信息", L"数据表", L"SQL 查询", L"解包",
+    L"导出", L"打包", L"验证", L"设置"
+};
+const wchar_t* kPageSubtitle[PgCount] = {
+    L"查看、解包和构建 Windows Installer 包",
+    L"摘要信息、关键属性与 CAB 媒体",
+    L"浏览数据库中的每一张表",
+    L"用 MSI SQL 直接查询包内容",
+    L"把包里的文件按目录树还原出来",
+    L"导出 CAB、表、流和二进制资源",
+    L"把一个目录打包成自包含的 MSI",
+    L"检查文件是否为合法的安装包",
+    L"外观、关于与快捷键"
+};
+const Ic kPageIcon[PgCount] = {
+    Ic::Home, Ic::Info, Ic::Table, Ic::Query, Ic::Extract,
+    Ic::Export, Ic::Pack, Ic::Shield, Ic::Settings
+};
+
+// ---------------------------------------------------------------------------
+// Application window
+// ---------------------------------------------------------------------------
+class App {
+public:
+    static LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp);
+
+    HWND hwnd_ = nullptr;
+    HINSTANCE hinst_ = nullptr;
+    HACCEL accel_ = nullptr;
+    std::vector<std::unique_ptr<Widget>> widgets_;
+    int nextId_ = 1000;
+    int page_ = PgHome;
+    bool running_ = false;
+    bool verifyOk_ = false;
+    int themeMode_ = 2;              // 0 light, 1 dark, 2 follow system
+    std::wstring package_, initialFile_;
+    std::unique_ptr<msi::Db> db_;
+    std::vector<std::wstring> tableNames_, filteredTables_;
+    std::wstring status_ = L"就绪 · 打开一个 .msi / .msp 文件开始";
+    std::wstring statusRight_;
+    std::wstring tableInfo_, queryInfo_, verifyText_, homeSummary_;
+    std::wstring toastText_;
+    int toastKind_ = 0;              // 0 info, 1 warn, 2 error, 3 ok
+    bool toastVisible_ = false;
+    ULONGLONG toastUntil_ = 0;
+    std::wstring lastOutputDir_, lastPackOutput_;
+
+    struct Card {
+        RECT r; std::wstring title, subtitle; Ic icon; bool hero;
+    };
+    struct Label {
+        RECT r; std::wstring text; HFONT font; COLORREF color; UINT fmt;
+    };
+    struct Bar {
+        RECT r; std::wstring text; int kind; Ic icon;
+    };
+    std::vector<Card> cards_;
+    std::vector<Label> labels_;
+    std::vector<Bar> bars_;
+
+    // shared widgets -------------------------------------------------------
+    Button* btnTheme_ = nullptr;
+    Button* btnMin_ = nullptr;
+    Button* btnMax_ = nullptr;
+    Button* btnClose_ = nullptr;
+    NavItem* nav_[PgCount] = {};
+    TextBox* tbPackage_ = nullptr;
+    Button* btnBrowse_ = nullptr;
+    Button* btnOpen_ = nullptr;
+    LogView* log_ = nullptr;
+    Button* btnClearLog_ = nullptr;
+    Button* btnOpenFolder_ = nullptr;
+    Progress* progress_ = nullptr;
+
+    // home -----------------------------------------------------------------
+    DataGrid* gridHome_ = nullptr;
+    Button* btnHomeVerify_ = nullptr;
+    Button* btnHomeExtract_ = nullptr;
+    Button* btnHomeExport_ = nullptr;
+    // info -----------------------------------------------------------------
+    DataGrid* gridSummary_ = nullptr;
+    DataGrid* gridProps_ = nullptr;
+    DataGrid* gridMedia_ = nullptr;
+    // tables ---------------------------------------------------------------
+    TextBox* tbTableSearch_ = nullptr;
+    DataGrid* gridTables_ = nullptr;
+    DataGrid* gridTableData_ = nullptr;
+    Button* btnTableCopy_ = nullptr;
+    // query ----------------------------------------------------------------
+    TextBox* tbSql_ = nullptr;
+    DropDown* ddExamples_ = nullptr;
+    Button* btnQueryRun_ = nullptr;
+    Button* btnQueryCopy_ = nullptr;
+    Button* btnQueryClear_ = nullptr;
+    DataGrid* gridQueryResult_ = nullptr;
+    // extract --------------------------------------------------------------
+    TextBox* tbOutDir_ = nullptr;
+    Button* btnOutBrowse_ = nullptr;
+    Check* chkFlat_ = nullptr;
+    Check* chkDry_ = nullptr;
+    Check* chkSkip_ = nullptr;
+    Check* chkSource_ = nullptr;
+    Check* chkKeepTemp_ = nullptr;
+    Check* chkVerbose_ = nullptr;
+    TextBox* tbTransforms_ = nullptr;
+    Button* btnTransBrowse_ = nullptr;
+    TextBox* tbBaseMsi_ = nullptr;
+    Button* btnBaseBrowse_ = nullptr;
+    Button* btnExtract_ = nullptr;
+    // export ---------------------------------------------------------------
+    DropDown* ddExportMode_ = nullptr;
+    TextBox* tbExportDir_ = nullptr;
+    Button* btnExportBrowse_ = nullptr;
+    Button* btnExport_ = nullptr;
+    // pack -----------------------------------------------------------------
+    TextBox* tbSrcDir_ = nullptr;      Button* btnSrcBrowse_ = nullptr;
+    TextBox* tbOutMsi_ = nullptr;      Button* btnOutMsiBrowse_ = nullptr;
+    TextBox* tbName_ = nullptr;
+    TextBox* tbVersion_ = nullptr;
+    TextBox* tbManufacturer_ = nullptr;
+    DropDown* ddPlatform_ = nullptr;
+    TextBox* tbLanguage_ = nullptr;
+    DropDown* ddUi_ = nullptr;
+    TextBox* tbCabSize_ = nullptr;
+    TextBox* tbConfig_ = nullptr;      Button* btnConfigBrowse_ = nullptr;
+    DropDown* ddLargeFiles_ = nullptr;
+    TextBox* tbSignCert_ = nullptr;    Button* btnSignCertBrowse_ = nullptr;
+    TextBox* tbSignPassword_ = nullptr;
+    TextBox* tbSignTime_ = nullptr;
+    Check* chkForce_ = nullptr;
+    Check* chkPackDry_ = nullptr;
+    Check* chkPackVerbose_ = nullptr;
+    Check* chkEmptyDirs_ = nullptr;
+    Button* btnPack_ = nullptr;
+    // verify ---------------------------------------------------------------
+    DataGrid* gridVerify_ = nullptr;
+    Button* btnVerify_ = nullptr;
+    // settings -------------------------------------------------------------
+    Button* btnLight_ = nullptr;
+    Button* btnDark_ = nullptr;
+    Button* btnSystem_ = nullptr;
+    ToastView* toastView_ = nullptr;  // created last = highest child Z-order
+
+    // ---- creation --------------------------------------------------------
+    template <class T> T* add(int page) {
+        auto p = std::make_unique<T>();
+        T* raw = p.get();
+        raw->setPage(page);
+        raw->create(hwnd_, ++nextId_, R(0, 0, 1, 1));
+        widgets_.push_back(std::move(p));
+        return raw;
+    }
+
+    bool create(HINSTANCE inst, const std::wstring& initialFile) {
+        hinst_ = inst;
+        initialFile_ = initialFile;
+        WNDCLASSEXW wc{};
+        wc.cbSize = sizeof(wc);
+        wc.style = CS_DBLCLKS;
+        wc.lpfnWndProc = App::proc;
+        wc.hInstance = inst;
+        wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+        wc.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+        wc.hbrBackground = nullptr;
+        wc.lpszClassName = L"msitool_main_v1";
+        if (!RegisterClassExW(&wc)) return false;
+
+        int w = theme().s(1360), h = theme().s(920);
+        RECT work{};
+        if (SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0)) {
+            int maxW = (work.right - work.left) - theme().s(80);
+            int maxH = (work.bottom - work.top) - theme().s(80);
+            if (maxW > 0 && w > maxW) w = maxW;
+            if (maxH > 0 && h > maxH) h = maxH;
+        }
+        hwnd_ = CreateWindowExW(0, wc.lpszClassName, L"msitool",
+                                WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
+                                CW_USEDEFAULT, CW_USEDEFAULT, w, h,
+                                nullptr, nullptr, inst, this);
+        return hwnd_ != nullptr;
+    }
+
+    void onCreate() {
+        themeMode_ = loadIntSetting(L"ThemeMode", 2);
+        applyTheme();
+        buildWidgets();
+        ACCEL acc[] = {
+            {FCONTROL | FVIRTKEY, L'O', kIdOpen},
+            {FVIRTKEY, VK_F5, kIdRefresh},
+        };
+        accel_ = CreateAcceleratorTableW(acc, 2);
+        SetTimer(hwnd_, kTimer, 40, nullptr);
+        DragAcceptFiles(hwnd_, TRUE);
+        setDwmAttribute(hwnd_, 33 /*DWMWA_WINDOW_CORNER_PREFERENCE*/, 2 /*ROUND*/);
+        setLogTarget(hwnd_);
+        std::wstring last = loadSetting(L"LastPackage");
+        if (!initialFile_.empty()) loadPackage(initialFile_);
+        else if (!last.empty() && util::path::exists(last)) loadPackage(last);
+        else {
+            tbPackage_->setValue(L"");
+            refreshEmptyState();
+        }
+        switchPage(PgHome);
+        // Don't let the first EDIT grab the initial focus: the cue banner
+        // should be visible and no control should look "active" on launch.
+        SetFocus(hwnd_);
+    }
+
+    // ---- theme -----------------------------------------------------------
+    void applyTheme() {
+        bool dark = themeMode_ == 1 || (themeMode_ == 2 && systemPrefersDark());
+        theme().rebuild(hwnd_, dark);
+        setDwmAttribute(hwnd_, 20 /*DWMWA_USE_IMMERSIVE_DARK_MODE*/, dark ? 1 : 0);
+        for (auto& w : widgets_) { w->onThemeChanged(); w->invalidate(); }
+        if (btnTheme_) {
+            btnTheme_->icon = dark ? Ic::Sun : Ic::Moon;
+            btnTheme_->invalidate();
+        }
+        if (btnLight_) {
+            btnLight_->accent = themeMode_ == 0;
+            btnDark_->accent = themeMode_ == 1;
+            btnSystem_->accent = themeMode_ == 2;
+            btnLight_->invalidate(); btnDark_->invalidate(); btnSystem_->invalidate();
+        }
+        InvalidateRect(hwnd_, nullptr, TRUE);
+    }
+
+    void setThemeMode(int mode) {
+        themeMode_ = mode;
+        saveIntSetting(L"ThemeMode", mode);
+        applyTheme();
+        layout();
+    }
+
+    // ---- widget construction ---------------------------------------------
+    Button* makeButton(int page, const wchar_t* text, Ic icon,
+                       bool accent, const std::function<void()>& fn) {
+        Button* b = add<Button>(page);
+        b->text = text;
+        b->icon = icon;
+        b->accent = accent;
+        b->clicked = fn;
+        return b;
+    }
+
+    // TextBox needs its style flags set before Widget::create() runs, because
+    // create() calls afterCreate() which builds the inner EDIT control.
+    TextBox* makeText(int page, const wchar_t* cue, bool multi = false,
+                      bool readOnly = false, bool password = false) {
+        auto p = std::make_unique<TextBox>();
+        TextBox* t = p.get();
+        t->setPage(page);
+        t->placeholder = cue;
+        t->multiline = multi;
+        t->readOnly = readOnly;
+        t->password = password;
+        t->create(hwnd_, ++nextId_, R(0, 0, 1, 1));
+        widgets_.push_back(std::move(p));
+        return t;
+    }
+
+    void buildWidgets() {
+        // caption bar ------------------------------------------------------
+        btnTheme_ = add<Button>(-1);
+        btnTheme_->backdrop = Backdrop::Nav;
+        btnTheme_->caption = true;
+        btnTheme_->glyphSize = 16;
+        btnTheme_->clicked = [this] {
+            setThemeMode(theme().dark ? 0 : 1);
+            toast(theme().dark ? L"已切换到深色主题" : L"已切换到浅色主题", 0);
+        };
+        btnMin_ = add<Button>(-1);
+        btnMin_->backdrop = Backdrop::Nav;
+        btnMin_->caption = true; btnMin_->icon = Ic::Min; btnMin_->glyphSize = 12;
+        btnMin_->clicked = [this] { ShowWindow(hwnd_, SW_MINIMIZE); };
+        btnMax_ = add<Button>(-1);
+        btnMax_->backdrop = Backdrop::Nav;
+        btnMax_->caption = true; btnMax_->icon = Ic::Max; btnMax_->glyphSize = 12;
+        btnMax_->clicked = [this] { toggleMaximize(); };
+        btnClose_ = add<Button>(-1);
+        btnClose_->backdrop = Backdrop::Nav;
+        btnClose_->caption = true; btnClose_->captionClose = true;
+        btnClose_->icon = Ic::Close; btnClose_->glyphSize = 12;
+        btnClose_->clicked = [this] { PostMessageW(hwnd_, WM_CLOSE, 0, 0); };
+
+        // navigation -------------------------------------------------------
+        for (int i = 0; i < PgCount; ++i) {
+            nav_[i] = add<NavItem>(-1);
+            nav_[i]->backdrop = Backdrop::Nav;
+            nav_[i]->text = kPageTitle[i];
+            nav_[i]->icon = kPageIcon[i];
+            nav_[i]->index = i;
+            nav_[i]->activated = [this](int p) { switchPage(p); };
+        }
+
+        // file bar (page -2: visible everywhere but Settings) ---------------
+        tbPackage_ = makeText(-2, L"选择或拖入 .msi / .msp 文件");
+        tbPackage_->enter = [this] {
+            std::wstring p = tbPackage_->value();
+            if (!p.empty()) loadPackage(p);
+        };
+        btnBrowse_ = makeButton(-2, L"浏览", Ic::Folder, false,
+                                [this] { browsePackage(); });
+        btnOpen_ = makeButton(-2, L"打开", Ic::Open, true,
+                              [this] {
+                                  std::wstring p = tbPackage_->value();
+                                  if (p.empty()) browsePackage();
+                                  else loadPackage(p);
+                              });
+
+        // shared task log ---------------------------------------------------
+        log_ = add<LogView>(-3);
+        btnClearLog_ = makeButton(-3, L"清空", Ic::Copy, false,
+                                  [this] { log_->clear(); });
+        btnOpenFolder_ = makeButton(-3, L"打开目录", Ic::Folder, false,
+                                    [this] { openOutputFolder(); });
+        progress_ = add<Progress>(-1);
+        progress_->backdrop = Backdrop::Nav;
+
+        // ---- Home ---------------------------------------------------------
+        gridHome_ = add<DataGrid>(PgHome);
+        btnHomeVerify_ = makeButton(PgHome, L"验证这个包", Ic::Shield, true,
+                                    [this] { switchPage(PgVerify); runVerify(); });
+        btnHomeExtract_ = makeButton(PgHome, L"解包到目录", Ic::Extract, false,
+                                     [this] { switchPage(PgExtract); });
+        btnHomeExport_ = makeButton(PgHome, L"导出归档", Ic::Export, false,
+                                    [this] { switchPage(PgExport); });
+
+        // ---- Info ---------------------------------------------------------
+        gridSummary_ = add<DataGrid>(PgInfo);
+        gridProps_ = add<DataGrid>(PgInfo);
+        gridMedia_ = add<DataGrid>(PgInfo);
+
+        // ---- Tables -------------------------------------------------------
+        tbTableSearch_ = makeText(PgTables, L"筛选表名…");
+        tbTableSearch_->changed = [this] { filterTables(); };
+        gridTables_ = add<DataGrid>(PgTables);
+        gridTables_->headerVisible = false;
+        gridTables_->selectionChanged = [this](int row) { showTableAt(row); };
+        gridTableData_ = add<DataGrid>(PgTables);
+        btnTableCopy_ = makeButton(PgTables, L"复制", Ic::Copy, false,
+                                   [this] {
+                                       gridTableData_->copyAll();
+                                       toast(L"表内容已复制为 TSV", 3);
+                                   });
+
+        // ---- Query --------------------------------------------------------
+        tbSql_ = makeText(PgQuery, L"SELECT * FROM `Property`", true);
+        tbSql_->enter = [this] { runQuery(); };
+        ddExamples_ = add<DropDown>(PgQuery);
+        ddExamples_->setItems({
+            L"示例查询…",
+            L"SELECT * FROM `Property`",
+            L"SELECT `File`,`FileName`,`FileSize` FROM `File`",
+            L"SELECT * FROM `Component`",
+            L"SELECT * FROM `Feature`",
+            L"SELECT * FROM `Media`",
+            L"SELECT * FROM `CustomAction`",
+            L"SELECT `Name`,`Data` FROM `_Streams`",
+        });
+        ddExamples_->selected = [this](int i) {
+            if (i > 0) {
+                tbSql_->setValue(ddExamples_->items[i]);
+                runQuery();
+            }
+            ddExamples_->setIndex(0);
+        };
+        btnQueryRun_ = makeButton(PgQuery, L"运行", Ic::Play, true,
+                                  [this] { runQuery(); });
+        btnQueryCopy_ = makeButton(PgQuery, L"复制结果", Ic::Copy, false,
+                                   [this] {
+                                       gridQueryResult_->copyAll();
+                                       toast(L"查询结果已复制为 TSV", 3);
+                                   });
+        btnQueryClear_ = makeButton(PgQuery, L"清空", Ic::Cross, false,
+                                    [this] {
+                                        tbSql_->setValue(L"");
+                                        gridQueryResult_->clear();
+                                        queryInfo_ = L"就绪";
+                                        layout();
+                                    });
+        gridQueryResult_ = add<DataGrid>(PgQuery);
+
+        // ---- Extract ------------------------------------------------------
+        tbOutDir_ = makeText(PgExtract, L"输出目录");
+        btnOutBrowse_ = makeButton(PgExtract, L"浏览", Ic::Folder, false,
+                                   [this] { browseFolderFor(tbOutDir_, L"选择解包输出目录"); });
+        chkFlat_ = makeCheck(PgExtract, L"平铺所有文件", false);
+        chkDry_ = makeCheck(PgExtract, L"仅预览 (dry-run)", false);
+        chkSkip_ = makeCheck(PgExtract, L"跳过已存在文件", false);
+        chkSource_ = makeCheck(PgExtract, L"使用源映像目录树", false);
+        chkKeepTemp_ = makeCheck(PgExtract, L"保留临时 CAB", false);
+        chkVerbose_ = makeCheck(PgExtract, L"详细日志", true);
+        tbTransforms_ = makeText(PgExtract, L"可选：一个或多个 .mst，用 ; 分隔");
+        btnTransBrowse_ = makeButton(PgExtract, L"浏览", Ic::Folder, false,
+                                     [this] { browseFileFor(tbTransforms_, true,
+                                         L"选择转换文件", L"MST 转换", L"*.mst"); });
+        tbBaseMsi_ = makeText(PgExtract, L"可选：解包 .msp 时的目标 MSI");
+        btnBaseBrowse_ = makeButton(PgExtract, L"浏览", Ic::Folder, false,
+                                    [this] { browseFileFor(tbBaseMsi_, false,
+                                        L"选择基准 MSI", L"MSI 包", L"*.msi"); });
+        btnExtract_ = makeButton(PgExtract, L"开始解包", Ic::Extract, true,
+                                 [this] { startExtract(); });
+
+        // ---- Export -------------------------------------------------------
+        ddExportMode_ = add<DropDown>(PgExport);
+        ddExportMode_->setItems({L"仅导出 CAB + manifest.txt", L"完整归档（表 / 流 / 二进制 / 摘要）"});
+        tbExportDir_ = makeText(PgExport, L"输出目录");
+        btnExportBrowse_ = makeButton(PgExport, L"浏览", Ic::Folder, false,
+                                      [this] { browseFolderFor(tbExportDir_, L"选择导出目录"); });
+        btnExport_ = makeButton(PgExport, L"开始导出", Ic::Export, true,
+                                [this] { startExport(); });
+
+        // ---- Pack ---------------------------------------------------------
+        tbSrcDir_ = makeText(PgPack, L"要打包的源目录");
+        btnSrcBrowse_ = makeButton(PgPack, L"浏览", Ic::Folder, false,
+                                   [this] { browseFolderFor(tbSrcDir_, L"选择源目录");
+                                            suggestPackDefaults(); });
+        tbOutMsi_ = makeText(PgPack, L"输出 .msi 路径");
+        btnOutMsiBrowse_ = makeButton(PgPack, L"保存", Ic::Save, false,
+                                      [this] { browseSaveMsi(); });
+        tbName_ = makeText(PgPack, L"留空则使用目录名");
+        tbVersion_ = makeText(PgPack, L"1.0.0");
+        tbVersion_->setValue(L"1.0.0");
+        tbManufacturer_ = makeText(PgPack, L"msitool");
+        tbManufacturer_->setValue(L"msitool");
+        ddPlatform_ = add<DropDown>(PgPack);
+        ddPlatform_->setItems({L"Intel (x86)", L"x64"});
+        tbLanguage_ = makeText(PgPack, L"1033");
+        tbLanguage_->setValue(L"1033");
+        ddUi_ = add<DropDown>(PgPack);
+        ddUi_->setItems({L"none（无安装界面）", L"basic（基础进度）", L"minimal（内置向导）"});
+        tbCabSize_ = makeText(PgPack, L"留空为单个 CAB，例如 16M / 1G");
+        tbConfig_ = makeText(PgPack, L"可选：pack.ini 清单");
+        btnConfigBrowse_ = makeButton(PgPack, L"浏览", Ic::Folder, false,
+                                      [this] { browseFileFor(tbConfig_, false,
+                                          L"选择清单", L"INI 清单", L"*.ini"); });
+        ddLargeFiles_ = add<DropDown>(PgPack);
+        ddLargeFiles_->setItems({L"layout（>2GiB 作为伴随文件）", L"error（拒绝大文件）"});
+        tbSignCert_ = makeText(PgPack, L"可选：.pfx 代码签名证书");
+        btnSignCertBrowse_ = makeButton(PgPack, L"浏览", Ic::Folder, false,
+                                        [this] { browseFileFor(tbSignCert_, false,
+                                            L"选择证书", L"PFX 证书", L"*.pfx"); });
+        tbSignPassword_ = makeText(PgPack, L"证书密码", false, false, true);
+        tbSignTime_ = makeText(PgPack, L"可选：RFC 3161 时间戳 URL");
+        chkForce_ = makeCheck(PgPack, L"覆盖已存在文件", false);
+        chkPackDry_ = makeCheck(PgPack, L"仅预览 (dry-run)", false);
+        chkPackVerbose_ = makeCheck(PgPack, L"详细日志", true);
+        chkEmptyDirs_ = makeCheck(PgPack, L"保留空目录", true);
+        btnPack_ = makeButton(PgPack, L"开始打包", Ic::Pack, true,
+                              [this] { startPack(); });
+
+        // ---- Verify -------------------------------------------------------
+        gridVerify_ = add<DataGrid>(PgVerify);
+        btnVerify_ = makeButton(PgVerify, L"重新验证", Ic::Refresh, false,
+                                [this] { runVerify(); });
+
+        // ---- Settings -----------------------------------------------------
+        btnLight_ = makeButton(PgSettings, L"浅色", Ic::Sun, false,
+                               [this] { setThemeMode(0); });
+        btnDark_ = makeButton(PgSettings, L"深色", Ic::Moon, false,
+                              [this] { setThemeMode(1); });
+        btnSystem_ = makeButton(PgSettings, L"跟随系统", Ic::Sparkle, false,
+                                [this] { setThemeMode(2); });
+
+        // Toast is a separate child window so it can float above the cards,
+        // grids and every other widget.
+        toastView_ = add<ToastView>(-4);
+        toastView_->setVisible(false);
+
+        applyTheme();
+        layout();
+    }
+
+    Check* makeCheck(int page, const wchar_t* text, bool checked) {
+        Check* c = add<Check>(page);
+        c->text = text;
+        c->checked = checked;
+        return c;
+    }
+
+    // ---- layout ----------------------------------------------------------
+    void addCard(RECT r, std::wstring title, std::wstring sub = L"",
+                 Ic icon = Ic::None, bool hero = false) {
+        cards_.push_back({r, std::move(title), std::move(sub), icon, hero});
+    }
+    void addLabel(RECT r, const std::wstring& text, HFONT font, COLORREF color,
+                  UINT fmt = DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS) {
+        labels_.push_back({r, text, font, color, fmt});
+    }
+
+    struct Base {
+        RECT client, header, filebar, body;
+    };
+
+    Base baseLayout() {
+        RECT rc{};
+        GetClientRect(hwnd_, &rc);
+        int cap = S(40), navW = S(216), statusH = S(34), m = S(20);
+        int left = navW + m, right = rc.right - m;
+        int top = cap + S(16);
+        RECT header = R(left, top, right - left, S(46));
+        RECT filebar = R(left, header.bottom + S(10), right - left, S(76));
+        int bodyTop = page_ == PgSettings ? header.bottom + S(16)
+                                          : filebar.bottom + S(16);
+        RECT body = R(left, bodyTop, right - left,
+                      rc.bottom - statusH - S(16) - bodyTop);
+        return {rc, header, filebar, body};
+    }
+
+    void layout() {
+        cards_.clear();
+        labels_.clear();
+        bars_.clear();
+        Base b = baseLayout();
+        Theme& t = theme();
+        int cap = S(40), navW = S(216), statusH = S(34);
+        int bw = S(46);
+        int cx = b.client.right - bw * 4;
+        btnTheme_->setRect(R(cx, 0, bw, cap));
+        btnMin_->setRect(R(cx + bw, 0, bw, cap));
+        btnMax_->setRect(R(cx + bw * 2, 0, bw, cap));
+        btnClose_->setRect(R(cx + bw * 3, 0, bw, cap));
+        btnMax_->icon = IsZoomed(hwnd_) ? Ic::Restore : Ic::Max;
+
+        int ny = cap + S(74);
+        for (int i = 0; i < PgCount; ++i)
+            nav_[i]->setRect(R(S(8), ny + i * S(44), navW - S(16), S(40)));
+
+        progress_->setRect(R(b.client.right - S(220),
+                             b.client.bottom - statusH + S(14), S(200), S(6)));
+        if (toastVisible_) {
+            toastView_->setRect(R(b.client.right - S(390),
+                                  b.client.bottom - statusH - S(76),
+                                  S(370), S(64)));
+        }
+
+        // Static texts for caption / nav / header / file bar.
+        addLabel(R(S(20), cap + S(14), navW - S(40), S(22)), L"导航",
+                 t.fSmall, t.muted);
+        addLabel(R(S(20), b.client.bottom - statusH - S(32), navW - S(40), S(22)),
+                 L"Msi API · FDI / FCI · 纯 Win32", t.fSmall, t.muted);
+        addLabel(R(b.header.left, b.header.top, W(b.header), S(28)),
+                 kPageTitle[page_], t.fTitle, t.text);
+        addLabel(R(b.header.left, b.header.top + S(28), W(b.header), S(20)),
+                 kPageSubtitle[page_], t.fSmall, t.subText);
+
+        if (page_ != PgSettings) {
+            addCard(b.filebar, L"", L"");
+            addLabel(R(b.filebar.left + S(16), b.filebar.top + S(8), S(240), S(18)),
+                     L"当前包文件", t.fSmall, t.subText);
+            addLabel(R(b.filebar.right - S(330), b.filebar.top + S(8), S(314), S(18)),
+                     L"支持把 .msi / .msp 直接拖进窗口", t.fSmall, t.muted,
+                     DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+            int fy = b.filebar.top + S(30);
+            tbPackage_->setRect(R(b.filebar.left + S(16), fy,
+                                  W(b.filebar) - S(32) - S(180), S(34)));
+            btnBrowse_->setRect(R(b.filebar.right - S(16) - S(172), fy, S(84), S(34)));
+            btnOpen_->setRect(R(b.filebar.right - S(16) - S(84), fy, S(84), S(34)));
+        }
+
+        switch (page_) {
+        case PgHome:     layoutHome(b.body); break;
+        case PgInfo:     layoutInfo(b.body); break;
+        case PgTables:   layoutTables(b.body); break;
+        case PgQuery:    layoutQuery(b.body); break;
+        case PgExtract:  layoutExtract(b.body); break;
+        case PgExport:   layoutExport(b.body); break;
+        case PgPack:     layoutPack(b.body); break;
+        case PgVerify:   layoutVerify(b.body); break;
+        case PgSettings: layoutSettings(b.body); break;
+        default: break;
+        }
+        for (auto& w : widgets_) w->invalidate();
+        InvalidateRect(hwnd_, nullptr, TRUE);
+    }
+
+    void layoutHome(const RECT& body) {
+        Theme& t = theme();
+        RECT hero = R(body.left, body.top, W(body), S(132));
+        addCard(hero, L"msitool", L"查看、解包与构建 Windows Installer 包 · 现代化 Fluent 界面",
+                Ic::Sparkle, true);
+        int y = hero.bottom + S(16);
+        int h = std::max(S(180), static_cast<int>(body.bottom - y));
+        int gap = S(16);
+        int lw = (W(body) - gap) * 60 / 100;
+        RECT info = R(body.left, y, lw, h);
+        RECT act = R(info.right + gap, y, W(body) - lw - gap, h);
+        addCard(info, L"包摘要", L"打开包后自动填充", Ic::Info);
+        addCard(act, L"快捷操作", L"常用任务一步直达", Ic::Bolt);
+        gridHome_->setRect(R(info.left + S(12), info.top + S(48),
+                             W(info) - S(24),
+                             std::max(S(80), static_cast<int>(H(info) - S(60)))));
+        int ax = act.left + S(16), aw = W(act) - S(32);
+        int ay = act.top + S(52);
+        btnHomeVerify_->setRect(R(ax, ay, aw, S(38)));
+        btnHomeExtract_->setRect(R(ax, ay + S(48), aw, S(38)));
+        btnHomeExport_->setRect(R(ax, ay + S(96), aw, S(38)));
+        addLabel(R(ax, ay + S(148), aw, S(22)), L"验证包结构并查看摘要信息",
+                 t.fSmall, t.muted);
+        addLabel(R(ax, ay + S(172), aw, S(22)), L"解包会重建安装目录树，不会安装任何内容",
+                 t.fSmall, t.muted);
+    }
+
+    void layoutInfo(const RECT& body) {
+        int h1 = std::min(S(210), H(body) * 38 / 100);
+        h1 = std::max(S(150), h1);
+        RECT sum = R(body.left, body.top, W(body), h1);
+        addCard(sum, L"SummaryInformation", L"OLE 复合文档属性流", Ic::Info);
+        gridSummary_->setRect(R(sum.left + S(12), sum.top + S(48),
+                                W(sum) - S(24), H(sum) - S(60)));
+        int h2 = H(body) - h1 - S(16);
+        int half = (W(body) - S(16)) / 2;
+        RECT props = R(body.left, sum.bottom + S(16), half, h2);
+        RECT media = R(props.right + S(16), sum.bottom + S(16),
+                       W(body) - half - S(16), h2);
+        addCard(props, L"关键属性", L"Property 表中的常用项", Ic::Table);
+        addCard(media, L"媒体 / CAB", L"Media 表与实际文件", Ic::Database);
+        gridProps_->setRect(R(props.left + S(12), props.top + S(48),
+                              W(props) - S(24), H(props) - S(60)));
+        gridMedia_->setRect(R(media.left + S(12), media.top + S(48),
+                              W(media) - S(24), H(media) - S(60)));
+    }
+
+    void layoutTables(const RECT& body) {
+        int listW = S(264);
+        RECT lc = R(body.left, body.top, listW, H(body));
+        addCard(lc, L"表", tableInfo_, Ic::Table);
+        tbTableSearch_->setRect(R(lc.left + S(12), lc.top + S(48),
+                                  W(lc) - S(24), S(34)));
+        gridTables_->setRect(R(lc.left + S(12), lc.top + S(48) + S(42),
+                               W(lc) - S(24), H(lc) - S(48) - S(42) - S(12)));
+        RECT rc = R(lc.right + S(16), body.top, W(body) - listW - S(16), H(body));
+        addCard(rc, L"表内容", L"选中左侧的表，或双击行查看", Ic::Table);
+        gridTableData_->setRect(R(rc.left + S(12), rc.top + S(48),
+                                 W(rc) - S(24), H(rc) - S(60)));
+        btnTableCopy_->setRect(R(rc.right - S(116), rc.top + S(10), S(104), S(30)));
+    }
+
+    void layoutQuery(const RECT& body) {
+        int eh = S(196);
+        RECT ec = R(body.left, body.top, W(body), eh);
+        addCard(ec, L"SQL 查询", L"只读视图 · 支持 MSI SQL 与 ? 参数", Ic::Terminal);
+        tbSql_->setRect(R(ec.left + S(12), ec.top + S(48), W(ec) - S(24), S(84)));
+        int by = ec.top + S(48) + S(84) + S(12);
+        int x = ec.left + S(12);
+        ddExamples_->setRect(R(x, by, S(230), S(34)));
+        btnQueryRun_->setRect(R(x + S(238), by, S(120), S(34)));
+        btnQueryCopy_->setRect(R(x + S(366), by, S(112), S(34)));
+        btnQueryClear_->setRect(R(x + S(486), by, S(100), S(34)));
+        RECT rc = R(body.left, ec.bottom + S(16), W(body), body.bottom - ec.bottom - S(16));
+        addCard(rc, L"结果", queryInfo_, Ic::Table);
+        gridQueryResult_->setRect(R(rc.left + S(12), rc.top + S(48),
+                                   W(rc) - S(24), H(rc) - S(60)));
+    }
+
+    void layoutLogCard(RECT c, int topPad) {
+        addCard(c, L"运行日志", L"命令输出实时显示 · Ctrl+C 复制", Ic::Terminal);
+        log_->setRect(R(c.left + S(12), c.top + topPad,
+                        W(c) - S(24), H(c) - topPad - S(12)));
+        btnClearLog_->setRect(R(c.right - S(96), c.top + S(10), S(84), S(30)));
+        btnOpenFolder_->setRect(R(c.right - S(212), c.top + S(10), S(108), S(30)));
+    }
+
+    void layoutExtract(const RECT& body) {
+        Theme& t = theme();
+        int optW = S(430);
+        RECT oc = R(body.left, body.top, optW, H(body));
+        RECT lc = R(oc.right + S(16), body.top, W(body) - optW - S(16), H(body));
+        addCard(oc, L"解包选项", L"还原目录树与全部文件内容", Ic::Extract);
+        layoutLogCard(lc, S(48));
+
+        int x = oc.left + S(16), w = W(oc) - S(32);
+        int y = oc.top + S(48);
+        auto label = [&](const wchar_t* s, int yy) {
+            addLabel(R(x, yy, w, S(18)), s, t.fSmall, t.subText);
+        };
+        label(L"输出目录", y); y += S(20);
+        tbOutDir_->setRect(R(x, y, w - S(80), S(32)));
+        btnOutBrowse_->setRect(R(x + w - S(72), y, S(72), S(32)));
+        y += S(32) + S(12);
+        label(L"选项", y); y += S(20);
+        Check* checks[] = {chkFlat_, chkDry_, chkSkip_, chkSource_, chkKeepTemp_, chkVerbose_};
+        for (int i = 0; i < 6; ++i) {
+            int col = i % 2, row = i / 2;
+            checks[i]->setRect(R(x + col * (w / 2), y + row * S(30),
+                                 w / 2 - S(6), S(28)));
+        }
+        y += S(30) * 3 + S(12);
+        label(L"MST 转换（多个用 ; 分隔）", y); y += S(20);
+        tbTransforms_->setRect(R(x, y, w - S(80), S(32)));
+        btnTransBrowse_->setRect(R(x + w - S(72), y, S(72), S(32)));
+        y += S(32) + S(12);
+        label(L"基准 MSI（解包 .msp 时可选）", y); y += S(20);
+        tbBaseMsi_->setRect(R(x, y, w - S(80), S(32)));
+        btnBaseBrowse_->setRect(R(x + w - S(72), y, S(72), S(32)));
+        y += S(32) + S(18);
+        btnExtract_->setRect(R(x, std::min(y, static_cast<int>(oc.bottom - S(56))),
+                              S(184), S(40)));
+    }
+
+    void layoutExport(const RECT& body) {
+        Theme& t = theme();
+        int optW = S(430);
+        RECT oc = R(body.left, body.top, optW, H(body));
+        RECT lc = R(oc.right + S(16), body.top, W(body) - optW - S(16), H(body));
+        addCard(oc, L"导出选项", L"把包内容完整导出到目录", Ic::Export);
+        layoutLogCard(lc, S(48));
+        int x = oc.left + S(16), w = W(oc) - S(32);
+        int y = oc.top + S(48);
+        addLabel(R(x, y, w, S(18)), L"导出模式", t.fSmall, t.subText); y += S(20);
+        ddExportMode_->setRect(R(x, y, w, S(34))); y += S(34) + S(18);
+        addLabel(R(x, y, w, S(18)), L"输出目录", t.fSmall, t.subText); y += S(20);
+        tbExportDir_->setRect(R(x, y, w - S(80), S(32)));
+        btnExportBrowse_->setRect(R(x + w - S(72), y, S(72), S(32)));
+        y += S(32) + S(24);
+        btnExport_->setRect(R(x, y, S(184), S(40)));
+        addLabel(R(x, y + S(54), w, S(60)),
+                 L"完整归档会导出全部 .idt 表、原始流、Binary 条目与 summary.txt；"
+                 L"仅导出 CAB 时会附带 manifest.txt。",
+                 t.fSmall, t.muted, DT_LEFT | DT_TOP | DT_WORDBREAK);
+    }
+
+    void layoutPack(const RECT& body) {
+        Theme& t = theme();
+        int logH = S(132);
+        int cardsH = H(body) - logH - S(16);
+        int gap = S(16);
+        int colW = (W(body) - gap) / 2;
+        RECT c1 = R(body.left, body.top, colW, cardsH);
+        RECT c2 = R(c1.right + gap, body.top, colW, cardsH);
+        RECT c3 = R(body.left, c1.bottom + S(16), W(body), logH);
+        addCard(c1, L"基本信息", L"目录、产品标识与平台", Ic::Pack);
+        addCard(c2, L"高级选项", L"分卷、清单、签名与开关", Ic::Settings);
+        addCard(c3, L"运行日志", L"FCI 压缩与 Msi 建库过程", Ic::Terminal);
+        log_->setRect(R(c3.left + S(12), c3.top + S(44),
+                        W(c3) - S(24), H(c3) - S(56)));
+        btnClearLog_->setRect(R(c3.right - S(96), c3.top + S(10), S(84), S(30)));
+        btnOpenFolder_->setRect(R(c3.right - S(212), c3.top + S(10), S(108), S(30)));
+
+        // Compact Fluent form rows: label + 28px control, repeated in 2 columns.
+        auto field = [&](RECT c, int i, const wchar_t* label, Widget* ctrl,
+                         Button* browse) {
+            int y = c.top + S(44) + i * S(44);
+            addLabel(R(c.left + S(16), y, W(c) - S(32), S(16)),
+                     label, t.fSmall, t.subText);
+            int cy = y + S(18);
+            int bw = browse ? S(72) : 0;
+            ctrl->setRect(R(c.left + S(16), cy,
+                            W(c) - S(32) - bw - (bw ? S(8) : 0), S(28)));
+            if (browse) browse->setRect(R(c.right - S(16) - bw, cy, bw, S(28)));
+        };
+        field(c1, 0, L"源目录", tbSrcDir_, btnSrcBrowse_);
+        field(c1, 1, L"输出 MSI", tbOutMsi_, btnOutMsiBrowse_);
+        field(c1, 2, L"产品名称", tbName_, nullptr);
+        field(c1, 3, L"产品版本", tbVersion_, nullptr);
+        field(c1, 4, L"制造商", tbManufacturer_, nullptr);
+        field(c1, 5, L"平台", ddPlatform_, nullptr);
+        field(c1, 6, L"语言 (LCID)", tbLanguage_, nullptr);
+        field(c1, 7, L"安装界面", ddUi_, nullptr);
+
+        field(c2, 0, L"CAB 分卷大小", tbCabSize_, nullptr);
+        field(c2, 1, L"配置文件 (pack.ini)", tbConfig_, btnConfigBrowse_);
+        field(c2, 2, L"大文件处理", ddLargeFiles_, nullptr);
+        field(c2, 3, L"签名证书 (.pfx)", tbSignCert_, btnSignCertBrowse_);
+        field(c2, 4, L"证书密码", tbSignPassword_, nullptr);
+        field(c2, 5, L"时间戳 URL", tbSignTime_, nullptr);
+        int cy = c2.top + S(44) + 6 * S(44) + S(18);
+        int cw = (W(c2) - S(32)) / 4;
+        chkForce_->setRect(R(c2.left + S(16), cy, cw - S(6), S(28)));
+        chkPackDry_->setRect(R(c2.left + S(16) + cw, cy, cw - S(6), S(28)));
+        chkPackVerbose_->setRect(R(c2.left + S(16) + cw * 2, cy, cw - S(6), S(28)));
+        chkEmptyDirs_->setRect(R(c2.left + S(16) + cw * 3, cy, cw - S(6), S(28)));
+        btnPack_->setRect(R(c2.left + S(16),
+                            std::min(cy + S(44), static_cast<int>(c2.bottom - S(50))),
+                            S(184), S(36)));
+    }
+
+    void layoutVerify(const RECT& body) {
+        RECT bar = R(body.left, body.top, W(body), S(58));
+        bars_.push_back({bar, verifyText_, verifyOk_ ? 3 : 2,
+                         verifyOk_ ? Ic::Check : Ic::Warning});
+        RECT card = R(body.left, bar.bottom + S(16), W(body),
+                      body.bottom - bar.bottom - S(16));
+        addCard(card, L"验证报告", L"签名、MsiOpenDatabase、_Tables、媒体与摘要",
+                Ic::Shield);
+        gridVerify_->setRect(R(card.left + S(12), card.top + S(48),
+                               W(card) - S(24), H(card) - S(60)));
+        btnVerify_->setRect(R(card.right - S(128), card.top + S(10), S(116), S(30)));
+    }
+
+    void layoutSettings(const RECT& body) {
+        Theme& t = theme();
+        RECT c1 = R(body.left, body.top, W(body), S(150));
+        addCard(c1, L"外观", L"Fluent 设计 · 支持系统主题跟随与高 DPI", Ic::Sun);
+        int x = c1.left + S(16);
+        btnLight_->setRect(R(x, c1.top + S(52), S(150), S(36)));
+        btnDark_->setRect(R(x + S(158), c1.top + S(52), S(150), S(36)));
+        btnSystem_->setRect(R(x + S(316), c1.top + S(52), S(150), S(36)));
+        addLabel(R(x, c1.top + S(100), W(c1) - S(32), S(22)),
+                 util::fmt(L"当前：%s · 界面缩放 %d%% · 每个像素由 GDI 绘制，无任何第三方 UI 库",
+                           theme().dark ? L"深色" : L"浅色", theme().dpi * 100 / 96),
+                 t.fSmall, t.muted);
+
+        RECT c2 = R(body.left, c1.bottom + S(16), W(body), S(190));
+        addCard(c2, L"关于 msitool", L"", Ic::Info);
+        addLabel(R(c2.left + S(16), c2.top + S(50), W(c2) - S(32), S(120)),
+                 L"一个基于 Windows Installer (Msi) API 与 cabinet.dll (FDI/FCI) 的\n"
+                 L"MSI / MSP 查看、解包与打包工具。\n\n"
+                 L"UI 层：纯 Win32 API（user32 / gdi32 / shell32 / ole32）自绘，"
+                 L"包含 Fluent 亮暗主题、圆角卡片、导航、数据网格、进度与日志。\n"
+                 L"命令行模式完全保留：在终端里带参数运行即可使用全部命令。",
+                 t.fBody, t.subText, DT_LEFT | DT_TOP | DT_WORDBREAK);
+
+        RECT c3 = R(body.left, c2.bottom + S(16), W(body),
+                    std::max(S(120), static_cast<int>(body.bottom - c2.bottom - S(16))));
+        addCard(c3, L"快捷键", L"", Ic::Terminal);
+        addLabel(R(c3.left + S(16), c3.top + S(50), W(c3) - S(32), S(120)),
+                 L"Ctrl + O     打开文件\n"
+                 L"F5               重新载入当前包\n"
+                 L"Ctrl + C     复制数据网格 / 日志内容\n"
+                 L"Ctrl + Enter  在 SQL 编辑器中运行查询\n"
+                 L"Tab / Shift+Tab  在输入框之间切换焦点\n"
+                 L"Esc              关闭下拉菜单 / 取消焦点",
+                 t.fMono, t.subText, DT_LEFT | DT_TOP | DT_WORDBREAK);
+    }
+
+    void switchPage(int p) {
+        if (p < 0 || p >= PgCount) return;
+        if (running_ && p != page_) { toast(L"任务进行中，请稍候", 1); return; }
+        page_ = p;
+        for (int i = 0; i < PgCount; ++i) nav_[i]->selected = (i == p);
+        setVisibility();
+        layout();
+        if (p == PgVerify && !package_.empty()) runVerify();
+    }
+
+    void setVisibility() {
+        for (auto& w : widgets_) {
+            int p = w->page();
+            bool v = p >= 0 ? (p == page_)
+                   : p == -1 ? true
+                   : p == -2 ? (page_ != PgSettings)
+                   : p == -4 ? toastVisible_
+                   : (page_ == PgExtract || page_ == PgExport || page_ == PgPack);
+            w->setVisible(v);
+        }
+    }
+
+    // ---- painting --------------------------------------------------------
+    void paint(HDC hdc, const RECT& rc) {
+        Theme& t = theme();
+        Gfx g(hdc, rc);
+        for (auto& w : widgets_)
+            if (w->visible() && w->hwnd()) g.exclude(w->rect());
+
+        g.gradient(rc, t.bgTop, t.bgBottom);
+        int cap = S(40), navW = S(216), statusH = S(34);
+        g.fill(R(0, 0, rc.right, cap), t.navBg);
+        g.line(0, cap - 1, rc.right, cap - 1, t.border);
+        g.fill(R(0, cap, navW, rc.bottom - statusH - cap), t.navBg);
+        g.line(navW - 1, cap, navW - 1, rc.bottom - statusH, t.border);
+        // Brand icon in the caption bar.
+        RECT brand{R(S(16), (cap - S(24)) / 2, S(24), S(24))};
+        g.icon(Ic::App, brand, t.accent, 2);
+        g.text(R(S(50), 0, S(220), cap), L"msitool", t.text, t.fStrong,
+               DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        g.text(R(S(142), 0, S(240), cap), L"MSI / MSP 工具箱", t.muted, t.fSmall,
+               DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+        for (const Card& c : cards_) {
+            if (c.hero) {
+                SaveDC(g.dc());
+                HRGN rgn = CreateRoundRectRgn(c.r.left, c.r.top, c.r.right, c.r.bottom,
+                                              S(12), S(12));
+                SelectClipRgn(g.dc(), rgn);
+                DeleteObject(rgn);
+                g.gradient(c.r, t.heroA, t.heroB, false);
+                // decorative concentric arcs
+                for (int i = 0; i < 3; ++i) {
+                    int r = S(70) + i * S(52);
+                    g.circle(c.r.right - S(90), c.r.top + S(10), r, kNone,
+                             mix(t.heroB, RGB(255, 255, 255), 22), S(1));
+                }
+                g.text(R(c.r.left + S(28), c.r.top + S(24), W(c.r) - S(120), S(38)),
+                       c.title, RGB(255, 255, 255), t.fTitle,
+                       DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+                g.text(R(c.r.left + S(28), c.r.top + S(66), W(c.r) - S(120), S(24)),
+                       c.subtitle, RGB(232, 244, 255), t.fBody,
+                       DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+                RECT ic{c.r.right - S(96), c.r.top + S(30), c.r.right - S(32), c.r.top + S(94)};
+                g.icon(Ic::Sparkle, ic, RGB(255, 255, 255), 2);
+                RestoreDC(g.dc(), -1);
+            } else {
+                g.round(c.r, S(10), t.card, t.border, 1);
+                if (c.icon != Ic::None && !c.title.empty()) {
+                    RECT ir{c.r.left + S(16), c.r.top + S(12),
+                            c.r.left + S(36), c.r.top + S(32)};
+                    g.icon(c.icon, ir, t.accent, 2);
+                }
+                if (!c.title.empty()) {
+                    int tx = c.icon == Ic::None ? c.r.left + S(16) : c.r.left + S(44);
+                    g.text(R(tx, c.r.top + S(9), W(c.r) - S(60), S(24)),
+                           c.title, t.text, t.fSubtitle,
+                           DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+                    if (!c.subtitle.empty())
+                        g.text(R(tx, c.r.top + S(30), W(c.r) - S(60), S(18)),
+                               c.subtitle, t.muted, t.fSmall,
+                               DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+                }
+            }
+        }
+
+        for (const Bar& bar : bars_) {
+            COLORREF bg = bar.kind == 3 ? t.infoBarOk
+                        : bar.kind == 2 ? t.infoBarBad : t.infoBarWarn;
+            COLORREF fg = bar.kind == 3 ? t.success
+                        : bar.kind == 2 ? t.danger : t.warning;
+            g.round(bar.r, S(8), bg, mix(bg, fg, 30), 1);
+            RECT ir{bar.r.left + S(14), bar.r.top + S(14),
+                    bar.r.left + S(42), bar.r.top + S(44)};
+            g.icon(bar.icon, ir, fg, 2);
+            g.text(R(bar.r.left + S(52), bar.r.top, W(bar.r) - S(64), H(bar.r)),
+                   bar.text, t.text, t.fStrong,
+                   DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        }
+
+        for (const Label& l : labels_)
+            g.text(l.r, l.text, l.color, l.font, l.fmt);
+
+        // Status bar.
+        g.fill(R(0, rc.bottom - statusH, rc.right, statusH), t.navBg);
+        g.line(0, rc.bottom - statusH, rc.right, rc.bottom - statusH, t.border);
+        g.text(R(S(24), rc.bottom - statusH, rc.right - S(460), statusH),
+               status_, t.subText, t.fSmall,
+               DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        if (!statusRight_.empty())
+            g.text(R(rc.right - S(440), rc.bottom - statusH, S(200), statusH),
+                   statusRight_, t.muted, t.fSmall,
+                   DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+        g.flush();
+    }
+
+    void toast(const std::wstring& text, int kind) {
+        toastText_ = text;
+        toastKind_ = kind;
+        toastUntil_ = GetTickCount64() + 3600;
+        toastVisible_ = true;
+        if (toastView_) {
+            toastView_->text = text;
+            toastView_->kind = kind;
+            RECT rc{};
+            GetClientRect(hwnd_, &rc);
+            toastView_->setRect(R(rc.right - S(390), rc.bottom - S(34) - S(76),
+                                  S(370), S(64)));
+            toastView_->setVisible(true);
+            SetWindowPos(toastView_->hwnd(), HWND_TOP, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            toastView_->invalidate();
+        }
+        InvalidateRect(hwnd_, nullptr, TRUE);
+    }
+
+    void hideToast() {
+        toastVisible_ = false;
+        toastText_.clear();
+        if (toastView_) toastView_->setVisible(false);
+        InvalidateRect(hwnd_, nullptr, TRUE);
+    }
+
+    void toggleMaximize() {
+        ShowWindow(hwnd_, IsZoomed(hwnd_) ? SW_RESTORE : SW_MAXIMIZE);
+        btnMax_->icon = IsZoomed(hwnd_) ? Ic::Restore : Ic::Max;
+        btnMax_->invalidate();
+        layout();
+    }
+
+    // ---- file / package actions ------------------------------------------
+    bool ensureDb() {
+        if (!package_.empty() && (!db_ || !util::iequals(db_->path(), package_))) {
+            try {
+                db_ = std::make_unique<msi::Db>(package_);
+            } catch (const util::Error& e) {
+                toast(L"无法打开数据库：" + e.message(), 2);
+                return false;
+            }
+        }
+        return db_ != nullptr;
+    }
+
+    void refreshEmptyState() {
+        gridHome_->setData({L"属性", L"值"}, {{L"状态", L"尚未打开包"},
+            {L"提示", L"点击「浏览」或直接把 .msi / .msp 拖进窗口"},
+            {L"命令行", L"在终端带参数运行即可使用全部 CLI 命令"}});
+        gridSummary_->clear();
+        gridProps_->clear();
+        gridMedia_->clear();
+        gridTables_->clear();
+        gridTableData_->clear();
+        gridVerify_->clear();
+        tableInfo_ = L"共 0 张表";
+        queryInfo_ = L"就绪";
+        verifyText_ = L"请先打开一个 .msi / .msp 包";
+        statusRight_.clear();
+    }
+
+    void loadPackage(const std::wstring& path) {
+        if (path.empty()) return;
+        std::wstring full = util::path::full(path);
+        msi::FileProbe p = msi::probe(full);
+        if (!p.error.empty()) {
+            toast(L"不是有效的安装包：" + p.error, 2);
+            return;
+        }
+        package_ = full;
+        tbPackage_->setValue(full);
+        db_.reset();
+        if (!ensureDb()) return;
+        saveSetting(L"LastPackage", full);
+        populate();
+        runVerify();
+        status_ = L"已打开 " + util::path::fileName(full);
+        toast(L"已载入 " + util::path::fileName(full), 3);
+        layout();
+    }
+
+    void populate() {
+        if (!ensureDb()) return;
+        // tables -----------------------------------------------------------
+        tableNames_ = db_->tableNames();
+        tableInfo_ = util::fmt(L"共 %llu 张表",
+                               static_cast<unsigned long long>(tableNames_.size()));
+        filterTables();
+        if (!filteredTables_.empty()) {
+            gridTables_->select(0);
+            showTableAt(0);
+        } else gridTableData_->clear();
+
+        // home -------------------------------------------------------------
+        WIN32_FILE_ATTRIBUTE_DATA fad{};
+        unsigned long long size = 0;
+        if (GetFileAttributesExW(package_.c_str(), GetFileExInfoStandard, &fad))
+            size = (static_cast<unsigned long long>(fad.nFileSizeHigh) << 32) | fad.nFileSizeLow;
+        auto prop = [&](const wchar_t* k) { return db_->property(k); };
+        std::vector<extract::MediaInfo> media = extract::readMedia(*db_);
+        size_t cabs = 0;
+        for (const auto& m : media) if (!m.cabinet.empty()) ++cabs;
+        gridHome_->setData({L"属性", L"值"}, {
+            {L"文件名", util::path::fileName(package_)},
+            {L"包类型", db_->isPatch() ? L"MSP 修补包" : L"MSI 安装数据库"},
+            {L"文件大小", humanSize(size)},
+            {L"ProductName", prop(L"ProductName")},
+            {L"ProductVersion", prop(L"ProductVersion")},
+            {L"Manufacturer", prop(L"Manufacturer")},
+            {L"ProductCode", prop(L"ProductCode")},
+            {L"UpgradeCode", prop(L"UpgradeCode")},
+            {L"数据表", std::to_wstring(tableNames_.size()) + L" 张"},
+            {L"CAB / 媒体", std::to_wstring(cabs) + L" 个 CAB · " +
+                            std::to_wstring(media.size()) + L" 条 Media 记录"},
+            {L"路径", package_},
+        }, {S(150), S(420)});
+
+        // summary ----------------------------------------------------------
+        std::vector<std::vector<std::wstring>> srows;
+        for (const auto& x : db_->summary()) srows.push_back({x.name, x.value});
+        gridSummary_->setData({L"属性", L"值"}, srows, {S(170), S(420)});
+
+        // key properties ---------------------------------------------------
+        static const wchar_t* keys[] = {
+            L"ProductName", L"ProductVersion", L"ProductCode", L"UpgradeCode",
+            L"Manufacturer", L"ProductLanguage", L"ALLUSERS", L"INSTALLLEVEL",
+            L"Platform", L"WindowsBuild", L"DefaultUIFont"};
+        std::vector<std::vector<std::wstring>> prows;
+        for (const wchar_t* k : keys) {
+            std::wstring v = db_->property(k);
+            if (!v.empty()) prows.push_back({k, v});
+        }
+        gridProps_->setData({L"属性", L"值"}, prows);
+
+        // media ------------------------------------------------------------
+        std::vector<std::vector<std::wstring>> mrows;
+        for (const auto& x : media) {
+            std::wstring type = x.cabinet.empty() ? L"未压缩布局"
+                              : x.embedded ? L"内嵌 (#stream)" : L"外部 CAB";
+            std::wstring state = x.cabinet.empty() ? L"layout 文件"
+                                : x.available ? L"可用" : L"缺失";
+            mrows.push_back({std::to_wstring(x.diskId),
+                             std::to_wstring(x.lastSequence),
+                             x.cabinet.empty() ? L"(none)" : x.cabinet,
+                             type, humanSize(x.size), state});
+        }
+        gridMedia_->setData({L"DiskId", L"LastSequence", L"Cabinet", L"类型",
+                             L"大小", L"状态"}, mrows);
+
+        statusRight_ = util::fmt(L"%llu 张表 · %llu 个 CAB",
+                                 static_cast<unsigned long long>(tableNames_.size()),
+                                 static_cast<unsigned long long>(cabs));
+    }
+
+    void filterTables() {
+        std::wstring filter = util::toLower(util::trim(tbTableSearch_->value()));
+        filteredTables_.clear();
+        std::vector<std::vector<std::wstring>> rows;
+        for (const auto& n : tableNames_) {
+            if (!filter.empty() && util::toLower(n).find(filter) == std::wstring::npos)
+                continue;
+            filteredTables_.push_back(n);
+            rows.push_back({n});
+        }
+        gridTables_->setData({L"表"}, rows, {S(230)});
+        tableInfo_ = util::fmt(L"共 %llu 张表 · 显示 %llu 张",
+                               static_cast<unsigned long long>(tableNames_.size()),
+                               static_cast<unsigned long long>(filteredTables_.size()));
+    }
+
+    void showTableAt(int row) {
+        if (row < 0 || row >= static_cast<int>(filteredTables_.size())) return;
+        if (!ensureDb()) return;
+        try {
+            msi::QueryResult r = db_->query(L"SELECT * FROM " +
+                                            msi::quoteIdent(filteredTables_[row]));
+            gridTableData_->setData(r.columns, r.rows);
+            status_ = filteredTables_[row] + L" · " +
+                      std::to_wstring(r.rows.size()) + L" 行";
+        } catch (const util::Error& e) {
+            gridTableData_->clear();
+            toast(L"读取表失败：" + e.message(), 2);
+        }
+    }
+
+    void runQuery() {
+        std::wstring sql = util::trim(tbSql_->value());
+        if (sql.empty()) { toast(L"请输入 SQL 查询", 1); return; }
+        if (!ensureDb()) { toast(L"请先打开一个包", 1); return; }
+        auto start = std::chrono::steady_clock::now();
+        try {
+            msi::QueryResult r = db_->query(sql);
+            gridQueryResult_->setData(r.columns, r.rows);
+            auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                          std::chrono::steady_clock::now() - start).count();
+            queryInfo_ = util::fmt(L"%llu 行 · %llu 列 · %lld ms",
+                                   static_cast<unsigned long long>(r.rows.size()),
+                                   static_cast<unsigned long long>(r.columns.size()),
+                                   static_cast<long long>(ms));
+            status_ = L"查询完成";
+            layout();
+        } catch (const util::Error& e) {
+            queryInfo_ = L"查询失败";
+            toast(L"查询失败：" + e.message(), 2);
+            layout();
+        }
+    }
+
+    void runVerify() {
+        if (package_.empty()) {
+            verifyOk_ = false;
+            verifyText_ = L"请先打开一个 .msi / .msp 包";
+            gridVerify_->setData({L"检查项", L"结果"}, {{L"状态", L"未打开包"}});
+            layout();
+            return;
+        }
+        std::vector<std::vector<std::wstring>> rows;
+        auto add = [&](const wchar_t* k, std::wstring v) {
+            rows.push_back({k, std::move(v)});
+        };
+        msi::FileProbe p = msi::probe(package_);
+        add(L"路径", p.path);
+        add(L"大小", humanSize(p.size));
+        add(L"OLE 复合文档签名", p.signatureOk
+            ? L"OK  (D0 CF 11 E0 A1 B1 1A E1)"
+            : L"FAIL  (got " + p.signatureHex + L")");
+        add(L"包类型", p.isPatch ? L".msp 修补包（patch 打开模式）" : L".msi 数据库（只读）");
+        bool ok = p.error.empty();
+        std::wstring reason = p.error;
+        if (!ok) {
+            add(L"预检", L"FAIL - " + p.error);
+        } else {
+            add(L"预检", L"OK");
+            try {
+                msi::Db db(package_);
+                add(L"MsiOpenDatabase", L"OK");
+                if (!p.isPatch) {
+                    UINT vr = MsiVerifyPackageW(package_.c_str());
+                    add(L"MsiVerifyPackage", vr == ERROR_SUCCESS
+                        ? L"OK（可安装的包）" : L"报告 " + util::msiError(vr));
+                }
+                add(L"_Tables", L"OK - " + std::to_wstring(db.tableNames().size()) + L" 张表");
+                add(L"_Streams", std::to_wstring(db.streamNames().size()) + L" 个流");
+                std::vector<extract::MediaInfo> media = extract::readMedia(db);
+                size_t cabs = 0;
+                for (const auto& m : media) if (!m.cabinet.empty()) ++cabs;
+                add(L"Media / CAB", std::to_wstring(media.size()) + L" 条媒体记录 · " +
+                                    std::to_wstring(cabs) + L" 个 CAB");
+                std::wstring title, templ;
+                for (const auto& s : db.summary()) {
+                    if (s.name == L"Title") title = s.value;
+                    if (util::startsWith(s.name, L"Template")) templ = s.value;
+                }
+                add(L"SummaryInformation", L"OK - Title=\"" + title +
+                                           L"\", Template=\"" + templ + L"\"");
+            } catch (const util::Error& e) {
+                reason = e.message();
+                add(L"MsiOpenDatabase / 结构", L"FAIL - " + reason);
+                ok = false;
+            }
+        }
+        add(L"结论", ok ? L"有效的 Windows Installer 包"
+                        : L"无效：不是可打开的 Windows Installer 包");
+        gridVerify_->setData({L"检查项", L"结果"}, rows, {S(210), S(600)});
+        verifyOk_ = ok;
+        verifyText_ = ok ? L"验证通过 · 这是一个有效的 Windows Installer 包"
+                         : L"验证失败 · " + reason;
+        status_ = ok ? L"验证通过" : L"验证失败";
+        layout();
+    }
+
+    // ---- pickers ---------------------------------------------------------
+    void browsePackage() {
+        COMDLG_FILTERSPEC f[] = {
+            {L"Windows Installer 包 (*.msi;*.msp)", L"*.msi;*.msp"},
+            {L"所有文件 (*.*)", L"*.*"}};
+        std::wstring p;
+        if (pickPath(hwnd_, Pick::Open, L"打开 MSI / MSP 包", f, 2, nullptr, p))
+            loadPackage(p);
+    }
+
+    void browseFolderFor(TextBox* target, const wchar_t* title) {
+        std::wstring p;
+        if (pickPath(hwnd_, Pick::Folder, title, nullptr, 0, nullptr, p)) {
+            target->setValue(p);
+            lastOutputDir_ = p;
+        }
+    }
+
+    void browseFileFor(TextBox* target, bool append, const wchar_t* title,
+                       const wchar_t* filterName, const wchar_t* filterSpec) {
+        COMDLG_FILTERSPEC f[] = {{filterName, filterSpec},
+                                 {L"所有文件 (*.*)", L"*.*"}};
+        std::wstring p;
+        if (pickPath(hwnd_, Pick::Open, title, f, 2, nullptr, p)) {
+            if (append && !target->value().empty())
+                target->setValue(target->value() + L";" + p);
+            else target->setValue(p);
+        }
+    }
+
+    void browseSaveMsi() {
+        COMDLG_FILTERSPEC f[] = {{L"Windows Installer 包 (*.msi)", L"*.msi"}};
+        std::wstring p;
+        if (pickPath(hwnd_, Pick::Save, L"保存 MSI", f, 1, L"msi", p))
+            tbOutMsi_->setValue(p);
+    }
+
+    void suggestPackDefaults() {
+        std::wstring src = tbSrcDir_->value();
+        if (src.empty()) return;
+        if (tbName_->value().empty())
+            tbName_->setValue(util::path::fileName(src));
+        if (tbOutMsi_->value().empty())
+            tbOutMsi_->setValue(util::path::join(util::path::parent(src),
+                                                util::path::fileName(src) + L".msi"));
+    }
+
+    void openOutputFolder() {
+        std::wstring dir = lastOutputDir_;
+        if (dir.empty() && !package_.empty()) dir = util::path::dirName(package_);
+        if (dir.empty()) { toast(L"还没有输出目录", 1); return; }
+        ShellExecuteW(hwnd_, L"open", dir.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    }
+
+    // ---- background tasks ------------------------------------------------
+    void setBusy(bool busy) {
+        Button* runButtons[] = {btnExtract_, btnExport_, btnPack_, btnOpen_,
+                                btnHomeVerify_, btnVerify_};
+        for (Button* b : runButtons) if (b) b->setEnabled(!busy);
+        if (progress_) {
+            progress_->indeterminate = busy;
+            if (!busy) progress_->value = 0;
+            progress_->invalidate();
+        }
+    }
+
+    void startTask(std::function<void()> work, const std::wstring& title,
+                   const std::wstring& doneMessage) {
+        if (running_) return;
+        running_ = true;
+        db_.reset();                 // MSI handles are never shared with workers
+        log_->clear();
+        progress_->phase = 0;
+        setBusy(true);
+        status_ = title;
+        statusRight_ = L"任务运行中…";
+        InvalidateRect(hwnd_, nullptr, TRUE);
+        HWND h = hwnd_;
+        auto begin = std::chrono::steady_clock::now();
+        std::thread([h, work = std::move(work), doneMessage, begin]() {
+            bool ok = true;
+            std::wstring message = doneMessage;
+            try {
+                work();
+            } catch (const util::Error& e) {
+                ok = false; message = e.message();
+                util::errLine(L"error: " + message);
+            } catch (const std::exception& e) {
+                ok = false; message = util::widen(e.what());
+                util::errLine(L"error: " + message);
+            } catch (...) {
+                ok = false; message = L"未知错误";
+                util::errLine(L"error: " + message);
+            }
+            auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                          std::chrono::steady_clock::now() - begin).count();
+            auto* result = new TaskResult{ok, message, static_cast<unsigned long long>(ms)};
+            if (!PostMessageW(h, WM_APP_TASK_DONE, ok ? 1 : 0,
+                              reinterpret_cast<LPARAM>(result)))
+                delete result;
+        }).detach();
+    }
+
+    void onTaskDone(WPARAM wp, LPARAM lp) {
+        std::unique_ptr<TaskResult> res(reinterpret_cast<TaskResult*>(lp));
+        if (!res) return;
+        running_ = false;
+        setBusy(false);
+        statusRight_.clear();
+        (void)wp;
+        // Refreshing the package views can set its own status text, so do it
+        // first and report the task result last.
+        if (res->ok && !lastPackOutput_.empty() &&
+            util::path::exists(lastPackOutput_)) {
+            std::wstring packed = lastPackOutput_;
+            lastPackOutput_.clear();
+            loadPackage(packed);           // inspect the freshly built MSI
+        } else {
+            lastPackOutput_.clear();
+            if (!package_.empty()) populate();
+        }
+        status_ = util::fmt(L"%s · %llu ms",
+                            res->ok ? L"任务完成" : L"任务失败", res->elapsedMs);
+        log_->append(res->ok ? L"✔ 完成：" + res->message
+                             : L"✘ 失败：" + res->message,
+                     res->ok ? LogView::Kind::Ok : LogView::Kind::Error);
+        toast(res->ok ? res->message : L"失败：" + res->message,
+              res->ok ? 3 : 2);
+        layout();
+    }
+
+    void startExtract() {
+        if (!ensureDb()) { toast(L"请先打开一个包", 1); return; }
+        extract::Options o;
+        o.outDir = util::trim(tbOutDir_->value());
+        if (o.outDir.empty()) { toast(L"请选择输出目录", 1); return; }
+        o.flat = chkFlat_->checked;
+        o.dryRun = chkDry_->checked;
+        o.skipExisting = chkSkip_->checked;
+        o.sourceLayout = chkSource_->checked;
+        o.keepTemp = chkKeepTemp_->checked;
+        o.verbose = chkVerbose_->checked;
+        o.transforms = splitList(tbTransforms_->value());
+        o.baseMsi = util::trim(tbBaseMsi_->value());
+        lastOutputDir_ = util::path::full(o.outDir);
+        std::wstring path = package_;
+        bool patch = db_->isPatch();
+        startTask([path, patch, o] {
+            msi::Db db(path);
+            if (!patch) {
+                for (const auto& tr : o.transforms) {
+                    db.applyTransform(tr);
+                    util::verboseLine(o.verbose, L"applied transform " + tr);
+                }
+            }
+            if (patch) extract::extractPatch(db, o);
+            else extract::extractPackage(db, o);
+        }, L"正在解包 " + util::path::fileName(path), L"解包完成");
+    }
+
+    void startExport() {
+        if (package_.empty()) { toast(L"请先打开一个包", 1); return; }
+        std::wstring dir = util::trim(tbExportDir_->value());
+        if (dir.empty()) { toast(L"请选择输出目录", 1); return; }
+        int mode = ddExportMode_->index;
+        lastOutputDir_ = util::path::full(dir);
+        std::wstring path = package_;
+        startTask([path, dir, mode] {
+            msi::Db db(path);
+            if (mode == 0) extract::exportCabs(db, dir, true);
+            else extract::exportArchive(db, dir, true);
+        }, L"正在导出 " + util::path::fileName(path), L"导出完成");
+    }
+
+    void startPack() {
+        pack::Options o;
+        o.inputDir = util::trim(tbSrcDir_->value());
+        o.outputMsi = util::trim(tbOutMsi_->value());
+        if (o.inputDir.empty() || o.outputMsi.empty()) {
+            toast(L"请填写源目录与输出 MSI 路径", 1);
+            return;
+        }
+        o.productName = util::trim(tbName_->value());
+        o.version = util::trim(tbVersion_->value());
+        if (o.version.empty()) o.version = L"1.0.0";
+        o.manufacturer = util::trim(tbManufacturer_->value());
+        if (o.manufacturer.empty()) o.manufacturer = L"msitool";
+        o.platform = ddPlatform_->index == 1 ? L"x64" : L"Intel";
+        o.language = _wtoi(tbLanguage_->value().c_str());
+        if (o.language <= 0) o.language = 1033;
+        static const wchar_t* uiNames[] = {L"none", L"basic", L"minimal"};
+        o.ui = uiNames[std::min(2, std::max(0, ddUi_->index))];
+        o.uiSet = true;
+        o.largeFiles = ddLargeFiles_->index == 1 ? L"error" : L"layout";
+        o.largeFilesSet = true;
+        o.cabSize = parseSize(tbCabSize_->value());
+        o.cabSizeSet = true;
+        o.configFile = util::trim(tbConfig_->value());
+        o.signCert = util::trim(tbSignCert_->value());
+        o.signCertSet = !o.signCert.empty();
+        o.signPassword = tbSignPassword_->value();
+        o.signTimestamp = util::trim(tbSignTime_->value());
+        o.force = chkForce_->checked;
+        o.dryRun = chkPackDry_->checked;
+        o.verbose = chkPackVerbose_->checked;
+        o.keepEmptyDirs = chkEmptyDirs_->checked;
+        lastOutputDir_ = util::path::dirName(util::path::full(o.outputMsi));
+        lastPackOutput_ = util::path::full(o.outputMsi);
+        startTask([o] { pack::pack(o); },
+                  L"正在打包 " + util::path::fileName(o.outputMsi), L"打包完成");
+    }
+
+    // ---- window procedure helpers ----------------------------------------
+    void onDrop(HDROP drop) {
+        wchar_t path[MAX_PATH]{};
+        if (DragQueryFileW(drop, 0, path, MAX_PATH)) {
+            std::wstring p = path;
+            std::wstring ext = util::path::ext(p);
+            if (util::iequals(ext, L".msi") || util::iequals(ext, L".msp"))
+                loadPackage(p);
+            else toast(L"请拖入 .msi 或 .msp 文件", 1);
+        }
+        DragFinish(drop);
+    }
+
+    void focusNext(HWND current, bool backwards) {
+        std::vector<Widget*> list;
+        for (auto& w : widgets_) {
+            if (!w->visible() || !w->enabled()) continue;
+            if (dynamic_cast<NavItem*>(w.get()) || dynamic_cast<Progress*>(w.get()) ||
+                dynamic_cast<ToastView*>(w.get()) ||
+                w.get() == btnTheme_ || w.get() == btnMin_ ||
+                w.get() == btnMax_ || w.get() == btnClose_)
+                continue;
+            if (w->page() == -1) continue;
+            list.push_back(w.get());
+        }
+        std::sort(list.begin(), list.end(), [](Widget* a, Widget* b) {
+            if (a->rect().top != b->rect().top) return a->rect().top < b->rect().top;
+            return a->rect().left < b->rect().left;
+        });
+        if (list.empty()) return;
+        int idx = 0;
+        for (size_t i = 0; i < list.size(); ++i) {
+            auto* tb = dynamic_cast<TextBox*>(list[i]);
+            if (list[i]->hwnd() == current || (tb && tb->isEdit(current))) {
+                idx = static_cast<int>(i);
+                break;
+            }
+        }
+        idx = (idx + (backwards ? -1 : 1) + static_cast<int>(list.size())) %
+              static_cast<int>(list.size());
+        auto* tb = dynamic_cast<TextBox*>(list[idx]);
+        if (tb) tb->focusEdit();
+        else list[idx]->takeFocus();
+    }
+
+    LRESULT handle(UINT msg, WPARAM wp, LPARAM lp) {
+        switch (msg) {
+        case WM_CREATE: {
+            auto* cs = reinterpret_cast<CREATESTRUCTW*>(lp);
+            auto* self = static_cast<App*>(cs->lpCreateParams);
+            SetWindowLongPtrW(hwnd_, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
+            onCreate();
+            return 0;
+        }
+        case WM_PAINT: {
+            PAINTSTRUCT ps{};
+            HDC dc = BeginPaint(hwnd_, &ps);
+            RECT rc{};
+            GetClientRect(hwnd_, &rc);
+            paint(dc, rc);
+            EndPaint(hwnd_, &ps);
+            return 0;
+        }
+        case WM_ERASEBKGND:
+            return 1;
+        case WM_NCCALCSIZE:
+            if (wp == TRUE) {
+                if (IsZoomed(hwnd_)) {
+                    auto* p = reinterpret_cast<NCCALCSIZE_PARAMS*>(lp);
+                    int b = GetSystemMetrics(SM_CXSIZEFRAME) +
+                            GetSystemMetrics(SM_CXPADDEDBORDER);
+                    p->rgrc[0].left += b;
+                    p->rgrc[0].right -= b;
+                    p->rgrc[0].top += b;
+                    p->rgrc[0].bottom -= b;
+                }
+                return 0;
+            }
+            return DefWindowProcW(hwnd_, msg, wp, lp);
+        case WM_NCHITTEST: {
+            LRESULT hit = DefWindowProcW(hwnd_, msg, wp, lp);
+            if (hit != HTCLIENT) return hit;
+            POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+            ScreenToClient(hwnd_, &pt);
+            RECT rc{};
+            GetClientRect(hwnd_, &rc);
+            int edge = S(6);
+            if (!IsZoomed(hwnd_)) {
+                bool l = pt.x < edge, r = pt.x > rc.right - edge;
+                bool t = pt.y < edge, b = pt.y > rc.bottom - edge;
+                if (l && t) return HTTOPLEFT;
+                if (r && t) return HTTOPRIGHT;
+                if (l && b) return HTBOTTOMLEFT;
+                if (r && b) return HTBOTTOMRIGHT;
+                if (l) return HTLEFT;
+                if (r) return HTRIGHT;
+                if (t) return HTTOP;
+                if (b) return HTBOTTOM;
+            }
+            int bw = S(46);
+            if (pt.y >= 0 && pt.y < S(40) && pt.x >= 0 &&
+                pt.x < rc.right - bw * 4)
+                return HTCAPTION;
+            return HTCLIENT;
+        }
+        case WM_GETMINMAXINFO: {
+            auto* mm = reinterpret_cast<MINMAXINFO*>(lp);
+            mm->ptMinTrackSize.x = S(1160);
+            mm->ptMinTrackSize.y = S(860);
+            return 0;
+        }
+        case WM_SIZE:
+            btnMax_->icon = IsZoomed(hwnd_) ? Ic::Restore : Ic::Max;
+            btnMax_->invalidate();
+            if (wp != SIZE_MINIMIZED) layout();
+            return 0;
+        case WM_DPICHANGED: {
+            theme().rebuild(hwnd_, theme().dark);
+            for (auto& w : widgets_) w->onThemeChanged();
+            applyTheme();
+            auto* suggested = reinterpret_cast<RECT*>(lp);
+            if (suggested)
+                SetWindowPos(hwnd_, nullptr, suggested->left, suggested->top,
+                             suggested->right - suggested->left,
+                             suggested->bottom - suggested->top,
+                             SWP_NOZORDER | SWP_NOACTIVATE);
+            layout();
+            return 0;
+        }
+        case WM_SETTINGCHANGE:
+            if (themeMode_ == 2 && lp &&
+                wcsstr(reinterpret_cast<const wchar_t*>(lp), L"ImmersiveColorSet"))
+                applyTheme();
+            return 0;
+        case WM_TIMER:
+            if (wp == kTimer) {
+                if (running_) {
+                    progress_->phase += 5;
+                    progress_->invalidate();
+                }
+                if (toastVisible_ && GetTickCount64() >= toastUntil_) hideToast();
+            }
+            return 0;
+        case WM_DROPFILES:
+            onDrop(reinterpret_cast<HDROP>(wp));
+            return 0;
+        case WM_COMMAND:
+            if (LOWORD(wp) == kIdOpen) { browsePackage(); return 0; }
+            if (LOWORD(wp) == kIdRefresh) {
+                if (!package_.empty()) loadPackage(package_);
+                return 0;
+            }
+            break;
+        case WM_APP_LOG: {
+            std::unique_ptr<std::wstring> line(reinterpret_cast<std::wstring*>(lp));
+            if (line) {
+                log_->append(*line, classifyLog(wp != 0, *line));
+                if (!status_.empty() && running_)
+                    status_ = util::trim(util::replaceAll(*line, L"\t", L" "));
+                InvalidateRect(hwnd_, nullptr, FALSE);
+            }
+            return 0;
+        }
+        case WM_APP_TASK_DONE:
+            onTaskDone(wp, lp);
+            return 0;
+        case WM_APP_ESC:
+            hideToast();
+            return 0;
+        case WM_APP_REFRESH:
+            if (!package_.empty()) loadPackage(package_);
+            return 0;
+        case WM_APP_OPEN:
+            browsePackage();
+            return 0;
+        case WM_APP_FOCUS_NEXT:
+            focusNext(reinterpret_cast<HWND>(wp), lp != 0);
+            return 0;
+        case WM_CLOSE:
+            if (running_) {
+                toast(L"任务进行中，请等待完成后再关闭", 1);
+                return 0;
+            }
+            break;
+        case WM_DESTROY:
+            setLogTarget(nullptr);
+            util::setLogSink(nullptr);
+            KillTimer(hwnd_, kTimer);
+            if (accel_) DestroyAcceleratorTable(accel_);
+            PostQuitMessage(0);
+            return 0;
+        default:
+            break;
+        }
+        return DefWindowProcW(hwnd_, msg, wp, lp);
+    }
+};
+
+App* g_app = nullptr;
+
+LRESULT CALLBACK App::proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+    App* self = reinterpret_cast<App*>(GetWindowLongPtrW(h, GWLP_USERDATA));
+    if (msg == WM_NCCREATE) {
+        auto* cs = reinterpret_cast<CREATESTRUCTW*>(lp);
+        self = static_cast<App*>(cs->lpCreateParams);
+        SetWindowLongPtrW(h, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
+        self->hwnd_ = h;
+        return DefWindowProcW(h, msg, wp, lp);
+    }
+    return self ? self->handle(msg, wp, lp) : DefWindowProcW(h, msg, wp, lp);
+}
+
+}  // namespace
+
+// ---------------------------------------------------------------------------
+// Entry point
+// ---------------------------------------------------------------------------
+int run(HINSTANCE instance, const std::wstring& initialFile) {
+    enableDpiAwareness();
+    prepareGuiProcess();
+    OleInitialize(nullptr);
+    Widget::registerClass(instance);
+
+    // Resolve the DPI before creating the window so that the initial size is
+    // already scaled (the fallback is the system DPI of a desktop DC).
+    theme().rebuild(nullptr, systemPrefersDark());
+
+    App app;
+    g_app = &app;
+    if (!app.create(instance, initialFile)) {
+        OleUninitialize();
+        return 1;
+    }
+    ShowWindow(app.hwnd_, SW_SHOWNORMAL);
+    UpdateWindow(app.hwnd_);
+
+    MSG msg{};
+    while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        if (!app.accel_ || !TranslateAcceleratorW(app.hwnd_, app.accel_, &msg)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+    int rc = static_cast<int>(msg.wParam);
+    theme().dispose();
+    g_app = nullptr;
+    OleUninitialize();
+    return rc;
+}
+
+}  // namespace ui

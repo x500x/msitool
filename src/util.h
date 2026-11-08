@@ -13,6 +13,7 @@
 #include <shellapi.h>
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -48,6 +49,12 @@ std::wstring replaceAll(std::wstring s, const std::wstring& from, const std::wst
 std::wstring fmt(const wchar_t* format, ...);
 
 // ---- console ---------------------------------------------------------------
+// GUI mode installs a sink: every line that the CLI commands print through
+// out()/outLine()/errLine() is also delivered to the window's log view. The
+// partial writes of out() are buffered per thread until a line is completed.
+using LogSink = std::function<void(bool isError, const std::wstring& line)>;
+void setLogSink(LogSink sink);
+
 void setConsoleUtf8();
 void out(const std::wstring& s);
 void outLine(const std::wstring& s);

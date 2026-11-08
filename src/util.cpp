@@ -105,20 +105,41 @@ static void writeUtf8(FILE* stream, const std::wstring& s) {
     if (!bytes.empty()) fwrite(bytes.data(), 1, bytes.size(), stream);
 }
 
+// Installed once by the GUI before any worker thread starts, and never
+// changed while workers are running (the callback itself is stateless).
+static LogSink g_logSink;
+static thread_local std::wstring g_pending;
+
+static void publishLine(bool isError, const std::wstring& line) {
+    std::wstring full = g_pending + line;
+    g_pending.clear();
+    if (g_logSink) g_logSink(isError, full);
+}
+
+void setLogSink(LogSink sink) { g_logSink = std::move(sink); }
+
 void setConsoleUtf8() {
     SetConsoleOutputCP(CP_UTF8);
     SetConsoleCP(CP_UTF8);
 }
 
-void out(const std::wstring& s) { writeUtf8(stdout, s); }
+void out(const std::wstring& s) {
+    writeUtf8(stdout, s);
+    if (g_logSink) g_pending += s;
+}
 void outLine(const std::wstring& s) {
     writeUtf8(stdout, s);
     fputc('\n', stdout);
+    if (g_logSink) publishLine(false, s);
 }
 void errLine(const std::wstring& s) {
     writeUtf8(stderr, s);
     fputc('\n', stderr);
     fflush(stderr);
+    if (g_logSink) {
+        if (!g_pending.empty()) publishLine(false, L"");
+        publishLine(true, s);
+    }
 }
 void verboseLine(bool verbose, const std::wstring& s) {
     if (verbose) errLine(L"[v] " + s);

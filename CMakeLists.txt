@@ -10,13 +10,18 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-add_executable(msitool
+# WIN32: the GUI is the default entry (no args / `gui`). CLI mode attaches
+# to the parent console, so one binary serves both use cases.
+add_executable(msitool WIN32
     src/main.cpp
     src/util.cpp
     src/msidb.cpp
     src/cab.cpp
     src/extract.cpp
     src/pack.cpp
+    src/ui_draw.cpp
+    src/ui_widgets.cpp
+    src/ui_app.cpp
 )
 
 target_include_directories(msitool PRIVATE src)
@@ -28,8 +33,13 @@ target_compile_options(msitool PRIVATE /utf-8 /W4 /EHsc /permissive-)
 target_link_libraries(msitool PRIVATE
     msi        # Msi.Lib      : MsiOpenDatabaseW / MsiDatabaseOpenViewW / ...
     cabinet    # Cabinet.Lib  : FDI (FDICopy) + FCI (FCIAddFile)
-    shell32    # CommandLineToArgvW
-    ole32      # CoCreateGuid / StringFromGUID2
+    shell32    # CommandLineToArgvW / IFileDialog / ShellExecuteW
+    ole32      # CoCreateGuid / OleInitialize / COM
+    user32     # owner-drawn HWNDs, message loop, DPI
+    gdi32      # all Fluent painting (double buffered GDI)
+    advapi32   # registry (theme / recent file settings)
+    comdlg32   # COMDLG_FILTERSPEC for the file pickers
+    uuid       # CLSID_FileOpenDialog / IID_IFileDialog
 )
 
 # Build with:  cmake -S . -B build -G "Visual Studio 17 2022" -A x64

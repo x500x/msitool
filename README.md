@@ -5,9 +5,9 @@
 ![Windows](https://img.shields.io/badge/platform-Windows-blue)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-> 用 **MSVC + C++17 + Windows Installer (Msi) API** 编写的命令行工具，用来**查看、解包、打包** MSI 安装包。
+> 用 **MSVC + C++17 + Windows Installer (Msi) API** 编写的工具，用来**查看、解包、打包** MSI 安装包；带一个纯 Win32 自绘的 Fluent 风格图形界面，同时完整保留命令行。
 
-`msitool` 是一个零外部依赖的单文件命令行程序：运行时只使用 Windows 自带的 `msi.dll` 与 `cabinet.dll`，不需要 WiX、Orca、7-Zip、Python 或 .NET，不需要管理员权限，也**不会真正安装任何东西**。它直接读取 MSI 的 OLE 复合存储与表，用 FDI/FCI 处理 CAB，适合逆向分析、离线审计、CI 中的包检查，以及把目录快速做成一个可安装的 MSI。
+`msitool` 是一个零外部依赖的单文件程序：运行时只使用 Windows 自带的 `msi.dll` 与 `cabinet.dll`，不需要 WiX、Orca、7-Zip、Python、.NET 或任何 UI 框架，不需要管理员权限，也**不会真正安装任何东西**。它直接读取 MSI 的 OLE 复合存储与表，用 FDI/FCI 处理 CAB，适合逆向分析、离线审计、CI 中的包检查，以及把目录快速做成一个可安装的 MSI。双击 exe 打开图形界面，在终端里带参数运行则仍是原来的 CLI。
 
 - **只读安全**：数据库一律以 `MSIDBOPEN_READONLY` 打开（`query` 也无法修改包）。
 - **Unicode**：全程 W 版 API + `std::wstring`，输出 UTF-8，支持中文/空格路径与文件名。
@@ -18,6 +18,7 @@
 
 - [特性](#特性)
 - [快速开始](#快速开始)
+- [图形界面（Fluent UI）](#图形界面fluent-ui)
 - [安装](#安装)
 - [命令参考](#命令参考)
 - [工作原理](#工作原理)
@@ -45,6 +46,7 @@
 | 解包 | 还原安装目录树；内嵌 CAB（`_Streams`）、外部 CAB、未压缩 layout、跨 CAB 连续文件（FDI 分卷集）、`.msp` 补丁负载都支持；`--transform` 可查看应用 transform 后的视图 |
 | 打包 | 把目录做成自包含 MSI：FCI 生成一个或多个 MSZIP CAB + Msi API 建库/写流/写摘要，可选分卷、空目录、快捷方式、注册表、服务、环境变量、多 Feature、UI 与数字签名 |
 | 输出 | UTF-8 文本表格或 `--tsv`；控制字符转义为 `\xNN`；警告与详细日志走 stderr |
+| 图形界面 | 纯 Win32 API（user32 / gdi32 / shell32 / ole32）自绘的 Fluent 界面：亮/暗主题、高 DPI、导航、卡片、数据网格、SQL 查询、解包/导出/打包表单、实时日志与进度；**不使用任何第三方库或 UI 框架** |
 
 ---
 
@@ -87,6 +89,56 @@ build\msitool_x64.exe info setup.msi
 build\msitool_x64.exe extract setup.msi C:\out\files --verbose
 ```
 
+### 启动图形界面
+
+```bat
+build\msitool_x64.exe                       :: 不带参数 = GUI
+build\msitool_x64.exe gui                   :: 显式启动 GUI
+build\msitool_x64.exe gui setup.msi         :: 启动 GUI 并直接打开一个包
+```
+
+也可以直接把 `.msi` / `.msp` 拖进窗口。GUI 与 CLI 是同一个 exe：带命令参数时在终端里以 CLI 运行（自动附加父控制台），不带参数时是无控制台的窗口程序。
+
+---
+
+## 图形界面（Fluent UI）
+
+### 设计
+
+整个 UI 层在 `src/ui_*.cpp` 中，**只调用 Windows API**：
+
+- 窗口、消息循环、拖拽、高 DPI（`SetProcessDpiAwarenessContext` / `GetDpiForWindow`）、系统文件对话框（`IFileDialog`）、剪贴板、注册表全部用 user32 / shell32 / ole32 / advapi32；
+- 所有像素由 gdi32 绘制到内存 DC 双缓冲：圆角卡片、渐变 Hero、导航选中态、数据网格、切换开关、进度条、日志、Toast、以及 30 多个用 `MoveToEx`/`LineTo`/`RoundRect`/`Ellipse` 画的矢量图标；
+- 每个控件都是一个自绘 `HWND`（共用一套窗口过程 + C++ 对象路由），只有文本输入使用系统原生 `EDIT` 子窗口以获得输入法、光标与选字能力，边框、占位文字、焦点强调线仍由 GDI 绘制；
+- 无边框标题栏通过 `WM_NCCALCSIZE` / `WM_NCHITTEST` 自绘，并动态加载 `dwmapi.dll` 设置 Win11 圆角与深色边框；
+- 亮/暗/跟随系统三套主题，主题设置与最近打开的包保存在 `HKCU\Software\msitool`；所有尺寸按 DPI 缩放；
+- 耗时的 `extract` / `export` / `pack` 在工作线程执行，通过 `PostMessage` 把日志与完成状态送回 UI 线程；`util::outLine` / `errLine` 新增可选日志钩子，让现有 CLI 代码的输出直接变成 GUI 日志。
+
+### 页面
+
+| 页面 | 功能 |
+| --- | --- |
+| 概览 | 包摘要、快捷操作、渐变 Hero |
+| 包信息 | SummaryInformation、关键 Property、Media / CAB 列表 |
+| 数据表 | 表筛选 + 任意表的数据网格（虚拟滚动、选中、Ctrl+C 复制 TSV） |
+| SQL 查询 | MSI SQL 编辑器、示例查询、结果网格与耗时 |
+| 解包 | 输出目录、六个开关、MST transform、基准 MSI、运行日志 |
+| 导出 | CAB / 完整归档两种模式、运行日志 |
+| 打包 | 产品标识、平台、分卷、清单、签名、开关的完整表单，完成后自动打开新 MSI |
+| 验证 | 签名 / `MsiOpenDatabase` / `MsiVerifyPackage` / `_Tables` / 媒体检查报告 |
+| 设置 | 主题、DPI 信息、关于与快捷键 |
+
+### 快捷键
+
+| 按键 | 作用 |
+| --- | --- |
+| `Ctrl+O` | 打开包文件 |
+| `F5` | 重新载入当前包 |
+| `Ctrl+C` | 复制数据网格 / 日志内容 |
+| `Ctrl+Enter` | 运行 SQL 查询 |
+| `Tab` / `Shift+Tab` | 在控件之间切换焦点 |
+| `Esc` | 关闭下拉菜单 / 清除提示 |
+
 ---
 
 ## 安装
@@ -107,7 +159,11 @@ setx PATH "%PATH%;E:\work\winmsi\build"
 
 ```
 msitool <command> <package.msi> [arguments...] [options...]
+msitool gui [package.msi]        :: 图形界面
+msitool                          :: 不带参数 = 图形界面
 ```
+
+> 带命令参数时是原样的 CLI；不带参数（或 `gui` / `--gui` / `/gui`）时启动 [图形界面](#图形界面fluent-ui)。
 
 | 命令 | 参数 | 作用 |
 | --- | --- | --- |
@@ -361,7 +417,11 @@ MSI SQL 是 SQL 的**子集**（例如没有 `COUNT(*)` 这类聚合函数），
 │   ├── cab.h / cab.cpp          FDI 解压，回调式直接落盘
 │   ├── extract.h / extract.cpp  表解析、目录树、Media/Sequence 映射、CAB 导出与解包
 │   ├── pack.h / pack.cpp        FCI 多 CAB 压缩 + manifest + Msi 建库/建表/写流/签名/摘要
-│   └── main.cpp                 命令行解析与全部命令
+│   ├── ui.h                     UI 层接口：主题、GDI 绘制器、控件声明
+│   ├── ui_draw.cpp              主题 / DPI / 双缓冲绘制 / 矢量图标
+│   ├── ui_widgets.cpp           自绘控件：按钮、输入框、下拉、网格、日志、进度、导航
+│   ├── ui_app.cpp               主窗口、九个页面、业务逻辑与后台任务
+│   └── main.cpp                 入口：无参数进 GUI，带参数进 CLI（全部命令）
 ├── examples/
 │   └── pack.ini                 打包清单示例（features/shortcuts/registry/services/env）
 ├── build.bat                    MSVC 构建脚本（x64 / x86 / clean）
@@ -392,15 +452,20 @@ build.bat clean      :: 清理
 cl /std:c++17 /EHsc /W4 /O2 /utf-8 /DUNICODE /D_UNICODE ^
    /Isrc /Fobuild\obj\x64\ /Febuild\msitool_x64.exe ^
    src\util.cpp src\msidb.cpp src\cab.cpp src\extract.cpp src\pack.cpp src\main.cpp ^
-   Msi.Lib Cabinet.Lib Shell32.Lib Ole32.Lib /link /MACHINE:X64
+   src\ui_draw.cpp src\ui_widgets.cpp src\ui_app.cpp ^
+   Msi.Lib Cabinet.Lib Shell32.Lib Ole32.Lib User32.Lib Gdi32.Lib Advapi32.Lib ^
+   Comdlg32.Lib Uuid.Lib /link /MACHINE:X64 /SUBSYSTEM:WINDOWS
 ```
+
+> `/SUBSYSTEM:WINDOWS` 让双击 exe 时没有控制台黑框；CLI 模式会 `AttachConsole(ATTACH_PARENT_PROCESS)`（失败则 `AllocConsole`）并重绑标准流，重定向到文件时也不会破坏管道。
 
 | 库 | 用途 |
 | --- | --- |
 | `Msi.Lib` | `MsiOpenDatabaseW` / `MsiDatabaseOpenViewW` / `MsiRecordReadStream` / … |
 | `Cabinet.Lib` | FDI（`FDICopy`）解压 + FCI（`FCIAddFile`）压缩 |
-| `Shell32.Lib` | `CommandLineToArgvW` |
-| `Ole32.Lib` | `CoCreateGuid` / `StringFromGUID2` |
+| `Shell32.Lib` / `Ole32.Lib` | `CommandLineToArgvW` / `IFileDialog` / `OleInitialize` / GUID |
+| `User32.Lib` / `Gdi32.Lib` | 自绘窗口、消息循环、DPI 与全部 GDI 绘制 |
+| `Advapi32.Lib` / `Comdlg32.Lib` / `Uuid.Lib` | 注册表设置 / 文件过滤器 / COM 接口 GUID |
 
 ### CMake
 
@@ -531,6 +596,13 @@ msiexec /a C:\out\app.msi /qn TARGETDIR=C:\out\admin
 - 数字签名是可选的，需要 Windows SDK 的 `signtool.exe` 与一张代码签名证书；不提供证书管理。
 - 文件名 / 目录名中的 `\ / : * ? " < > |` 与控制字符会替换为 `_`，结尾的点与空格会被去掉。
 - 需要一块与所有 CAB 总大小相当的临时磁盘空间；输出已存在时默认拒绝，需 `--force`。
+
+**图形界面**
+
+- GUI 是 CLI 的前端：所有读写仍走同一套 `msi::Db` / `extract` / `pack` 实现，没有额外的数据库或包格式解析。
+- 界面自绘，不依赖视觉样式清单（manifest）：系统原生 `EDIT` 的占位文字由 UI 层自己绘制；Win11 圆角 / 深色边框通过动态加载 `dwmapi.dll` 设置，旧版 Windows 上自动降级为普通直角窗口。
+- 后台任务（解包 / 导出 / 打包）运行期间禁止切换页面和关闭窗口；GUI 不提供任务中途取消（CLI 本身也没有中断点）。
+- `Msi` 句柄不跨线程共享：启动任务前关闭主界面持有的数据库，工作线程自己重新打开只读句柄。
 
 ---
 

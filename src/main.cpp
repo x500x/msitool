@@ -2,7 +2,9 @@
 #include "msidb.h"
 #include "extract.h"
 #include "pack.h"
+#include "ui.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <cstdlib>
 #include <cwctype>
@@ -576,14 +578,44 @@ int run(int argc, wchar_t** argv) {
 
 }  // namespace
 
-int main() {
-    util::setConsoleUtf8();
-    int argc = 0;
-    wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
-    if (!argv) {
-        util::errLine(L"error: cannot parse the command line");
-        return 2;
+// A GUI-subsystem executable has no console of its own. In CLI mode we
+// attach to the caller's console (or allocate one when started from Explorer)
+// and rebind the CRT streams, so all existing CLI commands keep working
+// byte-for-byte, including redirected stdout.
+static void attachConsoleForCli() {
+    // Remember the inherited handles: when stdout/stderr were redirected by
+    // the shell (`> out.tsv`) we must NOT replace them with the console.
+    auto valid = [](HANDLE h) { return h && h != INVALID_HANDLE_VALUE; };
+    HANDLE hIn = GetStdHandle(STD_INPUT_HANDLE);
+    HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+    HANDLE hErr = GetStdHandle(STD_ERROR_HANDLE);
+    bool hasIn = valid(hIn), hasOut = valid(hOut), hasErr = valid(hErr);
+    if (!AttachConsole(ATTACH_PARENT_PROCESS)) AllocConsole();
+    if (!hasIn)  _wfreopen(L"CONIN$", L"r", stdin);
+    if (!hasOut) _wfreopen(L"CONOUT$", L"w", stdout);
+    if (!hasErr) _wfreopen(L"CONOUT$", L"w", stderr);
+    SetConsoleTitleW(L"msitool - Windows Installer toolkit");
+}
+
+static bool isGuiLaunch(int argc, wchar_t** argv, std::wstring& initialFile) {
+    if (argc <= 1) return true;                       // double click / no args
+    std::wstring first = argv[1] ? argv[1] : L"";
+    if (util::iequals(first, L"gui") || util::iequals(first, L"--gui") ||
+        util::iequals(first, L"/gui")) {
+        if (argc > 2 && argv[2]) initialFile = argv[2];
+        return true;
     }
+    return false;
+}
+
+static int start(int argc, wchar_t** argv, HINSTANCE instance) {
+    if (!argv) return 2;
+    std::wstring initialFile;
+    if (isGuiLaunch(argc, argv, initialFile))
+        return ui::run(instance, initialFile);
+
+    attachConsoleForCli();
+    util::setConsoleUtf8();
     int rc = 0;
     try {
         rc = run(argc, argv);
@@ -597,8 +629,25 @@ int main() {
         util::errLine(L"error: unexpected exception");
         rc = 1;
     }
-    LocalFree(argv);
     fflush(stdout);
     fflush(stderr);
+    return rc;
+}
+
+// Primary entry point for the WINDOWS subsystem build.
+int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int) {
+    int argc = 0;
+    wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    int rc = start(argc, argv, instance);
+    if (argv) LocalFree(argv);
+    return rc;
+}
+
+// Kept so the sources also link in a plain CONSOLE subsystem build.
+int main() {
+    int argc = 0;
+    wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    int rc = start(argc, argv, GetModuleHandleW(nullptr));
+    if (argv) LocalFree(argv);
     return rc;
 }

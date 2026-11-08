@@ -22,6 +22,8 @@
 - **打包 · 签名**：`--sign-cert` / `--sign-password` / `--sign-timestamp` / `--sign-tool`，提交后调用 Windows SDK `signtool.exe` 写入 `\x05DigitalSignature` 流，并再次自检。
 - **包验证**：所有命令打开数据库前检查 OLE 复合文件签名、`MsiOpenDatabaseW` 与 `_Tables` 结构；`verify` 输出完整报告并以退出码区分 VALID / INVALID。
 - **构建**：`build.bat`（x64/x86/clean，自动定位 vcvars）与 `CMakeLists.txt`（VS / NMake 生成器）。
+- **图形界面（Fluent UI）**：新增 `src/ui.h` / `ui_draw.cpp` / `ui_widgets.cpp` / `ui_app.cpp`，纯 Win32 API（user32 / gdi32 / shell32 / ole32 / advapi32）自绘，无任何第三方 UI 库。包含九个页面（概览 / 包信息 / 数据表 / SQL 查询 / 解包 / 导出 / 打包 / 验证 / 设置）、亮暗主题与跟随系统、Per-Monitor V2 高 DPI、圆角卡片与矢量图标、数据网格 / 下拉 / 开关 / 进度条 / 日志 / Toast、拖放打开、后台任务与实时日志。
+- **入口**：同一个 exe 支持两种模式 —— 无参数（或 `gui` / `--gui` / `/gui [file]`）启动 GUI，带命令参数时在终端里以原样 CLI 运行；`util::outLine` / `errLine` 增加可选日志钩子供 GUI 捕获输出。
 - **文档**：README、CONTRIBUTING、SECURITY、LICENSE 与 issue 模板。
 
 ### Fixed
