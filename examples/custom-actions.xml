@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Example: custom actions.
+
+  `SetProp` is an immediate action that stores a value into MYPROP; `RunCmd`
+  is a deferred action (queued into the install script, so payload files
+  already exist) that runs cmd.exe from the standard SystemFolder and writes
+  the formatted property into the installed bin directory.
+
+  Types: dll / exe (code in a Binary stream, use binary="..."), dllfile /
+  exefile (code installed by this package, use file="..."), exedir (exe name
+  from a Directory key), setproperty, setdirectory, runcommand. Flags:
+  deferred, commit, rollback, async, continue, impersonate="no", taware,
+  x64, hidetarget.
+-->
+<msitool xmlns="https://msitool.dev/schema/pack/v1" minVersion="1">
+  <pack name="Custom Actions Demo" version="1.0.0" manufacturer="Acme"
+        language="1033" scope="perUser" ui="none"/>
+
+  <customactions>
+    <customaction id="SetProp" type="setproperty" property="MYPROP" value="formatted-value"/>
+    <customaction id="RunCmd" type="exedir" directory="SystemFolder" deferred="true"
+                  target="cmd.exe /c echo [MYPROP]&gt;[INSTALLFOLDER]bin\ca.txt"/>
+  </customactions>
+
+  <executeSequence>
+    <action name="SetProp" value="1100"/>
+    <action name="RunCmd" value="4100" condition="NOT Installed"/>
+  </executeSequence>
+</msitool>

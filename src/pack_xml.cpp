@@ -238,6 +238,70 @@ void parseEnvironment(const xml::Node& n, Manifest& m) {
     }
 }
 
+void parseCustomActions(const xml::Node& n, Manifest& m) {
+    checkAttrs(n, {}, L"customactions");
+    for (const xml::Node* c : n.childList(L"customaction")) {
+        checkAttrs(*c, {L"id", L"type", L"binary", L"file", L"entry", L"target",
+                        L"args", L"property", L"directory", L"value", L"source",
+                        L"impersonate", L"noimpersonate", L"deferred", L"commit",
+                        L"rollback", L"async", L"continue", L"taware", L"x64",
+                        L"hidetarget"}, L"customaction");
+        CustomActionDef d;
+        d.id = toIdentifier(c->require(L"id", L"customaction"));
+        std::wstring t = util::toLower(util::trim(c->attr(L"type", L"exe")));
+        int type = -1;
+        if (t == L"dll") type = 1;
+        else if (t == L"exe") type = 2;
+        else if (t == L"dllfile") type = 1 | 0x10;
+        else if (t == L"exefile") type = 2 | 0x10;
+        else if (t == L"exedir") type = 2 | 0x20;
+        else if (t == L"setproperty") type = 3 | 0x30;   // 51
+        else if (t == L"setdirectory") type = 3 | 0x20;  // 35
+        else if (t == L"runcommand") type = 2 | 0x30;    // 50
+        else type = parseIntStrict(t, L"customaction " + d.id);
+        if (type < 0)
+            util::fail(L"customaction " + d.id + L": unknown type '" + t + L"'");
+
+        if (boolAttr(*c, L"deferred", false)) type |= 0x400;
+        if (boolAttr(*c, L"commit", false)) type |= 0x200;
+        if (boolAttr(*c, L"rollback", false)) type |= 0x100;
+        if (boolAttr(*c, L"async", false)) type |= 0x80;
+        if (boolAttr(*c, L"continue", false)) type |= 0x40;
+        if (boolAttr(*c, L"taware", false)) type |= 0x4000;
+        if (boolAttr(*c, L"x64", false)) type |= 0x1000;
+        if (boolAttr(*c, L"hidetarget", false)) type |= 0x2000;
+        bool noImpersonate = boolAttr(*c, L"noimpersonate", false);
+        if (c->has(L"impersonate")) noImpersonate = !boolAttr(*c, L"impersonate", true);
+        if (noImpersonate) type |= 0x800;
+        d.type = type;
+
+        const int execType = type & 0x0f;      // 1 dll, 2 exe, 3 textdata
+        const int source = type & 0x30;        // BinaryData / File / Directory / Property
+        d.target = c->attr(L"target", c->attr(L"args"));
+
+        if (source == 0x00) {                  // BinaryData
+            std::wstring bin = c->attr(L"binary");
+            if (bin.empty()) util::fail(L"customaction " + d.id + L" needs binary=\"...\"");
+            d.source = toIdentifier(d.id + L"Binary");
+            d.binaryFile = joinPath(m.dir, bin);
+            d.hasBinary = true;
+            if (execType == 1) d.target = c->attr(L"entry", d.target);
+        } else if (source == 0x10) {           // installed File key
+            d.source = c->attr(L"file", c->attr(L"source"));
+            if (d.source.empty()) util::fail(L"customaction " + d.id + L" needs file=\"...\"");
+        } else if (source == 0x20) {           // Directory key
+            d.source = c->attr(L"directory", c->attr(L"source"));
+            if (execType == 3) d.target = c->attr(L"value", d.target);
+            if (d.source.empty()) util::fail(L"customaction " + d.id + L" needs directory=\"...\"");
+        } else if (source == 0x30) {           // Property
+            d.source = c->attr(L"property", c->attr(L"source"));
+            if (execType == 3) d.target = c->attr(L"value", d.target);
+            if (d.source.empty()) util::fail(L"customaction " + d.id + L" needs property=\"...\"");
+        }
+        m.customActions.push_back(std::move(d));
+    }
+}
+
 void parseSign(const xml::Node& n, Manifest& m) {
     checkAttrs(n, {L"cert", L"password", L"timestamp", L"tool"}, L"sign");
     m.sign.present = !m.sign.cert.empty();
@@ -638,6 +702,14 @@ Manifest loadManifestXml(const std::wstring& path) {
             parseServices(ch, m);
         } else if (util::iequals(ch.name, L"environment")) {
             parseEnvironment(ch, m);
+        } else if (util::iequals(ch.name, L"customactions")) {
+            parseCustomActions(ch, m);
+        } else if (util::iequals(ch.name, L"executesequence")) {
+            parseSequence(ch, m.executeSequence, L"executeSequence");
+            m.hasExecuteSequence = true;
+        } else if (util::iequals(ch.name, L"adminexecutesequence")) {
+            parseSequence(ch, m.adminExecuteSequence, L"adminExecuteSequence");
+            m.hasAdminExecuteSequence = true;
         } else if (util::iequals(ch.name, L"sign")) {
             parseSign(ch, m);
         } else if (util::iequals(ch.name, L"ui")) {
@@ -834,6 +906,35 @@ UiSpec loadUiTemplate(const std::wstring& msiPath) {
         d->controls.push_back(std::move(c));
     }
 
+    // Custom actions referenced by template UI events. Only actions whose
+    // code lives in a Binary stream are kept: the stream is imported too, so
+    // no file from the template package is needed at install time.
+    std::set<std::wstring> templateActions;
+    for (const auto& r : readRows(db, L"CustomAction")) {
+        CustomActionDef ca;
+        ca.id = r.get(L"Action");
+        ca.type = r.integer(L"Type");
+        ca.source = r.get(L"Source");
+        ca.target = r.get(L"Target");
+        if (ca.id.empty()) continue;
+        const int execType = ca.type & 0x0f;
+        const int srcKind = ca.type & 0x30;
+        if (execType != 1 && execType != 2 && execType != 3) {
+            util::errLine(L"[ui][warn] template custom action dropped (unsupported "
+                          L"type " + std::to_wstring(ca.type) + L"): " + ca.id);
+            ++dropped;
+            continue;
+        }
+        if (srcKind != 0x00 && srcKind != 0x30) {
+            util::errLine(L"[ui][warn] template custom action dropped (references "
+                          L"template files): " + ca.id);
+            ++dropped;
+            continue;
+        }
+        templateActions.insert(util::toLower(ca.id));
+        spec.customActions.push_back(std::move(ca));
+    }
+
     for (const auto& r : readRows(db, L"ControlEvent")) {
         ControlDef* c = findControl(r.get(L"Dialog_"), r.get(L"Control_"));
         if (!c) { ++dropped; continue; }
@@ -844,7 +945,8 @@ UiSpec loadUiTemplate(const std::wstring& msiPath) {
             ++dropped;
             continue;
         }
-        if (util::iequals(event, L"DoAction") && !knownTemplateAction(value)) {
+        if (util::iequals(event, L"DoAction") && !knownTemplateAction(value) &&
+            !templateActions.count(util::toLower(value))) {
             util::errLine(L"[ui][warn] template custom action dropped: " + value);
             ++dropped;
             continue;

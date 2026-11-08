@@ -638,7 +638,19 @@ public:
     Check* chkDesktopShortcut_ = nullptr;
     Check* chkStartMenuShortcut_ = nullptr;
     TextBox* tbMainExe_ = nullptr;
-    TextBox* tbShortcuts_ = nullptr;
+
+    // Shortcut table editor (tab 3): one row of inline editable cells.
+    struct ShortcutCells {
+        TextBox* name = nullptr;      TextBox* dir = nullptr;
+        TextBox* target = nullptr;    TextBox* args = nullptr;
+        TextBox* icon = nullptr;      TextBox* iconIndex = nullptr;
+        TextBox* desc = nullptr;
+    };
+    static constexpr int kMaxShortcutRows = 8;
+    int shortcutRowCount_ = 0;
+    std::vector<ShortcutCells> shortcutCells_;
+    Button* btnShortcutAdd_ = nullptr;
+    Button* btnShortcutDel_ = nullptr;
     Button* btnPack_ = nullptr;
     // drag & drop -----------------------------------------------------------
     // The pack form is split over three tabs, so the drop targets are
@@ -1175,8 +1187,36 @@ public:
         chkDesktopShortcut_ = makeCheck(PgPack, L"创建桌面快捷方式", true);
         chkStartMenuShortcut_ = makeCheck(PgPack, L"创建开始菜单快捷方式", true);
         tbMainExe_ = makeText(PgPack, L"留空自动选择源目录中的 .exe");
-        tbShortcuts_ = makeText(PgPack,
-            L"每行一条：名称 | 位置 | 目标 | 参数 | 图标 | 图标索引 | 说明", true);
+        for (int i = 0; i < kMaxShortcutRows; ++i) {
+            ShortcutCells c;
+            c.name = makeText(PgPack, L"名称");
+            c.dir = makeText(PgPack, L"desktop");
+            c.target = makeText(PgPack, L"bin\\app.exe");
+            c.args = makeText(PgPack, L"参数");
+            c.icon = makeText(PgPack, L"图标");
+            c.iconIndex = makeText(PgPack, L"0");
+            c.desc = makeText(PgPack, L"说明");
+            for (TextBox* t : {c.name, c.dir, c.target, c.args, c.icon,
+                               c.iconIndex, c.desc})
+                t->setTab(3);
+            shortcutCells_.push_back(c);
+        }
+        btnShortcutAdd_ = makeButton(PgPack, L"添加一行", Ic::Add, false, [this] {
+            if (shortcutRowCount_ < kMaxShortcutRows) {
+                ++shortcutRowCount_;
+                setVisibility();
+                layout();
+            }
+        });
+        btnShortcutDel_ = makeButton(PgPack, L"删除末行", Ic::Close, false, [this] {
+            if (shortcutRowCount_ > 0) {
+                --shortcutRowCount_;
+                setVisibility();
+                layout();
+            }
+        });
+        btnShortcutAdd_->subtle = true;
+        btnShortcutDel_->subtle = true;
         btnPack_ = makeButton(PgPack, L"开始打包", Ic::Pack, true,
                               [this] { startPack(); });
 
@@ -1190,8 +1230,8 @@ public:
                 tbUiTemplate_, btnUiTemplateBrowse_, tbUiLocale_,
                 chkForce_, chkPackDry_, chkPackVerbose_, chkEmptyDirs_});
         tag(2, {tbSignCert_, btnSignCertBrowse_, tbSignPassword_, tbSignTime_});
-        tag(3, {tbMainExe_, tbShortcuts_, chkDesktopShortcut_,
-                chkStartMenuShortcut_});
+        tag(3, {tbMainExe_, chkDesktopShortcut_, chkStartMenuShortcut_,
+                btnShortcutAdd_, btnShortcutDel_});
 
         // ---- Verify -------------------------------------------------------
         gridVerify_ = add<DataGrid>(PgVerify);
@@ -1731,14 +1771,42 @@ public:
             int cby = form.top + headerPad;
             chkDesktopShortcut_->setRect(R(rightX, cby, cbw, cbh));
             chkStartMenuShortcut_->setRect(R(rightX, cby + cbh, cbw, cbh));
-            int y = form.top + headerPad + rowH;
-            int x = leftX;
-            addLabel(R(x, y, colW, labelH),
-                     L"额外快捷方式：名称 | 位置 | 目标 | 参数 | 图标 | 图标索引 | 说明",
-                     t.fSmall, t.subText);
-            int by = y + labelH + S(2);
-            int bh = std::max(S(80), static_cast<int>(form.bottom - by - S(14)));
-            tbShortcuts_->setRect(R(x, by, colW, bh));
+
+            // Inline editable shortcut table: 7 columns, one row per entry.
+            static const float frac[7] = {0.14f, 0.14f, 0.16f, 0.12f,
+                                          0.14f, 0.06f, 0.24f};
+            static const wchar_t* heads[7] = {L"名称", L"位置", L"目标",
+                                              L"参数", L"图标", L"索引", L"说明"};
+            int tableY = form.top + headerPad + rowH;
+            int xs[7];
+            int acc = leftX;
+            for (int i = 0; i < 7; ++i) {
+                xs[i] = acc;
+                acc += static_cast<int>(innerW * frac[i]);
+            }
+            for (int i = 0; i < 7; ++i)
+                addLabel(R(xs[i], tableY, static_cast<int>(innerW * frac[i]), labelH),
+                         heads[i], t.fSmall, t.subText);
+            int gy = tableY + labelH + S(2);
+            int rowH2 = S(26);
+            int avail = std::max(S(26), static_cast<int>(form.bottom - gy - S(44)));
+            int maxRows = std::max(1, avail / rowH2);
+            int visible = std::min(shortcutRowCount_, maxRows);
+            for (int r = 0; r < static_cast<int>(shortcutCells_.size()); ++r) {
+                ShortcutCells& c = shortcutCells_[r];
+                bool show = r < visible;
+                TextBox* cells[7] = {c.name, c.dir, c.target, c.args, c.icon,
+                                     c.iconIndex, c.desc};
+                for (int i = 0; i < 7; ++i) {
+                    cells[i]->setVisible(show);
+                    if (!show) continue;
+                    cells[i]->setRect(R(xs[i], gy + r * rowH2,
+                                        static_cast<int>(innerW * frac[i]) - S(4),
+                                        rowH2 - S(4)));
+                }
+            }
+            btnShortcutAdd_->setRect(R(leftX, form.bottom - S(36), S(110), S(28)));
+            btnShortcutDel_->setRect(R(leftX + S(118), form.bottom - S(36), S(110), S(28)));
         } else {
             field(0, 0, L"签名证书 (.pfx)", tbSignCert_, btnSignCertBrowse_);
             field(0, 1, L"证书密码", tbSignPassword_, nullptr);
@@ -3276,40 +3344,29 @@ public:
         o.verbose = chkPackVerbose_->checked;
         o.keepEmptyDirs = chkEmptyDirs_->checked;
 
-        // Additional shortcuts: one per line, pipe separated.
-        auto splitPipes = [](const std::wstring& line) {
-            std::vector<std::wstring> out;
-            std::wstring cur;
-            for (wchar_t c : line) {
-                if (c == L'|') { out.push_back(util::trim(cur)); cur.clear(); }
-                else cur.push_back(c);
-            }
-            out.push_back(util::trim(cur));
-            return out;
-        };
-        std::wstring lines = tbShortcuts_->value();
-        size_t pos = 0;
-        while (pos <= lines.size()) {
-            size_t end = lines.find_first_of(L"\r\n", pos);
-            std::wstring line = util::trim(lines.substr(
-                pos, end == std::wstring::npos ? std::wstring::npos : end - pos));
-            pos = end == std::wstring::npos ? lines.size() + 1 : end + 1;
-            if (line.empty() || line[0] == L';' || line[0] == L'#') continue;
-            std::vector<std::wstring> parts = splitPipes(line);
-            if (parts.size() < 3 || parts[0].empty() || parts[2].empty()) {
-                toast(L"快捷方式格式：名称 | 位置 | 目标 | 参数 | 图标 | 图标索引 | 说明", 1);
+        // Additional shortcuts: one row per entry in the inline table.
+        for (int i = 0; i < shortcutRowCount_ &&
+                        i < static_cast<int>(shortcutCells_.size()); ++i) {
+            ShortcutCells& c = shortcutCells_[i];
+            std::wstring name = util::trim(c.name->value());
+            std::wstring target = util::trim(c.target->value());
+            if (name.empty() && target.empty()) continue;
+            if (name.empty() || target.empty()) {
+                toast(L"快捷方式第 " + std::to_wstring(i + 1) +
+                      L" 行需要同时填写名称与目标", 1);
                 return;
             }
             pack::ShortcutDef d;
-            d.name = parts[0];
-            d.id = pack::toIdentifier(L"Gui" + parts[0]);
-            d.dir = parts.size() > 1 && !parts[1].empty() ? parts[1] : L"desktop";
-            d.target = parts[2];
-            if (parts.size() > 3) d.args = parts[3];
-            if (parts.size() > 4) d.icon = parts[4];
-            if (parts.size() > 5 && !parts[5].empty())
-                d.iconIndex = _wtoi(parts[5].c_str());
-            if (parts.size() > 6) d.description = parts[6];
+            d.name = name;
+            d.id = pack::toIdentifier(L"Gui" + name);
+            d.dir = util::trim(c.dir->value());
+            if (d.dir.empty()) d.dir = L"desktop";
+            d.target = target;
+            d.args = util::trim(c.args->value());
+            d.icon = util::trim(c.icon->value());
+            std::wstring idx = util::trim(c.iconIndex->value());
+            if (!idx.empty()) d.iconIndex = _wtoi(idx.c_str());
+            d.description = util::trim(c.desc->value());
             o.shortcuts.push_back(std::move(d));
         }
 

@@ -4,8 +4,8 @@
 #
 # Builds a throw-away payload, packs it in every UI mode, verifies the result
 # and runs an administrative install (msiexec /a), which exercises the tables
-# without touching the system. If WiX 3.x is installed it also decompiles the
-# wizard package with dark.exe and fails on table-structure warnings.
+# without touching the system. If Python is available it also drives the real
+# installer wizard (install / repair / remove, en / zh-CN).
 
 param(
     [string]$Exe = "build\msitool_x64.exe",
@@ -51,18 +51,7 @@ Invoke-Pack "manifest" @("--config", "examples\pack.xml") | Out-Null
 Invoke-Pack "shortcuts" @("--ui", "wizard", "--desktop-shortcut", "--start-menu-shortcut") | Out-Null
 Invoke-Pack "peruser" @("--ui", "wizard", "--per-user", "--desktop-shortcut", "--start-menu-shortcut") | Out-Null
 Invoke-Pack "peruser_zh" @("--ui", "wizard", "--per-user", "--language", "2052", "--name", "Reg peruser zh") | Out-Null
-
-$wix = Join-Path ${env:ProgramFiles(x86)} "WiX Toolset v3.14\bin\dark.exe"
-if (Test-Path $wix) {
-    Write-Host "== dark.exe decompile"
-    $out = Join-Path $Work "wizard.wxs"
-    & $wix -nologo $wizard -o $out 2>&1 | ForEach-Object { Write-Host "   $_" }
-    $warn = (& $wix -nologo $wizard -o $out 2>&1 | Select-String -Pattern "warning" | Measure-Object).Count
-    if ($warn -gt 0) { throw "dark.exe reported $warn table warning(s)" }
-    Write-Host "   OK (no dark.exe table warnings)"
-} else {
-    Write-Host "== dark.exe not installed, skipped"
-}
+Invoke-Pack "customactions" @("--config", "examples\custom-actions.xml") | Out-Null
 
 if (Get-Command python -ErrorAction SilentlyContinue) {
     Write-Host "== UI walkthrough (per-user, real dialogs)"

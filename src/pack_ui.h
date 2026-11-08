@@ -124,6 +124,17 @@ struct UiIssue {
     std::wstring message;
 };
 
+// A CustomAction row. `type` is the already encoded MSI type; `source` and
+// `target` match the CustomAction table columns.
+struct CustomActionDef {
+    std::wstring id;
+    int          type = 0;
+    std::wstring source;
+    std::wstring target;
+    std::wstring binaryFile;   // file to embed as a Binary stream
+    bool         hasBinary = false;
+};
+
 struct UiSpec {
     std::wstring base;          // "", "minimal", "wizard"
     std::wstring locale;        // en / zh-CN
@@ -141,6 +152,7 @@ struct UiSpec {
     std::vector<ErrorDef>      errors;
     std::vector<BillboardDef>  billboards;
     std::vector<PropertyDef>   checkBoxes;   // CheckBox table: Property -> Value
+    std::vector<CustomActionDef> customActions;  // imported UI-template actions
     bool hasSequence = false;
     bool hasAdminSequence = false;
 
@@ -189,7 +201,8 @@ void mergeUi(UiSpec& base, const UiSpec& overlay);
 
 // Semantic checks. Errors must abort before the database is written; warnings
 // are printed by the caller.
-void validateUi(const UiSpec& spec, std::vector<UiIssue>& issues);
+void validateUi(const UiSpec& spec, const std::vector<std::wstring>& customActions,
+                std::vector<UiIssue>& issues);
 
 // Creates the UI rows (tables must exist already).
 void applyUi(MSIHANDLE db, const UiSpec& spec, const std::wstring& tempDir,

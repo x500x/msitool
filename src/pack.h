@@ -104,6 +104,7 @@ struct Stats {
     size_t          registry = 0;
     size_t          services = 0;
     size_t          environment = 0;
+    size_t          customActions = 0;
     size_t          externalFiles = 0;
     size_t          uiPages = 0;
     unsigned long long cabBytes = 0;

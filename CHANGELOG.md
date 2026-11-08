@@ -8,12 +8,15 @@
 
 ### Added
 
+- **打包 · 自定义动作**：清单新增 `<customactions>`（`CustomAction` 表 + 可选 `Binary` 流）与 `<executeSequence>` / `<adminExecuteSequence>` 追加行；`type` 支持 `dll` / `exe` / `dllfile` / `exefile` / `exedir` / `setproperty` / `setdirectory` / `runcommand` 或数字，支持 `deferred` / `commit` / `rollback` / `async` / `continue` / `impersonate` / `taware` / `x64` / `hidetarget`；UI 的 `DoAction` 可直接引用已定义动作，导入 UI 模板时 Binary 类动作随流一起导入。示例见 `examples/custom-actions.xml`。
+- **GUI · 快捷方式表格**：打包页「快捷方式」标签页改为可增删行的内联表格（名称 / 位置 / 目标 / 参数 / 图标 / 索引 / 说明），不再使用多行文本；打包时逐行读取。
+
 - **打包 · 安装范围**：`--per-user` / `--all-users`（或清单 `<pack scope="perUser">`）切换 per-user / per-machine；per-user 不写 `ALLUSERS`，默认装到 `LocalAppDataFolder\<产品名>`，快捷方式与子菜单目录的 keypath 组件改用 HKCU；GUI「高级」页新增「安装范围」下拉。实测 `msiexec /i /qn` 后文件、桌面 / 开始菜单快捷方式落在当前用户，`/x` 完整清理。
-- **打包 · `_Validation` 元数据**：数据库提交前根据已执行的 DDL 写入 `_Validation` 列元数据（表 / 列 / Nullable），方便 ICE 类工具读取列类型（`_Validation` 表结构改为与 WiX 一致）。
+- **打包 · `_Validation` 元数据**：数据库提交前根据已执行的 DDL 写入 `_Validation` 列元数据（表 / 列 / Nullable），方便 ICE 类工具读取列类型（`_Validation` 表结构按 MSI 标准定义）。
 - **测试 · 向导自动走查**：新增 `tools/ui_walkthrough.py`，用真实 `msiexec /i`（per-user，无需管理员）驱动 Windows Installer 对话框：欢迎 → 许可（校验 Next 先禁用、勾选后启用）→ 目标文件夹（打开并取消 BrowseDlg）→ 确认 → 安装 → 完成，然后校验负载并 `/x` 卸载；`--mode repair` / `--mode remove` 先静默安装再驱动维护向导的修复 / 删除；en / zh-CN 均已实测通过。`tools/pack_regression.ps1` 新增 per-user 用例，并在装有 Python 时跑 install / repair / remove / zh-CN 四轮走查。
 - **打包 · XML 清单（破坏性）**：`--config` 改为只接受 XML（根 `<msitool>`，命名空间 `https://msitool.dev/schema/pack/v1`），覆盖 `<pack>` / `<features>` / `<shortcuts>` / `<registry>` / `<services>` / `<environment>` / `<sign>` / `<ui>`；删除 INI 解析器，传 `.ini` 会报错并指向 `examples/pack.xml`。新增 `examples/pack.xml` 与 `examples/ui-custom.xml`。
 - **打包 · 内置多页向导**：`--ui wizard` 生成 12 个对话框（欢迎 / 许可 / 目标文件夹 + BrowseDlg / 确认 / 进度 / 完成 / 取消 / 错误 / 维护欢迎 / 维护类型），许可页用 `ScrollableText` + `CheckBox` + `ControlCondition`，目录页用 `PathEdit` + `DirectoryList` / `DirectoryCombo`（`_BrowseProperty` + `Indirect`），维护模式用 `Installed` / `NOT Installed` 条件切换，修复 / 删除走 `Reinstall All` / `Remove All`；中英两套文案与字体（`--ui-locale`，1033 → en，2052 / 1028 → zh-CN）；`--dump-ui <dir>` 导出内置 XML / EULA / banner / background。
-- **打包 · UI 模板**：`--ui-template <msi>` 读取现有包的 `Dialog` / `Control` / `ControlEvent` / `ControlCondition` / `CheckBox` / `RadioButton` / `ComboBox` / `ListBox` / `ListView` / `TextStyle` / `Binary` / `Error` / `Billboard` / `BBControl` 与 `InstallUISequence` / `AdminUISequence`，只保留标准动作；非标准 `DoAction`（如 `WixUIValidatePath` / `WixUIPrintEula`）丢弃并告警。
+- **打包 · UI 模板**：`--ui-template <msi>` 读取现有包的 `Dialog` / `Control` / `ControlEvent` / `ControlCondition` / `CheckBox` / `RadioButton` / `ComboBox` / `ListBox` / `ListView` / `TextStyle` / `Binary` / `Error` / `Billboard` / `BBControl` 与 `InstallUISequence` / `AdminUISequence`，只保留标准动作；模板里的自定义动作按类型导入（Binary / 文本类）或丢弃并告警。
 - **打包 · 自定义 UI**：XML `<ui base="wizard">` 增量覆盖内置布局（`dialog` 按 id、`control` 按 `(dialog,id)`、`publish` / `controlcondition` 按键合并），支持 `textstyle` / `dialog` / `control` / `publish` / `setproperty` / `controlcondition` / `checkbox` / `binary` / `error` / `billboard` / `uisequence` / `adminuisequence`；生成前校验 `Control_Next` 单环、外键、事件白名单、终止页与序列必需动作。
 - **打包 · 快捷方式增强**：`directory` 支持 `desktop` / `startmenu` / `startup` / `sendto` 别名与 `ProgramMenuFolder\厂商\产品` 多级子目录（自动生成 `Directory` + HKLM keypath 组件 + `RemoveFile`），`icon` 支持 `.ico` / `.exe` / `.dll`，新增 `iconIndex` / `advertise` / `workingDirectory` / `MsiShortcutProperty`；CLI 新增 `--desktop-shortcut` / `--start-menu-shortcut` / `--main-exe`。
 - **GUI · 打包页**：安装界面下拉扩为 `none` / `basic` / `minimal` / `wizard` / `custom`，新增「UI 模板 (.msi)」「UI 语言」字段与第四个「快捷方式」标签页（主程序、桌面 / 开始菜单勾选、逐行 `名称 | 位置 | 目标 | 参数 | 图标 | 图标索引 | 说明` 编辑器）；拖放清单改为 `.xml`，新增 UI 模板投放区。
@@ -50,7 +53,7 @@
 ### Fixed
 
 - **查看 / 查询：超过 511 字符的 LONGCHAR 被读成空**：`MsiRecordGetStringW` 首次用 512 字符缓冲区读取，遇到 `ERROR_MORE_DATA` 后虽然放大了缓冲区，却仍用旧长度当作容量，第二次读取继续失败并返回空串。现在按 API 返回的所需长度循环扩容（`msidb.cpp`），`Control.Text`（许可协议 RTF）、`Property.Value`、`Error.Text` 等长字段都能完整显示；内置向导的许可页也因此能真正显示 RTF。
-- **打包：`AdminExecuteSequence` 包含不合法的 `CreateFolders`**：`dark.exe` / ICE 会以「action not allowed in this table」告警；已从管理安装序列移除，`/a` 仍能还原目录树。
+- **打包：`AdminExecuteSequence` 包含不合法的 `CreateFolders`**：MSI 标准不允许该动作出现在管理安装序列；已移除，`/a` 仍能还原目录树。
 - **GUI 高 DPI · 跨显示器后表格列宽 / 行高不跟随缩放**：网格的列宽是用「数据到达时的 DPI」测量出来的像素值，行高（`rowHeightPx = S(28)`）也是启动时算好的一次性常量；窗口被拖到另一块缩放比例不同的显示器（`WM_DPICHANGED`）后，布局会重排，但网格仍用旧像素值 → 每列过窄、文本一律被省略号截断，行高被压扁。现在 `DataGrid` 记住当前列宽是按哪个 DPI 拟合的，检测到变化时自动列宽重新测量、显式列宽按比例缩放，密排行高改在每次 `layout()` 重新计算；`WM_DPICHANGED` 改为使用 wParam 携带的新 DPI 重建主题（不再重复 `rebuild` 两次）。附 `tools/dpi_probe.py` 截图 / 伪造切换脚本，实测 96 → 144 切换后的表格与原生的 144 启动完全一致。
 - `layout()` 增加控件尚未创建的空指针保护（`WM_SIZE` 可能早于 `onCreate()` 到达）。
 

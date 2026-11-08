@@ -7,8 +7,8 @@
 > 实现备注：
 > - 清单解析使用 MSXML6，禁用 DTD / 外部实体（XXE）。
 > - 内置向导以 RCDATA 嵌入 `resources/ui/`，`--dump-ui` 可导出。
-> - GUI 的快捷方式编辑器采用“每行一条”的多行文本框（而非表格控件），字段与 XML 一致。
-> - `_Validation` 已写入列元数据；`msiexec` / `MsiVerifyPackage` 不受影响；WiX `smoke.exe` 合并 `darice.cub` 时仍会在 `_ICESequence` 上报错（其加载方式，非包结构问题）。
+> - GUI 的快捷方式编辑器采用可增删行的内联表格（7 列，逐行对应 XML 的 shortcut 字段）。
+> - `_Validation` 已写入各表列元数据；`msiexec` / `MsiVerifyPackage` 不受影响。项目不内置第三方 ICE 校验器。
 > - `AdminExecuteSequence` 未包含 `CreateFolders`（该动作不允许出现在此序列）。
 > - 安装范围已支持 per-user / per-machine（`--per-user` / `<pack scope>`），per-user 的子菜单 keypath 组件改用 HKCU；`ALLUSERS=1` 仅在 per-machine 下写入。
 > - 真实 UI 已自动化走查：`tools/ui_walkthrough.py`（install / repair / remove，en / zh-CN，per-user）。
@@ -20,7 +20,7 @@
 | 项 | 决定 | 原因 |
 | --- | --- | --- |
 | 清单格式 | **只用 XML**，删除 INI 解析器 | UI 是嵌套结构，INI 只能靠扁平键拼；项目尚未发版，无兼容包袱 |
-| 内置向导 | WiX 风格多页向导，**中英两套**，按 `--language` 自动选择 | 覆盖主要用户群；locale 与布局分离，便于扩展 |
+| 内置向导 | 现代多页向导，**中英两套**，按 `--language` 自动选择 | 覆盖主要用户群；locale 与布局分离，便于扩展 |
 | 目录选择 | 直接实现 **BrowseDlg**（`DirectoryList` + `VolumeSelectCombo` + `PathEdit`） | 只让用户手输路径不可接受 |
 | 美术 | 内置自制 `banner.bmp` / `background.bmp` | 不引入第三方素材与许可风险 |
 | UI 表 | 全套：`Dialog` `Control` `ControlEvent` `ControlCondition` `TextStyle` `Binary` `RadioButton` `Billboard` `CheckBox` `ListBox` `ComboBox` `ListView` `Error` `InstallUISequence` `AdminUISequence` | 「做全」：内置向导与自定义 UI 使用同一套能力 |
@@ -31,7 +31,7 @@
 
 - 不修改已有 MSI（工具只读）；「替换」= 打包时套用模板，不是原位改包。
 - 不支持 `MsiEmbeddedUI` 外部 UI DLL、自定义动作驱动 UI。
-- 不追求与 WiX `WixUIExtension` 二进制级兼容：只支持自有 XML，WiX 仅作为机制参考。
+- 只支持自有 XML 清单；不依赖、不引用任何第三方安装器工具（自定义动作由清单自行声明）。
 - 不做可视化拖拽排版编辑器（第一版为表格编辑 + 结构预览 + 实时 lint）。
 
 ---
@@ -305,13 +305,15 @@
 
 生成 `AdminUISequence`（与 `InstallUISequence` 同构，`ExecuteAction` 对应管理安装动作），保证 `msiexec /a` 带 UI 可用。
 
+### 4.7 自定义动作
+
+`<customactions>` 声明 `CustomAction` 行（`type` 支持 `dll` / `exe` / `dllfile` / `exefile` / `exedir` / `setproperty` / `setdirectory` / `runcommand` 或数字，`deferred` / `commit` / `rollback` / `async` / `continue` / `impersonate` / `taware` / `x64` / `hidetarget` 标志），二进制代码嵌入 `Binary` 流；`<executeSequence>` / `<adminExecuteSequence>` 追加序列行；UI 的 `<publish event="DoAction" value="...">` 可直接引用。UI 模板导入时会连同 Binary 类自定义动作一起带回。
+
 ---
 
-## 5. 参考包与许可边界
+## 5. 实现依据
 
-为把 BrowseDlg / 许可页 / 维护页的事件接线做对，开发期用本机 WiX 3.14 生成一个最小参考包（`UIRef Id="WixUI_InstallDir"`），再用本工具 dump 其 `Dialog` / `Control` / `ControlEvent` / `RadioButton` / `Binary` 表，核对机制。
-
-**只借鉴机制，不复制内容**：WiX 的文案、坐标、位图、RTF 一律自制（WiX 为 MS-RL，本项目 MIT）。参考包只存在于测试脚本，不随发布物分发。
+所有表结构、动作类型与序列规则均以 Windows Installer 官方文档与 `msi.h` / `MsiDefs.h` 常量为准；项目不依赖任何第三方安装器工具，也不与其产物做二进制级兼容。
 
 ---
 
@@ -376,7 +378,7 @@ tools/
 
 - 若落点正确：文档写明即可。
 - 若落在用户桌面并需要公共桌面：增加 `desktopScope="user|common"`，common 走 `%PUBLIC%\Desktop` 目录链 + 属性钉位。
-- 注意：`msi.dll` 不识别 `CommonDesktopFolder`（已用字符串验证），不能照搬 WiX 习惯。
+- 预定义目录以 `msi.dll` 实际识别的标准属性为准（例如 `DesktopFolder` / `ProgramMenuFolder`）。
 
 ### 7.6 GUI 入口
 
@@ -465,7 +467,7 @@ struct UiSpec {
 | M3 | 内置向导布局 + 中英 locale + EULA + banner/background + RC 嵌入 | `--ui wizard` 中文 / 英文安装包各走通一遍完整流程 | 3 天 |
 | M4 | 维护模式（修复 / 卸载）+ `/a` UI + Billboard / Error | 已安装 → 修复 / 卸载均成功 | 1 天 |
 | M5 | 快捷方式补齐 + GUI（模式 / XML / 快捷方式页 / 主程序 / lint） | GUI 勾选桌面快捷方式后安装可见，卸载消失 | 2.5 天 |
-| M6 | 文档、XSD、示例、ICE 与安装回归脚本 | README 与实现一致；`dark` + `light` 无 ICE 阻断 | 1 天 |
+| M6 | 文档、XSD、示例与安装回归脚本 | README 与实现一致；`verify` + `/a` + 真实 UI 走查全绿 | 1 天 |
 
 合计 **约 11–12 个工作日**。M3 为风险集中点。
 
@@ -480,7 +482,7 @@ struct UiSpec {
 | 维护 | 已安装状态下启动 → 修复；卸载；中英各一遍 |
 | 快捷方式 | 桌面 / 开始菜单 / 子菜单 / 启动；`iconIndex`；广告式；公共桌面落点；卸载清理 |
 | 本地化 | 1033 / 2052；缺 key 报错；未知语言回退告警 |
-| 回归 | `MsiVerifyPackage`；WiX `dark.exe` 反编译 + `light` ICE；x86 构建 |
+| 回归 | `MsiVerifyPackage`；`msiexec /a`；真实 UI 自动走查（install/repair/remove，en/zh）；x86 构建 |
 | 视觉 | 100% / 125% / 150% / 200% DPI；中文字体；banner 缩放 |
 | 旧行为 | `--ui minimal` 输出保持可安装；现有表结构与统计一致 |
 

@@ -553,9 +553,8 @@ const wchar_t* kSchema[] = {
     L"`Condition` CHAR(255), `Sequence` SHORT PRIMARY KEY `Action`)",
     L"CREATE TABLE `AdminExecuteSequence` (`Action` CHAR(72) NOT NULL, "
     L"`Condition` CHAR(255), `Sequence` SHORT PRIMARY KEY `Action`)",
-    // Metadata table used by the Windows Installer validation tools (ICE /
-    // msival2). msiexec itself does not need it, but without it smoke.exe
-    // cannot build its temporary _ICESequence table.
+    // Metadata table used by ICE validation tools. msiexec itself does not
+    // need it, but the validators read the column types from here.
     L"CREATE TABLE `_Validation` (`Table` CHAR(32) NOT NULL, `Column` CHAR(32) NOT NULL, "
     L"`Nullable` CHAR(4) NOT NULL, `MinValue` LONG, `MaxValue` LONG, `KeyTable` CHAR(255), "
     L"`KeyColumn` SHORT, `Category` CHAR(32), `Set` CHAR(255), `Description` CHAR(255) "
@@ -612,6 +611,9 @@ const ExtraTable kExtraTables[] = {
      L"CREATE TABLE `RemoveFile` (`FileKey` CHAR(72) NOT NULL, `Component_` CHAR(72) NOT NULL, "
      L"`FileName` CHAR(255), `DirProperty` CHAR(72), `InstallMode` SHORT NOT NULL "
      L"PRIMARY KEY `FileKey`)"},
+    {L"CustomAction",
+     L"CREATE TABLE `CustomAction` (`Action` CHAR(72) NOT NULL, `Type` SHORT NOT NULL, "
+     L"`Source` CHAR(72), `Target` CHAR(255) PRIMARY KEY `Action`)"},
     {L"InstallUISequence",
      L"CREATE TABLE `InstallUISequence` (`Action` CHAR(72) NOT NULL, "
      L"`Condition` CHAR(255), `Sequence` SHORT PRIMARY KEY `Action`)"},
@@ -705,8 +707,8 @@ const SequenceAction kUiSequenceBasic[] = {
 };
 
 // Fills _Validation with column metadata derived from the DDL we executed.
-// Windows Installer itself does not need the table, but ICE / smoke.exe use it
-// to learn column types before running the consistency evaluators.
+// Windows Installer itself does not need the table; ICE validators use it to
+// learn column types before running the consistency evaluators.
 void insertValidationRows(MSIHANDLE db, const std::vector<std::wstring>& ddls) {
     for (const std::wstring& ddl : ddls) {
         const std::wstring prefix = L"CREATE TABLE `";
@@ -917,7 +919,10 @@ UiSpec buildUi(const Options& o, const Manifest& m, const std::wstring& tempDir,
                    L"or a dialog with sequence=...)");
 
     std::vector<UiIssue> issues;
-    validateUi(spec, issues);
+    std::vector<std::wstring> actionIds;
+    for (const auto& a : m.customActions) actionIds.push_back(a.id);
+    for (const auto& a : spec.customActions) actionIds.push_back(a.id);
+    validateUi(spec, actionIds, issues);
     for (const auto& i : issues) {
         if (i.error) util::errLine(L"[ui] " + i.message);
         else util::errLine(L"[ui][warn] " + i.message);
@@ -978,6 +983,8 @@ Stats pack(const Options& opt) {
     util::TempDir temp(L"msitool_pack");
     bool uiEnabled = false;
     UiSpec uiSpec = buildUi(o, cfgData, temp.path(), uiEnabled);
+    std::vector<CustomActionDef> allCustomActions = cfgData.customActions;
+    for (const auto& a : uiSpec.customActions) allCustomActions.push_back(a);
 
     std::wstring productName = o.productName.empty()
                                    ? util::path::fileName(inDir)
@@ -1136,6 +1143,7 @@ Stats pack(const Options& opt) {
     st.registry = cfgData.registry.size();
     st.services = cfgData.services.size();
     st.environment = cfgData.environment.size();
+    st.customActions = allCustomActions.size();
     st.uiPages = uiSpec.dialogs.size();
     for (const auto& kv : layout.dirs)
         if (kv.second.keyPath.empty()) ++st.emptyDirs;
@@ -1155,6 +1163,9 @@ Stats pack(const Options& opt) {
                             static_cast<unsigned long long>(st.features),
                             static_cast<unsigned long long>(st.emptyDirs),
                             static_cast<unsigned long long>(st.externalFiles)));
+    if (st.customActions)
+        util::outLine(util::fmt(L"Actions   : %llu custom action(s)",
+                                static_cast<unsigned long long>(st.customActions)));
     if (uiEnabled) {
         std::wstring uiMode = o.uiTemplate.empty() ? o.ui : L"template";
         util::outLine(util::fmt(L"UI        : %s (%llu dialog(s), locale %s)",
@@ -1196,6 +1207,7 @@ Stats pack(const Options& opt) {
     const bool needRegistry = !cfgData.registry.empty();
     const bool needServices = !cfgData.services.empty();
     const bool needEnvironment = !cfgData.environment.empty();
+    const bool needCustomActions = !allCustomActions.empty();
     const UiTables uiTables = uiTablesFor(uiSpec);
 
     UINT verifyRc = ERROR_SUCCESS;
@@ -1232,6 +1244,11 @@ Stats pack(const Options& opt) {
         if (needRegistry) create(L"Registry");
         if (needServices) { create(L"ServiceInstall"); create(L"ServiceControl"); }
         if (needEnvironment) create(L"Environment");
+        if (needCustomActions) {
+            create(L"CustomAction");
+            for (const auto& a : allCustomActions)
+                if (a.hasBinary) { create(L"Binary"); break; }
+        }
         if (uiTables.installSequence || o.ui == L"basic") create(L"InstallUISequence");
         if (uiTables.adminSequence) create(L"AdminUISequence");
         if (uiTables.dialog) create(L"Dialog");
@@ -1653,6 +1670,39 @@ Stats pack(const Options& opt) {
                        S(componentFor(d.component, L""))});
         }
 
+        // Custom actions (manifest + UI-template imports).
+        std::set<std::wstring> embeddedBinary;
+        for (const auto& d : allCustomActions) {
+            const int srcKind = d.type & 0x30;
+            std::wstring source = d.source;
+            if (d.hasBinary && !d.binaryFile.empty()) {
+                if (embeddedBinary.insert(util::toLower(d.source)).second)
+                    insertStreamRow(h, L"Binary", L"Name", L"Data", d.source, d.binaryFile);
+            } else if (srcKind == 0x10) {
+                std::wstring want = normRel(source);
+                auto it = fileByRel.find(util::toLower(want));
+                if (it != fileByRel.end()) source = ordered[it->second].fileKey;
+            } else if (srcKind == 0x20) {
+                std::wstring want = normRel(source);
+                if (const StandardDir* sd = findStandardDir(util::trim(source))) {
+                    ensureDirRow(sd->key, sd->parent, sd->def);
+                    source = sd->key;
+                } else {
+                    for (const auto& kv : layout.dirs)
+                        if (util::iequals(want, kv.second.key) ||
+                            util::iequals(want, kv.first)) {
+                            source = kv.second.key;
+                            break;
+                        }
+                }
+            }
+            insertRow(h, L"CustomAction",
+                      {L"Action", L"Type", L"Source", L"Target"},
+                      {S(d.id), I(d.type),
+                       source.empty() ? Null() : S(source),
+                       d.target.empty() ? Null() : S(d.target)});
+        }
+
         // Properties.
         auto prop = [&](const wchar_t* name, const std::wstring& value) {
             insertRow(h, L"Property", {L"Property", L"Value"}, {S(name), S(value)});
@@ -1665,7 +1715,7 @@ Stats pack(const Options& opt) {
         prop(L"ProductLanguage", std::to_wstring(o.language));
         prop(L"INSTALLLEVEL", L"1");
         // Per-machine installs set ALLUSERS=1; per-user installs leave it
-        // unset so msiexec installs into the user profile (WiX does the same).
+        // unset so msiexec installs into the user profile.
         if (!perUser) prop(L"ALLUSERS", L"1");
         if (!installTarget.pinned.empty()) prop(L"INSTALLFOLDER", installTarget.pinned);
 
@@ -1676,6 +1726,34 @@ Stats pack(const Options& opt) {
         for (const auto& a : kAdminSequence)
             insertRow(h, L"AdminExecuteSequence", {L"Action", L"Condition", L"Sequence"},
                       {S(a.name), Null(), I(a.seq)});
+
+        // Extra execute-sequence rows (usually custom actions).
+        if (cfgData.hasExecuteSequence) {
+            std::set<std::wstring> used;
+            for (const auto& a : kSequence) used.insert(util::toLower(a.name));
+            for (const auto& e : cfgData.executeSequence) {
+                if (!used.insert(util::toLower(e.action)).second)
+                    util::fail(L"executeSequence: duplicate action " + e.action);
+                insertRow(h, L"InstallExecuteSequence",
+                          {L"Action", L"Condition", L"Sequence"},
+                          {S(e.action),
+                           e.hasCondition && !e.condition.empty() ? S(e.condition) : Null(),
+                           I(e.sequence)});
+            }
+        }
+        if (cfgData.hasAdminExecuteSequence) {
+            std::set<std::wstring> used;
+            for (const auto& a : kAdminSequence) used.insert(util::toLower(a.name));
+            for (const auto& e : cfgData.adminExecuteSequence) {
+                if (!used.insert(util::toLower(e.action)).second)
+                    util::fail(L"adminExecuteSequence: duplicate action " + e.action);
+                insertRow(h, L"AdminExecuteSequence",
+                          {L"Action", L"Condition", L"Sequence"},
+                          {S(e.action),
+                           e.hasCondition && !e.condition.empty() ? S(e.condition) : Null(),
+                           I(e.sequence)});
+            }
+        }
 
         // UI: basic progress only, or the full dialog set.
         if (o.ui == L"basic") {

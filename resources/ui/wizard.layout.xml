@@ -9,7 +9,7 @@
     <binary id="UiBanner"     file="banner.bmp"/>
     <binary id="UiBackground" file="background.bmp"/>
 
-    <property name="WIXUI_INSTALLDIR" value="INSTALLFOLDER"/>
+    <property name="MSITOOL_INSTALLDIR" value="INSTALLFOLDER"/>
     <checkbox property="LicenseAccepted" value="1"/>
 
     <!-- Welcome  -->
@@ -83,11 +83,11 @@
       <control id="FolderLabel" type="Text" x="20" y="70" width="320" height="20"
                attributes="196611" text="$(InstallDirFolderLabel)"/>
       <control id="Folder" type="PathEdit" x="20" y="95" width="320" height="18"
-               attributes="11" property="WIXUI_INSTALLDIR" indirect="true"
+               attributes="11" property="MSITOOL_INSTALLDIR" indirect="true"
                next="ChangeFolder"/>
       <control id="ChangeFolder" type="PushButton" x="20" y="118" width="80"
                height="17" attributes="3" text="$(Change)" next="Back">
-        <setproperty name="_BrowseProperty" value="[WIXUI_INSTALLDIR]"/>
+        <setproperty name="_BrowseProperty" value="[MSITOOL_INSTALLDIR]"/>
         <publish event="SpawnDialog" value="BrowseDlg"/>
       </control>
       <control id="Back" type="PushButton" x="180" y="243" width="56" height="17"
@@ -96,7 +96,7 @@
       </control>
       <control id="Next" type="PushButton" x="236" y="243" width="56" height="17"
                attributes="3" text="$(Next)" next="Cancel">
-        <publish event="SetTargetPath" value="[WIXUI_INSTALLDIR]" order="1"/>
+        <publish event="SetTargetPath" value="[MSITOOL_INSTALLDIR]" order="1"/>
         <publish event="NewDialog" value="VerifyReadyDlg" order="2"/>
       </control>
       <control id="Cancel" type="PushButton" x="304" y="243" width="56" height="17"

@@ -19,6 +19,9 @@
         <xs:element name="registry" type="registryType"/>
         <xs:element name="services" type="servicesType"/>
         <xs:element name="environment" type="environmentType"/>
+        <xs:element name="customactions" type="customActionsType"/>
+        <xs:element name="executeSequence" type="sequenceType"/>
+        <xs:element name="adminExecuteSequence" type="sequenceType"/>
         <xs:element name="sign" type="signType"/>
         <xs:element name="ui" type="uiType"/>
       </xs:choice>
@@ -138,6 +141,36 @@
     <xs:attribute name="separator" type="xs:string"/>
     <xs:attribute name="system" type="xs:string"/>
     <xs:attribute name="component" type="xs:string"/>
+  </xs:complexType>
+
+  <xs:complexType name="customActionsType">
+    <xs:sequence>
+      <xs:element name="customaction" minOccurs="0" maxOccurs="unbounded"
+                  type="customActionType"/>
+    </xs:sequence>
+  </xs:complexType>
+  <xs:complexType name="customActionType">
+    <xs:attribute name="id" type="xs:string" use="required"/>
+    <xs:attribute name="type" type="xs:string"/>
+    <xs:attribute name="binary" type="xs:string"/>
+    <xs:attribute name="file" type="xs:string"/>
+    <xs:attribute name="entry" type="xs:string"/>
+    <xs:attribute name="target" type="xs:string"/>
+    <xs:attribute name="args" type="xs:string"/>
+    <xs:attribute name="property" type="xs:string"/>
+    <xs:attribute name="directory" type="xs:string"/>
+    <xs:attribute name="value" type="xs:string"/>
+    <xs:attribute name="source" type="xs:string"/>
+    <xs:attribute name="impersonate" type="xs:boolean"/>
+    <xs:attribute name="noimpersonate" type="xs:boolean"/>
+    <xs:attribute name="deferred" type="xs:boolean"/>
+    <xs:attribute name="commit" type="xs:boolean"/>
+    <xs:attribute name="rollback" type="xs:boolean"/>
+    <xs:attribute name="async" type="xs:boolean"/>
+    <xs:attribute name="continue" type="xs:boolean"/>
+    <xs:attribute name="taware" type="xs:boolean"/>
+    <xs:attribute name="x64" type="xs:boolean"/>
+    <xs:attribute name="hidetarget" type="xs:boolean"/>
   </xs:complexType>
 
   <xs:complexType name="signType">

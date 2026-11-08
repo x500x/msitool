@@ -62,8 +62,13 @@ struct Manifest {
     std::vector<RegistryDef> registry;
     std::vector<ServiceDef>  services;
     std::vector<EnvDef>      environment;
+    std::vector<CustomActionDef> customActions;
+    std::vector<SequenceEntry> executeSequence;
+    std::vector<SequenceEntry> adminExecuteSequence;
     SignDef                  sign;
     UiSpec                   ui;
+    bool                     hasExecuteSequence = false;
+    bool                     hasAdminExecuteSequence = false;
     std::wstring             dir;      // directory of the manifest file
     std::wstring             path;
 };
