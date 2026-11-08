@@ -741,6 +741,20 @@ void DataGrid::setData(std::vector<std::wstring> headers,
 
 void DataGrid::clear() { setData({}, {}, {}); }
 
+void DataGrid::setRect(const RECT& r) {
+    Widget::setRect(r);
+    // A resize (or a first layout pass with a tiny client area) can leave the
+    // old scroll offset pointing past the end; rows would then be skipped and
+    // hit-testing would select the wrong row.
+    int my = maxScrollY();
+    int mx = maxScrollX();
+    if (scrollY_ > my) scrollY_ = my;
+    if (scrollY_ < 0) scrollY_ = 0;
+    if (scrollX_ > mx) scrollX_ = mx;
+    if (scrollX_ < 0) scrollX_ = 0;
+    invalidate();
+}
+
 std::wstring DataGrid::cell(int row, int col) const {
     if (row < 0 || row >= static_cast<int>(rows_.size())) return L"";
     if (col < 0 || col >= static_cast<int>(rows_[row].size())) return L"";
@@ -964,6 +978,38 @@ LRESULT DataGrid::message(UINT msg, WPARAM /*wp*/, LPARAM lp, bool& handled) {
         handled = true;
         return 0;
     }
+    if (msg == WM_RBUTTONUP && enabled()) {
+        SetFocus(hwnd_);
+        int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp);
+        int row = -1;
+        hitTest(x, y, row);
+        if (row >= 0) select(row);
+        if (row >= 0 && itemContextMenu) {
+            POINT p{x, y};
+            ClientToScreen(hwnd_, &p);
+            itemContextMenu(row, p);
+        }
+        handled = true;
+        return 0;
+    }
+    if (msg == WM_CONTEXTMENU && itemContextMenu) {
+        int row = selected_;
+        if (row >= 0) {
+            POINT p{0, 0};
+            if (lp != static_cast<LPARAM>(-1)) {
+                p.x = GET_X_LPARAM(lp);   // already screen coords
+                p.y = GET_Y_LPARAM(lp);
+            } else {
+                int y = headHeight() + row * rowHeight() - scrollY_ + rowHeight() / 2;
+                p.x = width() / 2;
+                p.y = std::max(headHeight(), y);
+                ClientToScreen(hwnd_, &p);
+            }
+            itemContextMenu(row, p);
+        }
+        handled = true;
+        return 0;
+    }
     return 0;
 }
 
@@ -1110,6 +1156,160 @@ void ToastView::paint(Gfx& g) {
          : kind == 3 ? Ic::Check : Ic::InfoCircle, ir, c, 2);
     g.text(RECT{S(50), 0, w - S(10), h}, text, t.text, t.fBody,
            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+}
+
+// ---------------------------------------------------------------------------
+// Menu (owner-drawn context menu)
+// ---------------------------------------------------------------------------
+int Menu::rowAt(int y) const {
+    if (y < pad_) return -1;
+    int cur = pad_;
+    for (size_t i = 0; i < items_.size(); ++i) {
+        int h = items_[i].separator ? sepH_ : itemH_;
+        if (y >= cur && y < cur + h) return items_[i].separator ? -1 : static_cast<int>(i);
+        cur += h;
+    }
+    return -1;
+}
+
+void Menu::show(HWND owner, POINT screen, std::vector<Item> items,
+                std::function<void(int)> picked) {
+    if (hwnd_) close();
+    items_ = std::move(items);
+    picked_ = std::move(picked);
+    hover_ = -1;
+    itemH_ = S(32);
+    sepH_ = S(9);
+    pad_ = S(6);
+
+    HDC dc = GetDC(owner);
+    int textW = 0;
+    if (dc) {
+        HGDIOBJ old = SelectObject(dc, theme().fBody);
+        for (const auto& it : items_) {
+            if (it.separator) continue;
+            SIZE sz{};
+            GetTextExtentPoint32W(dc, it.text.c_str(),
+                                  static_cast<int>(it.text.size()), &sz);
+            textW = std::max(textW, static_cast<int>(sz.cx));
+        }
+        SelectObject(dc, old);
+        ReleaseDC(owner, dc);
+    }
+    int w = std::max(S(196), textW + S(96));
+    int h = pad_ * 2;
+    for (const auto& it : items_) h += it.separator ? sepH_ : itemH_;
+
+    int sw = GetSystemMetrics(SM_CXSCREEN);
+    int sh = GetSystemMetrics(SM_CYSCREEN);
+    int x = screen.x, y = screen.y;
+    if (x + w > sw - S(8)) x = std::max(S(8), sw - w - S(8));
+    if (y + h > sh - S(8)) y = std::max(S(8), sh - h - S(8));
+    if (x < S(8)) x = S(8);
+    if (y < S(8)) y = S(8);
+
+    create(owner, 0, RECT{x, y, x + w, y + h}, true);
+    if (hwnd_) {
+        SetFocus(hwnd_);
+        SetCapture(hwnd_);
+    }
+}
+
+void Menu::close() {
+    if (!hwnd_) return;
+    HWND h = hwnd_;
+    hwnd_ = nullptr;
+    ReleaseCapture();
+    DestroyWindow(h);
+}
+
+void Menu::paint(Gfx& g) {
+    Theme& t = theme();
+    int w = width(), h = height();
+    g.round(RECT{0, 0, w, h}, S(8), t.card, t.border, 1);
+    int y = pad_;
+    for (size_t i = 0; i < items_.size(); ++i) {
+        const Item& it = items_[i];
+        if (it.separator) {
+            g.line(S(12), y + sepH_ / 2, w - S(12), y + sepH_ / 2, t.gridLine);
+            y += sepH_;
+            continue;
+        }
+        RECT row{S(4), y, w - S(4), y + itemH_};
+        if (static_cast<int>(i) == hover_ && it.enabled)
+            g.round(row, S(5), t.gridHover);
+        if (it.icon != Ic::None) {
+            RECT ir{row.left + S(10), row.top + S(6),
+                    row.left + S(30), row.top + S(26)};
+            g.icon(it.icon, ir, it.enabled ? t.subText : t.disabled, 2);
+        }
+        g.text(RECT{row.left + S(40), row.top, row.right - S(10), row.bottom},
+               it.text, it.enabled ? t.text : t.disabled, t.fBody,
+               DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        y += itemH_;
+    }
+}
+
+void Menu::onMouseMove(int /*x*/, int y) {
+    int idx = rowAt(y);
+    if (idx >= 0 && idx < static_cast<int>(items_.size()) && !items_[idx].enabled)
+        idx = -1;
+    if (idx != hover_) { hover_ = idx; invalidate(); }
+}
+
+void Menu::onKey(int vk, bool down) {
+    if (!down) return;
+    if (vk == VK_ESCAPE) { close(); return; }
+    if (vk == VK_DOWN || vk == VK_UP) {
+        int n = static_cast<int>(items_.size());
+        if (!n) return;
+        int i = hover_;
+        for (int step = 0; step < n; ++step) {
+            i += (vk == VK_DOWN ? 1 : -1);
+            if (i < 0) i = n - 1;
+            if (i >= n) i = 0;
+            if (!items_[i].separator && items_[i].enabled) break;
+        }
+        hover_ = i;
+        invalidate();
+        return;
+    }
+    if (vk == VK_RETURN || vk == VK_SPACE) {
+        int i = hover_;
+        if (i >= 0 && i < static_cast<int>(items_.size()) && items_[i].enabled) {
+            auto cb = picked_;
+            close();
+            if (cb) cb(i);
+        }
+    }
+}
+
+LRESULT Menu::message(UINT msg, WPARAM wp, LPARAM lp, bool& handled) {
+    if (msg == WM_LBUTTONDOWN) {
+        int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp);
+        RECT rc{};
+        GetClientRect(hwnd_, &rc);
+        if (!PtInRect(&rc, POINT{x, y})) {
+            close();
+        } else {
+            int idx = rowAt(y);
+            if (idx >= 0 && idx < static_cast<int>(items_.size()) && items_[idx].enabled) {
+                auto cb = picked_;
+                int i = idx;
+                close();
+                if (cb) cb(i);
+            }
+        }
+        handled = true;
+        return 0;
+    }
+    if (msg == WM_KILLFOCUS || msg == WM_CAPTURECHANGED ||
+        (msg == WM_ACTIVATE && LOWORD(wp) == WA_INACTIVE)) {
+        close();
+        handled = true;
+        return 0;
+    }
+    return 0;
 }
 
 // ---------------------------------------------------------------------------

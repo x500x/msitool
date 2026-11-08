@@ -43,7 +43,7 @@
 | 包预检 | 打开前校验 OLE 复合文件签名、`MsiOpenDatabaseW`、`_Tables` 结构；`verify` 额外调用 `MsiVerifyPackageW` |
 | 查看 | SummaryInformation、Property、所有表与行数、列定义/类型/主键、任意 MSI SQL 查询 |
 | 导出 | 全部表为 `.idt`、全部 `_Streams` 原始流、`Binary` 条目、`summary.txt`、CAB + `manifest.txt` |
-| 解包 | 还原安装目录树；内嵌 CAB（`_Streams`）、外部 CAB、未压缩 layout、跨 CAB 连续文件（FDI 分卷集）、`.msp` 补丁负载都支持；`--transform` 可查看应用 transform 后的视图 |
+| 解包 | 还原安装目录树；内嵌 CAB（`_Streams`）、外部 CAB、未压缩 layout、跨 CAB 连续文件（FDI 分卷集）、`.msp` 补丁负载都支持；`--transform` 可查看应用 transform 后的视图；GUI 另提供资源管理器式浏览（目录树 + 文件列表、筛选、右键菜单、双击单文件解包、目录递归解包、自动输出目录） |
 | 打包 | 把目录做成自包含 MSI：FCI 生成一个或多个 MSZIP CAB + Msi API 建库/写流/写摘要，可选分卷、空目录、快捷方式、注册表、服务、环境变量、多 Feature、UI 与数字签名 |
 | 输出 | UTF-8 文本表格或 `--tsv`；控制字符转义为 `\xNN`；警告与详细日志走 stderr |
 | 图形界面 | 纯 Win32 API（user32 / gdi32 / shell32 / ole32）自绘的 Fluent 界面：亮/暗主题、高 DPI、导航、卡片、数据网格、SQL 查询、解包/导出/打包表单、实时日志与进度；**不使用任何第三方库或 UI 框架** |
@@ -123,7 +123,7 @@ build\msitool_x64.exe gui setup.msi         :: 启动 GUI 并直接打开一个�
 | 包信息 | 概览头部（产品名 / 版本 / 大小 / 表数 / CAB / 流）+「摘要 / 属性 / 媒体」分区，全宽表格、关键字筛选、选中行详情与 TSV 复制；属性区展示 Property 表全部键值 |
 | 数据表 | 表筛选 + 任意表的数据网格（虚拟滚动、选中、Ctrl+C 复制 TSV） |
 | SQL 查询 | MSI SQL 编辑器、示例查询、结果网格与耗时 |
-| 解包 | 输出目录、六个开关、MST transform、基准 MSI、运行日志 |
+| 解包 | 资源管理器式浏览：左侧目录树 + 右侧文件列表（筛选、已解包状态），双击单文件解包、右键菜单（解包此文件 / 解包到… / 解包此目录 / 复制路径 / 在资源管理器中显示），「解包全部 / 解包选中」按钮，输出目录默认自动为 `<包名>_files`；高级面板收纳六个开关、MST transform 与基准 MSI，下方实时日志 |
 | 导出 | CAB / 完整归档两种模式、运行日志 |
 | 打包 | 「基本 / 高级 / 签名」三个标签页，字段按窗口尺寸自适应两列排布；右上角「开始打包」常驻，完成后自动打开新 MSI |
 | 验证 | 签名 / `MsiOpenDatabase` / `MsiVerifyPackage` / `_Tables` / 媒体检查报告 |

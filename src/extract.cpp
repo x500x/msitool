@@ -247,6 +247,90 @@ std::vector<MediaInfo> readMedia(
     return result;
 }
 
+BrowseTree browse(msi::Db& db, bool sourceLayout) {
+    BrowseTree tree;
+    TableData dirTable = loadTable(db, L"Directory");
+    TableData compTable = loadTable(db, L"Component");
+    TableData fileTable = loadTable(db, L"File");
+    TableData propTable = loadTable(db, L"Property");
+    if (fileTable.cols.empty()) return tree;
+
+    struct DirRec { std::wstring parent, def; };
+    std::unordered_map<std::wstring, DirRec> dirs;
+    for (size_t i = 0; i < dirTable.rows.size(); ++i) {
+        std::wstring key = dirTable.get(i, L"Directory");
+        if (key.empty()) continue;
+        dirs[util::toLower(key)] = {dirTable.get(i, L"Directory_Parent"),
+                                    dirTable.get(i, L"DefaultDir")};
+    }
+    std::unordered_map<std::wstring, std::wstring> compDirs;
+    for (size_t i = 0; i < compTable.rows.size(); ++i) {
+        std::wstring key = compTable.get(i, L"Component");
+        if (!key.empty()) compDirs[util::toLower(key)] = compTable.get(i, L"Directory_");
+    }
+    std::unordered_map<std::wstring, std::wstring> props;
+    for (size_t i = 0; i < propTable.rows.size(); ++i) {
+        std::wstring key = propTable.get(i, L"Property");
+        if (!key.empty()) props[util::toLower(key)] = propTable.get(i, L"Value");
+    }
+
+    std::function<DirPaths(const std::wstring&, int)> resolveDir =
+        [&](const std::wstring& key, int depth) -> DirPaths {
+        std::wstring k = util::toLower(util::trim(key));
+        if (k.empty() || k == L"targetdir" || depth > 64) return {};
+        auto it = dirs.find(k);
+        if (it == dirs.end()) return {};
+        DirPaths parent;
+        if (!it->second.parent.empty() &&
+            !util::iequals(it->second.parent, key) &&
+            !util::iequals(it->second.parent, L"TARGETDIR"))
+            parent = resolveDir(it->second.parent, depth + 1);
+        auto sides = splitTargetSource(it->second.def);
+        return combineDirs(parent, dirLeaf(sides.first, props),
+                           dirLeaf(sides.second, props));
+    };
+
+    for (size_t i = 0; i < dirTable.rows.size(); ++i) {
+        std::wstring key = dirTable.get(i, L"Directory");
+        if (key.empty()) continue;
+        BrowseDir d;
+        d.key = key;
+        auto sides = splitTargetSource(dirTable.get(i, L"DefaultDir"));
+        d.name = dirLeaf(sides.first, props);
+        if (d.name.empty()) d.name = key;
+        std::wstring parent = dirTable.get(i, L"Directory_Parent");
+        if (util::iequals(parent, key) || util::iequals(parent, L"TARGETDIR"))
+            parent.clear();
+        d.parentKey = parent;
+        DirPaths dp = resolveDir(key, 0);
+        d.targetRel = sourceLayout ? dp.source : dp.target;
+        d.sourceRel = dp.source;
+        tree.dirs.push_back(std::move(d));
+    }
+
+    for (size_t i = 0; i < fileTable.rows.size(); ++i) {
+        std::wstring key = fileTable.get(i, L"File");
+        if (key.empty()) continue;
+        BrowseFile f;
+        f.key = key;
+        f.component = fileTable.get(i, L"Component_");
+        f.name = util::path::longName(fileTable.get(i, L"FileName"));
+        if (f.name.empty()) f.name = key;
+        f.name = util::path::sanitizeComponent(f.name);
+        f.sequence = _wtoi(fileTable.get(i, L"Sequence").c_str());
+        std::wstring sizeText = fileTable.get(i, L"FileSize");
+        f.size = sizeText.empty() ? 0 : _wcstoui64(sizeText.c_str(), nullptr, 10);
+        auto cd = compDirs.find(util::toLower(f.component));
+        if (cd != compDirs.end()) f.dirKey = cd->second;
+        DirPaths dp = resolveDir(f.dirKey, 0);
+        std::wstring rel = sourceLayout ? dp.source : dp.target;
+        f.relPath = util::path::join(rel, f.name);
+        tree.totalSize += f.size;
+        tree.files.push_back(std::move(f));
+    }
+    return tree;
+}
+
 Stats extractPackage(msi::Db& db, const Options& opt) {
     Stats st;
     std::vector<std::wstring> warnings;
@@ -317,6 +401,14 @@ Stats extractPackage(msi::Db& db, const Options& opt) {
         FileItem f;
         f.key = fileTable.get(i, L"File");
         if (f.key.empty()) continue;
+        // Selective extraction: the GUI browser asks for one file or one
+        // directory subtree only.
+        if (!opt.onlyFiles.empty()) {
+            bool wanted = false;
+            for (const auto& k : opt.onlyFiles)
+                if (util::iequals(k, f.key)) { wanted = true; break; }
+            if (!wanted) continue;
+        }
         f.component = fileTable.get(i, L"Component_");
         f.name = fileTable.get(i, L"FileName");
         f.sequence = _wtoi(fileTable.get(i, L"Sequence").c_str());
@@ -401,6 +493,12 @@ Stats extractPackage(msi::Db& db, const Options& opt) {
     util::TempDir temp(L"msitool");
     if (opt.keepTemp) temp.keep();
     const std::wstring fallbackDir = util::path::join(outDir, L"_unmapped");
+
+    // With a selective extract, drop cabinets that hold none of the selected
+    // files so we never stage / decompress unnecessary CABs.
+    jobs.erase(std::remove_if(jobs.begin(), jobs.end(),
+                              [](const CabJob& j) { return j.nameToTarget.empty(); }),
+               jobs.end());
 
     // Stage every cabinet up front. A cabinet set can ask for its next CAB
     // while FDI is still writing a spanned file, so all members of the set
@@ -504,7 +602,8 @@ Stats extractPackage(msi::Db& db, const Options& opt) {
             static_cast<unsigned long long>(targets.size())));
 
         cab::Result r = cab::extract(paths, targets, fallbackDir, temp.path(),
-                                     opt.dryRun, opt.skipExisting, opt.verbose);
+                                     opt.dryRun, opt.skipExisting, opt.verbose,
+                                     !opt.onlyFiles.empty());
         for (const auto& w : r.warnings) warnings.push_back(w);
         if (!r.ok) {
             warnings.push_back(r.error);

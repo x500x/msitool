@@ -23,6 +23,10 @@ struct Options {
     // carried inside a patch package. Used when a Media row references a
     // stream that is not present in the opened database.
     std::vector<std::pair<std::wstring, std::wstring>> extraStreams;
+
+    // When non-empty, extract only these File keys (single file / single
+    // directory extraction from the GUI browser). Empty extracts everything.
+    std::vector<std::wstring> onlyFiles;
 };
 
 struct Stats {
@@ -51,6 +55,37 @@ struct MediaInfo {
 std::vector<MediaInfo> readMedia(
     msi::Db& db,
     const std::vector<std::pair<std::wstring, std::wstring>>& extraStreams = {});
+
+// ---------------------------------------------------------------------------
+// Package inventory (read-only, no disk writes) used by the GUI file browser.
+// ---------------------------------------------------------------------------
+struct BrowseDir {
+    std::wstring key;        // Directory.Directory
+    std::wstring name;       // Directory.DefaultDir long name (sanitized)
+    std::wstring parentKey;  // Directory.Directory_Parent ("" for a root)
+    std::wstring targetRel;  // installed relative path ("" for the root)
+    std::wstring sourceRel;  // source-image relative path
+};
+
+struct BrowseFile {
+    std::wstring       key;        // File.File
+    std::wstring       name;       // File.FileName long name (sanitized)
+    std::wstring       component;  // File.Component_
+    std::wstring       dirKey;     // Directory key of the component
+    std::wstring       relPath;    // installed / source image relative path
+    unsigned long long size = 0;   // File.FileSize (0 when unknown)
+    int                sequence = 0;
+};
+
+struct BrowseTree {
+    std::vector<BrowseDir>  dirs;
+    std::vector<BrowseFile> files;
+    unsigned long long      totalSize = 0;
+};
+
+// Directory/file inventory of the package. sourceLayout picks the source
+// image path for relPath/targetRel instead of the installed path.
+BrowseTree browse(msi::Db& db, bool sourceLayout);
 
 Stats extractPackage(msi::Db& db, const Options& opt);
 

@@ -36,7 +36,8 @@ std::vector<std::vector<size_t>> groupCabinetChains(
 //
 // nameToTarget maps a *lowercased* CAB-internal file name to an absolute
 // destination path. Entries missing from the map are written below
-// fallbackDir (their relative CAB path is sanitised first).
+// fallbackDir (their relative CAB path is sanitised first), or skipped
+// entirely when skipUnmapped is true (used by selective extraction).
 // tempDir is used for Quantum spill files, and must exist.
 Result extract(const std::vector<std::wstring>& cabPaths,
                const std::unordered_map<std::wstring, std::wstring>& nameToTarget,
@@ -44,7 +45,8 @@ Result extract(const std::vector<std::wstring>& cabPaths,
                const std::wstring& tempDir,
                bool dryRun,
                bool skipExisting,
-               bool verbose);
+               bool verbose,
+               bool skipUnmapped = false);
 
 inline Result extract(const std::wstring& cabPath,
                       const std::unordered_map<std::wstring, std::wstring>& nameToTarget,
@@ -52,9 +54,10 @@ inline Result extract(const std::wstring& cabPath,
                       const std::wstring& tempDir,
                       bool dryRun,
                       bool skipExisting,
-                      bool verbose) {
+                      bool verbose,
+                      bool skipUnmapped = false) {
     return extract(std::vector<std::wstring>{cabPath}, nameToTarget, fallbackDir,
-                   tempDir, dryRun, skipExisting, verbose);
+                   tempDir, dryRun, skipExisting, verbose, skipUnmapped);
 }
 
 }  // namespace cab

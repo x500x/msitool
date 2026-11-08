@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <cwctype>
 #include <thread>
+#include <unordered_map>
 
 namespace ui {
 namespace {
@@ -294,19 +295,51 @@ public:
     Button* btnQueryClear_ = nullptr;
     DataGrid* gridQueryResult_ = nullptr;
     // extract --------------------------------------------------------------
+    bool     extractAdv_ = false;       // show the advanced options panel
+    Button*  btnExtractAdv_ = nullptr;  // toggle
+    Button*  btnExtractAll_ = nullptr;
+    Button*  btnExtractSel_ = nullptr;
+    Button*  btnExtractOpen_ = nullptr;
     TextBox* tbOutDir_ = nullptr;
-    Button* btnOutBrowse_ = nullptr;
-    Check* chkFlat_ = nullptr;
-    Check* chkDry_ = nullptr;
-    Check* chkSkip_ = nullptr;
-    Check* chkSource_ = nullptr;
-    Check* chkKeepTemp_ = nullptr;
-    Check* chkVerbose_ = nullptr;
+    Button*  btnOutBrowse_ = nullptr;
+    Check*   chkFlat_ = nullptr;
+    Check*   chkDry_ = nullptr;
+    Check*   chkSkip_ = nullptr;
+    Check*   chkSource_ = nullptr;
+    Check*   chkKeepTemp_ = nullptr;
+    Check*   chkVerbose_ = nullptr;
     TextBox* tbTransforms_ = nullptr;
-    Button* btnTransBrowse_ = nullptr;
+    Button*  btnTransBrowse_ = nullptr;
     TextBox* tbBaseMsi_ = nullptr;
-    Button* btnBaseBrowse_ = nullptr;
-    Button* btnExtract_ = nullptr;
+    Button*  btnBaseBrowse_ = nullptr;
+
+    // package file browser (Explorer-like tree + list)
+    struct BDir {
+        std::wstring key, name, parentKey, targetRel;
+        std::vector<int> children;
+        int parent = -1;
+        int depth = 0;
+    };
+    struct BFile {
+        std::wstring key, name, component, relPath;
+        unsigned long long size = 0;
+        int sequence = 0;
+        int dir = -1;
+    };
+    TextBox*  tbBrowseFilter_ = nullptr;
+    DataGrid* gridBrowseDirs_ = nullptr;
+    DataGrid* gridBrowseFiles_ = nullptr;
+    std::unique_ptr<Menu> menu_;
+    std::vector<BDir>  bDirs_;
+    std::vector<BFile> bFiles_;
+    std::vector<int>   bRoots_;
+    std::vector<int>   bVisible_;     // expanded tree, flattened
+    std::vector<std::wstring> bExpanded_;
+    std::vector<int>   bShown_;       // file grid row -> bFiles_ index
+    int                bSelDir_ = -1;
+    std::wstring       bSelDirKey_;
+    std::wstring       browseSummary_, browsePath_, browseDirInfo_;
+    std::wstring       autoOutDir_;   // last auto-filled output directory
     // export ---------------------------------------------------------------
     DropDown* ddExportMode_ = nullptr;
     TextBox* tbExportDir_ = nullptr;
@@ -608,13 +641,24 @@ public:
         gridQueryResult_ = add<DataGrid>(PgQuery);
 
         // ---- Extract ------------------------------------------------------
-        tbOutDir_ = makeText(PgExtract, L"输出目录");
+        tbOutDir_ = makeText(PgExtract, L"输出目录（留空自动使用 <包名>_files）");
+        tbOutDir_->changed = [this] { refreshBrowseFiles(); };
         btnOutBrowse_ = makeButton(PgExtract, L"浏览", Ic::Folder, false,
                                    [this] { browseFolderFor(tbOutDir_, L"选择解包输出目录"); });
+        btnExtractAll_ = makeButton(PgExtract, L"解包全部", Ic::Extract, true,
+                                    [this] { startExtractAll(); });
+        btnExtractSel_ = makeButton(PgExtract, L"解包选中", Ic::File, false,
+                                    [this] { startExtractSelected(); });
+        btnExtractOpen_ = makeButton(PgExtract, L"打开目录", Ic::Open, false,
+                                     [this] { openOutputFolder(); });
+        btnExtractAdv_ = makeButton(PgExtract, L"高级选项", Ic::Settings, false,
+                                    [this] { setExtractAdvanced(!extractAdv_); });
+
         chkFlat_ = makeCheck(PgExtract, L"平铺所有文件", false);
         chkDry_ = makeCheck(PgExtract, L"仅预览 (dry-run)", false);
         chkSkip_ = makeCheck(PgExtract, L"跳过已存在文件", false);
         chkSource_ = makeCheck(PgExtract, L"使用源映像目录树", false);
+        chkSource_->changed = [this](bool) { if (page_ == PgExtract) rebuildBrowse(); };
         chkKeepTemp_ = makeCheck(PgExtract, L"保留临时 CAB", false);
         chkVerbose_ = makeCheck(PgExtract, L"详细日志", true);
         tbTransforms_ = makeText(PgExtract, L"可选：一个或多个 .mst，用 ; 分隔");
@@ -625,8 +669,27 @@ public:
         btnBaseBrowse_ = makeButton(PgExtract, L"浏览", Ic::Folder, false,
                                     [this] { browseFileFor(tbBaseMsi_, false,
                                         L"选择基准 MSI", L"MSI 包", L"*.msi"); });
-        btnExtract_ = makeButton(PgExtract, L"开始解包", Ic::Extract, true,
-                                 [this] { startExtract(); });
+        // Advanced widgets are grouped under tab 1 so they can be hidden.
+        for (Widget* w : std::initializer_list<Widget*>{
+                 chkFlat_, chkDry_, chkSkip_, chkSource_, chkKeepTemp_, chkVerbose_,
+                 tbTransforms_, btnTransBrowse_, tbBaseMsi_, btnBaseBrowse_})
+            w->setTab(1);
+
+        tbBrowseFilter_ = makeText(PgExtract, L"筛选文件…");
+        tbBrowseFilter_->changed = [this] { refreshBrowseFiles(); };
+        gridBrowseDirs_ = add<DataGrid>(PgExtract);
+        gridBrowseDirs_->headerVisible = false;
+        gridBrowseDirs_->rowHeightPx = S(28);
+        gridBrowseDirs_->headHeightPx = 0;
+        gridBrowseDirs_->selectionChanged = [this](int row) { onBrowseDirSelected(row); };
+        gridBrowseDirs_->rowActivated = [this](int row) { toggleBrowseDir(row); };
+        gridBrowseDirs_->itemContextMenu = [this](int row, POINT p) { showDirMenu(row, p); };
+        gridBrowseFiles_ = add<DataGrid>(PgExtract);
+        gridBrowseFiles_->rowHeightPx = S(28);
+        gridBrowseFiles_->headHeightPx = S(32);
+        gridBrowseFiles_->selectionChanged = [this](int row) { onBrowseFileSelected(row); };
+        gridBrowseFiles_->rowActivated = [this](int row) { extractBrowseFile(row); };
+        gridBrowseFiles_->itemContextMenu = [this](int row, POINT p) { showFileMenu(row, p); };
 
         // ---- Export -------------------------------------------------------
         ddExportMode_ = add<DropDown>(PgExport);
@@ -938,39 +1001,80 @@ public:
 
     void layoutExtract(const RECT& body) {
         Theme& t = theme();
-        int optW = S(430);
-        RECT oc = R(body.left, body.top, optW, H(body));
-        RECT lc = R(oc.right + S(16), body.top, W(body) - optW - S(16), H(body));
-        addCard(oc, L"解包选项", L"还原目录树与全部文件内容", Ic::Extract);
-        layoutLogCard(lc, S(48));
-
-        int x = oc.left + S(16), w = W(oc) - S(32);
-        int y = oc.top + S(48);
-        auto label = [&](const wchar_t* s, int yy) {
-            addLabel(R(x, yy, w, S(18)), s, t.fSmall, t.subText);
-        };
-        label(L"输出目录", y); y += S(20);
-        tbOutDir_->setRect(R(x, y, w - S(80), S(32)));
-        btnOutBrowse_->setRect(R(x + w - S(72), y, S(72), S(32)));
-        y += S(32) + S(12);
-        label(L"选项", y); y += S(20);
-        Check* checks[] = {chkFlat_, chkDry_, chkSkip_, chkSource_, chkKeepTemp_, chkVerbose_};
-        for (int i = 0; i < 6; ++i) {
-            int col = i % 2, row = i / 2;
-            checks[i]->setRect(R(x + col * (w / 2), y + row * S(30),
-                                 w / 2 - S(6), S(28)));
+        const int gap = S(16);
+        const int toolbarH = S(96);
+        const int advH = S(104);
+        int logH = std::min(S(120), std::max(S(80), H(body) * 15 / 100));
+        int browserTop = static_cast<int>(body.top) + toolbarH + gap +
+                         (extractAdv_ ? advH + gap : 0);
+        int browserH = static_cast<int>(body.bottom) - logH - gap - browserTop;
+        if (browserH < S(150)) {          // very small window: shrink the log
+            logH = std::max(S(48), static_cast<int>(body.bottom) - browserTop -
+                                     gap - S(150));
+            browserH = static_cast<int>(body.bottom) - logH - gap - browserTop;
         }
-        y += S(30) * 3 + S(12);
-        label(L"MST 转换（多个用 ; 分隔）", y); y += S(20);
-        tbTransforms_->setRect(R(x, y, w - S(80), S(32)));
-        btnTransBrowse_->setRect(R(x + w - S(72), y, S(72), S(32)));
-        y += S(32) + S(12);
-        label(L"基准 MSI（解包 .msp 时可选）", y); y += S(20);
-        tbBaseMsi_->setRect(R(x, y, w - S(80), S(32)));
-        btnBaseBrowse_->setRect(R(x + w - S(72), y, S(72), S(32)));
-        y += S(32) + S(18);
-        btnExtract_->setRect(R(x, std::min(y, static_cast<int>(oc.bottom - S(56))),
-                              S(184), S(40)));
+
+        // 1) Primary bar: output directory + actions + advanced toggle.
+        RECT bar = R(body.left, body.top, W(body), toolbarH);
+        addCard(bar, L"解包",
+                L"浏览包内容 · 双击文件单独解包 · 右键更多操作", Ic::Extract);
+        int rowY = bar.top + S(46);
+        int x = bar.right - S(16);
+        auto place = [&](Button* b, int w) {
+            x -= w;
+            b->setRect(R(x, rowY, w, S(34)));
+            x -= S(8);
+        };
+        place(btnExtractAdv_, S(112));
+        place(btnExtractOpen_, S(104));
+        place(btnExtractSel_, S(112));
+        place(btnExtractAll_, S(124));
+        place(btnOutBrowse_, S(76));
+        tbOutDir_->setRect(R(bar.left + S(16), rowY,
+                             std::max(S(120), x - (static_cast<int>(bar.left) + S(16))),
+                             S(34)));
+
+        // 2) Optional advanced panel.
+        if (extractAdv_) {
+            RECT adv = R(body.left, bar.bottom + gap, W(body), advH);
+            addCard(adv, L"高级选项", L"转换 / 基准 MSI / 解包开关", Ic::Settings);
+            int ay = adv.top + S(44);
+            int aw = (W(adv) - S(32) - S(12)) / 2;
+            tbTransforms_->setRect(R(adv.left + S(16), ay, aw - S(84), S(30)));
+            btnTransBrowse_->setRect(R(adv.left + S(16) + aw - S(76), ay, S(76), S(30)));
+            int bx = adv.left + S(16) + aw + S(12);
+            tbBaseMsi_->setRect(R(bx, ay, aw - S(84), S(30)));
+            btnBaseBrowse_->setRect(R(bx + aw - S(76), ay, S(76), S(30)));
+            int cy = ay + S(46);
+            Check* checks[] = {chkFlat_, chkDry_, chkSkip_, chkSource_, chkKeepTemp_, chkVerbose_};
+            int cw = (W(adv) - S(32)) / 6;
+            for (int i = 0; i < 6; ++i)
+                checks[i]->setRect(R(adv.left + S(16) + i * cw, cy, cw - S(6), S(28)));
+        }
+
+        // 3) Browser: directory tree + file list (Explorer-like).
+        RECT br = R(body.left, browserTop, W(body), browserH);
+        addCard(br, L"包内容", browseSummary_, Ic::Database);
+        int treeW = std::min(S(300), W(br) * 32 / 100);
+        int innerY = br.top + S(46);
+        int innerH = std::max(S(60), H(br) - S(46) - S(12));
+        gridBrowseDirs_->setRect(R(br.left + S(12), innerY, treeW, innerH));
+        int fx = br.left + S(12) + treeW + S(12);
+        int fw = std::max(S(120), static_cast<int>(br.right) - S(12) - fx);
+        addLabel(R(fx, innerY, std::max(S(80), fw - S(248)), S(30)),
+                 browsePath_, t.fSmall, t.subText,
+                 DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        tbBrowseFilter_->setRect(R(fx + fw - S(240), innerY, S(240), S(30)));
+        int gridY = innerY + S(36);
+        gridBrowseFiles_->setRect(R(fx, gridY, fw,
+                                    std::max(S(60), innerY + innerH - gridY)));
+        addLabel(R(fx, innerY + S(30), std::max(S(80), fw - S(248)), S(18)),
+                 browseDirInfo_, t.fSmall, t.muted,
+                 DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+        // 4) Log card.
+        RECT lc = R(body.left, body.bottom - logH, W(body), logH);
+        layoutLogCard(lc, S(44));
     }
 
     void layoutExport(const RECT& body) {
@@ -1177,6 +1281,8 @@ public:
                    : (page_ == PgExtract || page_ == PgExport || page_ == PgPack);
             if (page_ == PgPack && w->tab() >= 0 && w->tab() != packTab_)
                 v = false;
+            if (page_ == PgExtract && w->tab() == 1 && !extractAdv_)
+                v = false;
             w->setVisible(v);
         }
     }
@@ -1366,6 +1472,10 @@ public:
         queryInfo_ = L"就绪";
         verifyText_ = L"请先打开一个 .msi / .msp 包";
         statusRight_.clear();
+        bExpanded_.clear();
+        bSelDirKey_.clear();
+        autoOutDir_.clear();
+        rebuildBrowse();
     }
 
     void loadPackage(const std::wstring& path) {
@@ -1381,6 +1491,7 @@ public:
         db_.reset();
         if (!ensureDb()) return;
         saveSetting(L"LastPackage", full);
+        applyDefaultOutDir();
         populate();
         runVerify();
         status_ = L"已打开 " + util::path::fileName(full);
@@ -1480,6 +1591,8 @@ public:
         statusRight_ = util::fmt(L"%llu 张表 · %llu 个 CAB",
                                  static_cast<unsigned long long>(tableNames_.size()),
                                  static_cast<unsigned long long>(cabs));
+
+        rebuildBrowse();
     }
 
     void setInfoTab(int tab) {
@@ -1707,9 +1820,12 @@ public:
 
     // ---- background tasks ------------------------------------------------
     void setBusy(bool busy) {
-        Button* runButtons[] = {btnExtract_, btnExport_, btnPack_, btnOpen_,
-                                btnHomeVerify_, btnVerify_};
+        Button* runButtons[] = {btnExtractAll_, btnExtractSel_, btnExport_, btnPack_,
+                                btnOpen_, btnHomeVerify_, btnVerify_};
         for (Button* b : runButtons) if (b) b->setEnabled(!busy);
+        if (gridBrowseDirs_) gridBrowseDirs_->setEnabled(!busy);
+        if (gridBrowseFiles_) gridBrowseFiles_->setEnabled(!busy);
+        if (btnExtractOpen_) btnExtractOpen_->setEnabled(!busy);
         if (progress_) {
             progress_->indeterminate = busy;
             if (!busy) progress_->value = 0;
@@ -1782,11 +1898,38 @@ public:
         layout();
     }
 
-    void startExtract() {
-        if (!ensureDb()) { toast(L"请先打开一个包", 1); return; }
+    // ---- extract: browser + selective extraction ------------------------
+    std::wstring defaultExtractDir() const {
+        std::wstring dir = util::path::dirName(package_);
+        std::wstring stem = util::path::fileName(package_);
+        size_t dot = stem.find_last_of(L'.');
+        if (dot != std::wstring::npos) stem = stem.substr(0, dot);
+        return util::path::join(dir, stem + L"_files");
+    }
+
+    void applyDefaultOutDir() {
+        std::wstring cur = util::trim(tbOutDir_->value());
+        if (cur.empty() || cur == autoOutDir_) {
+            autoOutDir_ = defaultExtractDir();
+            tbOutDir_->setValue(autoOutDir_);
+        }
+    }
+
+    bool ensureOutputDir() {
+        if (util::trim(tbOutDir_->value()).empty()) {
+            autoOutDir_ = defaultExtractDir();
+            tbOutDir_->setValue(autoOutDir_);
+        }
+        if (util::trim(tbOutDir_->value()).empty()) {
+            toast(L"请选择输出目录", 1);
+            return false;
+        }
+        return true;
+    }
+
+    extract::Options extractOptions(std::vector<std::wstring> onlyFiles) {
         extract::Options o;
         o.outDir = util::trim(tbOutDir_->value());
-        if (o.outDir.empty()) { toast(L"请选择输出目录", 1); return; }
         o.flat = chkFlat_->checked;
         o.dryRun = chkDry_->checked;
         o.skipExisting = chkSkip_->checked;
@@ -1795,9 +1938,27 @@ public:
         o.verbose = chkVerbose_->checked;
         o.transforms = splitList(tbTransforms_->value());
         o.baseMsi = util::trim(tbBaseMsi_->value());
+        o.onlyFiles = std::move(onlyFiles);
+        return o;
+    }
+
+    void setExtractAdvanced(bool open) {
+        extractAdv_ = open;
+        btnExtractAdv_->text = open ? L"收起选项" : L"高级选项";
+        btnExtractAdv_->invalidate();
+        setVisibility();
+        layout();
+    }
+
+    void startExtractKeys(std::vector<std::wstring> keys, const std::wstring& label) {
+        if (package_.empty()) { toast(L"请先打开一个包", 1); return; }
+        if (running_) return;
+        if (!ensureOutputDir()) return;
+        extract::Options o = extractOptions(std::move(keys));
         lastOutputDir_ = util::path::full(o.outDir);
+        saveSetting(L"LastOutDir", lastOutputDir_);
         std::wstring path = package_;
-        bool patch = db_->isPatch();
+        bool patch = db_ && db_->isPatch();
         startTask([path, patch, o] {
             msi::Db db(path);
             if (!patch) {
@@ -1808,7 +1969,344 @@ public:
             }
             if (patch) extract::extractPatch(db, o);
             else extract::extractPackage(db, o);
-        }, L"正在解包 " + util::path::fileName(path), L"解包完成");
+        }, label, o.onlyFiles.empty() ? L"解包完成" : L"已解包");
+    }
+
+    void startExtractAll() {
+        startExtractKeys({}, L"正在解包全部文件…");
+    }
+
+    void startExtractSelected() {
+        int row = gridBrowseFiles_ ? gridBrowseFiles_->selected() : -1;
+        if (row < 0 || row >= static_cast<int>(bShown_.size())) {
+            toast(L"请先在文件列表中选择一个文件", 1);
+            return;
+        }
+        const BFile& f = bFiles_[bShown_[row]];
+        startExtractKeys({f.key}, L"正在解包 " + f.name);
+    }
+
+    void extractBrowseFile(int row) {
+        if (row < 0 || row >= static_cast<int>(bShown_.size())) return;
+        const BFile& f = bFiles_[bShown_[row]];
+        startExtractKeys({f.key}, L"正在解包 " + f.name);
+    }
+
+    std::vector<std::wstring> collectDirFiles(int dir) const {
+        std::vector<std::wstring> keys;
+        std::function<void(int)> walk = [&](int idx) {
+            for (const auto& f : bFiles_)
+                if (f.dir == idx) keys.push_back(f.key);
+            for (int c : bDirs_[idx].children) walk(c);
+        };
+        if (dir >= 0 && dir < static_cast<int>(bDirs_.size())) walk(dir);
+        return keys;
+    }
+
+    bool isExpanded(const std::wstring& key) const {
+        return std::find(bExpanded_.begin(), bExpanded_.end(), key) != bExpanded_.end();
+    }
+
+    void expandPathTo(int dir) {
+        for (int i = dir; i >= 0 && i < static_cast<int>(bDirs_.size());
+             i = bDirs_[i].parent) {
+            if (!isExpanded(bDirs_[i].key)) bExpanded_.push_back(bDirs_[i].key);
+        }
+    }
+
+    void rebuildBrowse() {
+        bDirs_.clear();
+        bFiles_.clear();
+        bRoots_.clear();
+        bVisible_.clear();
+        bShown_.clear();
+        bSelDir_ = -1;
+        browseSummary_ = L"尚未打开包";
+        browsePath_.clear();
+        browseDirInfo_.clear();
+        if (gridBrowseDirs_) gridBrowseDirs_->clear();
+        if (gridBrowseFiles_) gridBrowseFiles_->clear();
+        if (package_.empty() || !ensureDb()) {
+            layout();
+            return;
+        }
+        if (db_->isPatch()) {
+            browseSummary_ = L"补丁包（.msp）：请使用「解包全部」";
+            layout();
+            return;
+        }
+        try {
+            extract::BrowseTree t = extract::browse(*db_, chkSource_->checked);
+            std::unordered_map<std::wstring, int> byKey;
+            bDirs_.reserve(t.dirs.size());
+            for (const auto& d : t.dirs) {
+                BDir b;
+                b.key = d.key;
+                b.name = d.name;
+                b.parentKey = d.parentKey;
+                b.targetRel = d.targetRel;
+                byKey[util::toLower(d.key)] = static_cast<int>(bDirs_.size());
+                bDirs_.push_back(std::move(b));
+            }
+            for (int i = 0; i < static_cast<int>(bDirs_.size()); ++i) {
+                auto it = byKey.find(util::toLower(bDirs_[i].parentKey));
+                if (it != byKey.end() && it->second != i) {
+                    bDirs_[i].parent = it->second;
+                    bDirs_[it->second].children.push_back(i);
+                } else {
+                    bDirs_[i].parent = -1;
+                    bRoots_.push_back(i);
+                }
+            }
+            auto less = [this](int a, int b) {
+                return util::toLower(bDirs_[a].name) < util::toLower(bDirs_[b].name);
+            };
+            std::sort(bRoots_.begin(), bRoots_.end(), less);
+            for (auto& d : bDirs_) std::sort(d.children.begin(), d.children.end(), less);
+
+            bFiles_.reserve(t.files.size());
+            for (const auto& f : t.files) {
+                BFile b;
+                b.key = f.key;
+                b.name = f.name;
+                b.component = f.component;
+                b.relPath = f.relPath;
+                b.size = f.size;
+                b.sequence = f.sequence;
+                auto it = byKey.find(util::toLower(f.dirKey));
+                b.dir = it != byKey.end() ? it->second : -1;
+                bFiles_.push_back(std::move(b));
+            }
+            browseSummary_ = util::fmt(L"%llu 个目录 · %llu 个文件 · 共 %s",
+                                       static_cast<unsigned long long>(bDirs_.size()),
+                                       static_cast<unsigned long long>(bFiles_.size()),
+                                       humanSize(t.totalSize).c_str());
+
+            if (bExpanded_.empty())
+                for (int r : bRoots_) bExpanded_.push_back(bDirs_[r].key);
+
+            int target = -1;
+            if (!bSelDirKey_.empty()) {
+                auto it = byKey.find(util::toLower(bSelDirKey_));
+                if (it != byKey.end()) target = it->second;
+            }
+            if (target < 0) {
+                for (const auto& f : bFiles_)
+                    if (f.dir >= 0) { target = f.dir; break; }
+                if (target < 0 && !bRoots_.empty()) target = bRoots_[0];
+                if (target >= 0) expandPathTo(target);
+            }
+            rebuildVisibleDirs();
+            if (target >= 0) selectBrowseDir(target, false);
+            refreshBrowseFiles();
+        } catch (const util::Error& e) {
+            browseSummary_ = L"无法读取目录结构：" + e.message();
+        }
+        layout();
+    }
+
+    void rebuildVisibleDirs() {
+        bVisible_.clear();
+        std::function<void(int, int)> walk = [&](int i, int depth) {
+            bDirs_[i].depth = depth;
+            bVisible_.push_back(i);
+            if (isExpanded(bDirs_[i].key))
+                for (int c : bDirs_[i].children) walk(c, depth + 1);
+        };
+        for (int r : bRoots_) walk(r, 0);
+
+        std::vector<std::vector<std::wstring>> rows;
+        rows.reserve(bVisible_.size());
+        for (int i : bVisible_) {
+            std::wstring line(static_cast<size_t>(bDirs_[i].depth) * 2, L' ');
+            if (!bDirs_[i].children.empty())
+                line += isExpanded(bDirs_[i].key) ? L"v " : L"> ";
+            else
+                line += L"  ";
+            line += bDirs_[i].name;
+            rows.push_back({line});
+        }
+        int selPos = -1;
+        for (int k = 0; k < static_cast<int>(bVisible_.size()); ++k)
+            if (bVisible_[k] == bSelDir_) selPos = k;
+        gridBrowseDirs_->setData({L"目录"}, rows, {S(240)});
+        if (selPos >= 0) gridBrowseDirs_->select(selPos);
+    }
+
+    void selectBrowseDir(int dir, bool expand) {
+        if (dir < 0 || dir >= static_cast<int>(bDirs_.size())) return;
+        if (expand) { expandPathTo(dir); rebuildVisibleDirs(); }
+        for (int k = 0; k < static_cast<int>(bVisible_.size()); ++k) {
+            if (bVisible_[k] != dir) continue;
+            bSelDir_ = dir;
+            bSelDirKey_ = bDirs_[dir].key;
+            if (gridBrowseDirs_->selected() == k) refreshBrowseFiles();
+            else gridBrowseDirs_->select(k);   // fires onBrowseDirSelected
+            return;
+        }
+    }
+
+    void onBrowseDirSelected(int row) {
+        if (row < 0 || row >= static_cast<int>(bVisible_.size())) return;
+        bSelDir_ = bVisible_[row];
+        bSelDirKey_ = bDirs_[bSelDir_].key;
+        refreshBrowseFiles();
+    }
+
+    void onBrowseFileSelected(int row) {
+        if (row < 0 || row >= static_cast<int>(bShown_.size())) {
+            browseDirInfo_ = util::fmt(L"%llu 个文件",
+                                       static_cast<unsigned long long>(bShown_.size()));
+        } else {
+            const BFile& f = bFiles_[bShown_[row]];
+            browseDirInfo_ = util::fmt(L"%llu 个文件 · 选中 %s (%s)",
+                                       static_cast<unsigned long long>(bShown_.size()),
+                                       f.name.c_str(), humanSize(f.size).c_str());
+        }
+        layout();
+    }
+
+    void toggleBrowseDir(int row) {
+        if (row < 0 || row >= static_cast<int>(bVisible_.size())) return;
+        int dir = bVisible_[row];
+        if (bDirs_[dir].children.empty()) return;
+        const std::wstring key = bDirs_[dir].key;
+        auto it = std::find(bExpanded_.begin(), bExpanded_.end(), key);
+        if (it == bExpanded_.end()) bExpanded_.push_back(key);
+        else bExpanded_.erase(it);
+        rebuildVisibleDirs();
+    }
+
+    void refreshBrowseFiles() {
+        if (!gridBrowseFiles_) return;
+        bShown_.clear();
+        std::vector<std::vector<std::wstring>> rows;
+        std::wstring filter = util::toLower(util::trim(tbBrowseFilter_->value()));
+        std::wstring out = util::trim(tbOutDir_->value());
+        bool flat = chkFlat_->checked;
+        for (int i = 0; i < static_cast<int>(bFiles_.size()); ++i) {
+            const BFile& f = bFiles_[i];
+            if (f.dir != bSelDir_) continue;
+            if (!filter.empty()) {
+                std::wstring hay = util::toLower(f.name + L" " + f.component + L" " + f.key);
+                if (hay.find(filter) == std::wstring::npos) continue;
+            }
+            bool done = false;
+            if (!out.empty()) {
+                std::wstring target = flat ? util::path::join(out, f.name)
+                                           : util::path::join(out, f.relPath);
+                done = util::path::exists(target);
+            }
+            rows.push_back({f.name, humanSize(f.size), f.component,
+                            std::to_wstring(f.sequence),
+                            done ? L"✓ 已解包" : L"未解包"});
+            bShown_.push_back(i);
+        }
+        gridBrowseFiles_->setData({L"文件", L"大小", L"组件", L"序号", L"状态"},
+                                  rows, {S(320), S(90), S(170), S(70), S(100)});
+        browsePath_ = bSelDir_ >= 0 && bSelDir_ < static_cast<int>(bDirs_.size())
+            ? (bDirs_[bSelDir_].targetRel.empty() ? L"(根目录)" : bDirs_[bSelDir_].targetRel)
+            : L"";
+        browseDirInfo_ = util::fmt(L"%llu 个文件",
+                                   static_cast<unsigned long long>(rows.size()));
+        layout();
+    }
+
+    void showMenu(POINT p, std::vector<Menu::Item> items,
+                  std::function<void(int)> picked) {
+        if (!menu_) menu_ = std::make_unique<Menu>();
+        menu_->show(hwnd_, p, std::move(items), std::move(picked));
+    }
+
+    void showFileMenu(int row, POINT p) {
+        if (row < 0 || row >= static_cast<int>(bShown_.size())) return;
+        int fi = bShown_[row];
+        const BFile f = bFiles_[fi];       // copy: the list may be rebuilt
+        std::wstring out = util::trim(tbOutDir_->value());
+        std::wstring target = chkFlat_->checked ? util::path::join(out, f.name)
+                                                : util::path::join(out, f.relPath);
+        bool extracted = !out.empty() && util::path::exists(target);
+        std::vector<Menu::Item> items = {
+            {L"解包此文件", Ic::Extract, true, false},
+            {L"解包到…", Ic::Folder, true, false},
+            {L"", Ic::None, true, true},
+            {L"复制相对路径", Ic::Copy, true, false},
+            {L"复制文件键", Ic::Table, true, false},
+            {L"在资源管理器中显示", Ic::Open, extracted, false},
+        };
+        showMenu(p, std::move(items), [this, f, target](int cmd) {
+            switch (cmd) {
+            case 0: startExtractKeys({f.key}, L"正在解包 " + f.name); break;
+            case 1: {
+                std::wstring dir;
+                if (pickPath(hwnd_, Pick::Folder, L"选择解包目录", nullptr, 0,
+                             nullptr, dir)) {
+                    tbOutDir_->setValue(dir);
+                    startExtractKeys({f.key}, L"正在解包 " + f.name);
+                }
+                break;
+            }
+            case 3:
+                setClipboardText(hwnd_, f.relPath);
+                toast(L"已复制相对路径", 3);
+                break;
+            case 4:
+                setClipboardText(hwnd_, f.key);
+                toast(L"已复制文件键", 3);
+                break;
+            case 5: {
+                if (!util::path::exists(target)) { toast(L"文件尚未解包", 1); break; }
+                std::wstring args = L"/select,\"" + target + L"\"";
+                ShellExecuteW(hwnd_, L"open", L"explorer.exe", args.c_str(),
+                              nullptr, SW_SHOWNORMAL);
+                break;
+            }
+            default: break;
+            }
+        });
+    }
+
+    void showDirMenu(int row, POINT p) {
+        int dir = (row >= 0 && row < static_cast<int>(bVisible_.size()))
+                      ? bVisible_[row] : bSelDir_;
+        if (dir < 0 || dir >= static_cast<int>(bDirs_.size())) return;
+        std::wstring name = bDirs_[dir].name;
+        std::wstring rel = bDirs_[dir].targetRel;
+        std::vector<Menu::Item> items = {
+            {L"解包此目录（含子目录）", Ic::Extract, true, false},
+            {L"解包全部", Ic::Extract, true, false},
+            {L"", Ic::None, true, true},
+            {L"复制目录路径", Ic::Copy, true, false},
+            {L"全部展开", Ic::ChevronDown, true, false},
+            {L"全部折叠", Ic::ChevronDown, true, false},
+        };
+        showMenu(p, std::move(items), [this, dir, name, rel](int cmd) {
+            switch (cmd) {
+            case 0: {
+                auto keys = collectDirFiles(dir);
+                if (keys.empty()) { toast(L"该目录没有文件", 1); break; }
+                startExtractKeys(std::move(keys), L"正在解包目录 " + name);
+                break;
+            }
+            case 1: startExtractAll(); break;
+            case 3:
+                setClipboardText(hwnd_, rel.empty() ? name : rel);
+                toast(L"已复制目录路径", 3);
+                break;
+            case 4:
+                bExpanded_.clear();
+                for (auto& d : bDirs_)
+                    if (!d.children.empty()) bExpanded_.push_back(d.key);
+                rebuildVisibleDirs();
+                break;
+            case 5:
+                bExpanded_.clear();
+                for (int r : bRoots_) bExpanded_.push_back(bDirs_[r].key);
+                rebuildVisibleDirs();
+                break;
+            default: break;
+            }
+        });
     }
 
     void startExport() {

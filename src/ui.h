@@ -295,11 +295,13 @@ public:
     int  headHeightPx = 0;           // 0 = default S(36)
     std::function<void(int)> selectionChanged;
     std::function<void(int)> rowActivated;
+    std::function<void(int row, POINT screen)> itemContextMenu;
 
     void setData(std::vector<std::wstring> headers,
                  std::vector<std::vector<std::wstring>> rows,
                  std::vector<int> widths = {});
     void clear();
+    void setRect(const RECT& r) override;   // clamps scroll after a resize
     int  selected() const noexcept { return selected_; }
     void select(int row);
     int  rowCount() const noexcept { return static_cast<int>(rows_.size()); }
@@ -364,6 +366,33 @@ public:
     std::wstring text;
     int  kind = 0;               // 0 info, 1 warn, 2 error, 3 ok
     void paint(Gfx& g) override;
+};
+
+// Lightweight owner-drawn context menu (right click on grids / trees).
+class Menu : public Widget {
+public:
+    struct Item {
+        std::wstring text;
+        Ic           icon = Ic::None;
+        bool         enabled = true;
+        bool         separator = false;
+    };
+    void show(HWND owner, POINT screen, std::vector<Item> items,
+              std::function<void(int)> picked);
+    void close();
+    void paint(Gfx& g) override;
+    void onMouseMove(int x, int y) override;
+    void onKey(int vk, bool down) override;
+    LRESULT message(UINT msg, WPARAM wp, LPARAM lp, bool& handled) override;
+
+private:
+    int rowAt(int y) const;
+    std::vector<Item> items_;
+    std::function<void(int)> picked_;
+    int hover_ = -1;
+    int itemH_ = 0;
+    int sepH_ = 0;
+    int pad_ = 0;
 };
 
 class NavItem : public Widget {

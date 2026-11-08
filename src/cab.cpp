@@ -22,6 +22,7 @@ struct Context {
     std::vector<std::wstring> cabPaths;  // cabinet set, in order
     bool         dryRun = false;
     bool         skipExisting = false;
+    bool         skipUnmapped = false;  // selective extraction: ignore others
     bool         verbose = false;
     Result*      result = nullptr;
 
@@ -182,11 +183,17 @@ FNFDINOTIFY(fdiNotify) {
             std::wstring key = util::toLower(name);
             std::wstring target;
             auto it = ctx->map->find(key);
-            if (it != ctx->map->end())
+            if (it != ctx->map->end()) {
                 target = it->second;
-            else
+            } else if (ctx->skipUnmapped) {
+                // Selective extraction asked for specific files only; do not
+                // spill the rest of the cabinet into _unmapped.
+                util::verboseLine(ctx->verbose, name + L"  ->  (not selected)");
+                return 0;
+            } else {
                 target = util::path::join(ctx->fallbackDir,
                                           util::path::sanitizeRelative(name));
+            }
 
             util::verboseLine(ctx->verbose, name + L"  ->  " + target);
 
@@ -369,7 +376,8 @@ Result extract(const std::vector<std::wstring>& cabPaths,
                const std::wstring& tempDir,
                bool dryRun,
                bool skipExisting,
-               bool verbose) {
+               bool verbose,
+               bool skipUnmapped) {
     Result result;
     if (cabPaths.empty()) {
         result.error = L"No cabinet to extract";
@@ -395,6 +403,7 @@ Result extract(const std::vector<std::wstring>& cabPaths,
         ctx.cabDirUtf8 += '\\';
     ctx.dryRun = dryRun;
     ctx.skipExisting = skipExisting;
+    ctx.skipUnmapped = skipUnmapped;
     ctx.verbose = verbose;
     ctx.result = &result;
 

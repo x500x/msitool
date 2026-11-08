@@ -23,10 +23,13 @@
 - **包验证**：所有命令打开数据库前检查 OLE 复合文件签名、`MsiOpenDatabaseW` 与 `_Tables` 结构；`verify` 输出完整报告并以退出码区分 VALID / INVALID。
 - **构建**：`build.bat`（x64/x86/clean，自动定位 vcvars）与 `CMakeLists.txt`（VS / NMake 生成器）。
 - **图形界面（Fluent UI）**：新增 `src/ui.h` / `ui_draw.cpp` / `ui_widgets.cpp` / `ui_app.cpp`，纯 Win32 API（user32 / gdi32 / shell32 / ole32 / advapi32）自绘，无任何第三方 UI 库。包含九个页面（概览 / 包信息 / 数据表 / SQL 查询 / 解包 / 导出 / 打包 / 验证 / 设置）、亮暗主题与跟随系统、Per-Monitor V2 高 DPI、圆角卡片与矢量图标、数据网格 / 下拉 / 开关 / 进度条 / 日志 / Toast、拖放打开、后台任务与实时日志。
+- **解包 · 资源管理器式浏览**：GUI 解包页新增基于 `Directory` / `File` 表的目录树 + 文件列表（关键字筛选、已解包状态、双击展开/折叠），支持双击单文件解包、右键菜单（解包此文件 / 解包到… / 解包此目录（递归）/ 复制相对路径 / 复制文件键 / 在资源管理器中显示）、「解包全部 / 解包选中」按钮与输出目录自动填充（`<包名>_files`）。新增 `extract::browse()` 目录清单接口与 `extract::Options::onlyFiles` 选择性解包：只解选中文件，未选中的 CAB 不再被解压到 `_unmapped`。
 - **入口**：同一个 exe 支持两种模式 —— 无参数（或 `gui` / `--gui` / `/gui [file]`）启动 GUI，带命令参数时在终端里以原样 CLI 运行；`util::outLine` / `errLine` 增加可选日志钩子供 GUI 捕获输出。
 - **文档**：README、CONTRIBUTING、SECURITY、LICENSE 与 issue 模板。
 
 ### Fixed
+
+- `DataGrid` 在窗口尺寸变化后未夹紧滚动位置，导致行被跳过、点击命中错行（解包页目录树右键会选中错误目录）：`setRect` 时重新钳制 `scrollX/scrollY`。
 
 - 解析 `Directory.DefaultDir` 的 `target:source` 双路径语法：未压缩 administrative layout 中 `.:x64`、`.:LANGS-~1|Langs-x64` 之类目录不再被误解析成 `._x64`，源文件能正确定位（NetLimiter x64 样例 147 个 `No source data` 警告 → 0）。
 - 别名映射只加入文件所属的 CAB，避免跨磁盘把文件写到错误目录。
