@@ -52,6 +52,8 @@
 
 ### Changed
 
+- GUI 解包页「日志」抽屉展开后由固定 `S(150)` 改为按页面高度自适应（约 38%，上限 `S(380)`）：日志内容区在默认窗口从 ~4 行提升到 ~8 行、最大化 ~10 行；同时保证文件浏览器至少保留 `S(190)`，选项与日志同时展开也不挤压重叠。
+
 - 输出统一 UTF-8，表格支持 `--tsv`；警告与详细日志输出到 stderr。
 - 生成的 MSI 同时包含 `InstallExecuteSequence` 与 `AdminExecuteSequence`，使 `msiexec /i` 与 `msiexec /a` 都能处理。
 - README 的「路线图」改为带勾选进度的 TODO 清单，已完成项划掉；两条 `pack` TODO 与 `extract` TODO 均已完成并划掉。

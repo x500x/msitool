@@ -1099,8 +1099,8 @@ public:
         const int gap = S(8);
         const int cmdH = S(46);
         const int optH = extractAdv_ ? S(104) : 0;
-        const int logH = extractLog_ ? S(150) : 0;
         const int statusH = S(26);
+        int logH = 0;   // computed below, after the panels above are placed
 
         // 1) Explorer-style command / address bar.
         RECT cmd = R(body.left, body.top, W(body), cmdH);
@@ -1182,11 +1182,21 @@ public:
             y += optH;
         }
 
-        // 3) Main Explorer area: navigation tree + details list.
+        // 4) Roomy, height-adaptive log drawer. It takes roughly 38% of the
+        //    page so a dozen log lines are visible, but never squeezes the
+        //    file browser below a usable minimum (e.g. when options are open).
+        if (extractLog_) {
+            logH = std::min(S(380), std::max(S(220), H(body) * 38 / 100));
+            const int minMain = S(190);
+            const int maxLog = (body.bottom - statusH) - (y + gap) - minMain - gap;
+            if (logH > maxLog) logH = std::max(0, maxLog);
+        }
+
+        // 5) Main Explorer area: navigation tree + details list.
         int mainTop = y + gap;
         int mainBottom = body.bottom - statusH - (logH ? logH + gap : 0);
         RECT main = R(body.left, mainTop, W(body),
-                      std::max(S(160), mainBottom - mainTop));
+                      std::max(S(120), mainBottom - mainTop));
         int treeW = std::min(S(260), W(main) * 26 / 100);
         int listW = W(main) - treeW - S(8);
         gridBrowseDirs_->setRect(R(main.left, main.top, treeW, H(main)));
@@ -1197,7 +1207,7 @@ public:
         gridBrowseFiles_->setColumnWidths({
             std::max(S(180), listW - fixed), S(90), S(130), S(170), S(70), S(100)});
 
-        // 4) Page status strip.
+        // 6) Page status strip.
         addLabel(R(main.left + S(4), main.bottom + S(2),
                    W(main) - S(300), statusH),
                  browseStatus_, t.fSmall, t.subText,
@@ -1206,7 +1216,7 @@ public:
                  L"双击文件解包 · 双击文件夹进入 · 右键更多", t.fSmall, t.muted,
                  DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
 
-        // 5) Collapsible log drawer.
+        // 7) Collapsible log drawer.
         if (logH) {
             RECT lc = R(body.left, body.bottom - logH, W(body), logH);
             layoutLogCard(lc, S(40));
