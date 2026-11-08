@@ -1542,7 +1542,7 @@ public:
             field(1, 2, L"语言 (LCID)", tbLanguage_, nullptr);
             field(1, 3, L"安装界面", ddUi_, nullptr);
             note(1, 4, 1, L"留空 = Program Files\\<产品名>；也接受 Tools\\App、"
-                          L"LocalAppDataFolder\\App 等标准目录前缀。");
+                          L"LocalAppDataFolder\\App 或绝对路径 D:\\Apps\\App。");
         } else if (packTab_ == 1) {
             field(0, 0, L"CAB 分卷大小", tbCabSize_, nullptr);
             field(0, 1, L"配置文件 (pack.ini)", tbConfig_, btnConfigBrowse_);

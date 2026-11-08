@@ -99,10 +99,11 @@ Options:
   --upgrade-code <GUID>    pack: fixed UpgradeCode (default: random GUID)
   --platform <x64|Intel>   pack: platform (default: Intel)
   --install-dir <path>     pack: where the payload is installed. "App" or
-                           "Tools\App" is relative to Program Files, and
+                           "Tools\App" is relative to Program Files,
                            "LocalAppDataFolder\App" starts from a standard
-                           Windows Installer folder (default:
-                           Program Files\<ProductName>)
+                           Windows Installer folder and "D:\Apps\App" is an
+                           absolute path (pinned with the INSTALLFOLDER
+                           property). Default: Program Files\<ProductName>
   --language <LCID>        pack: ProductLanguage (default: 1033)
   --cab-size <n>[M|G]      pack: split into CABs of ~n MiB (default: one CAB)
   --no-empty-dirs          pack: do not emit CreateFolder rows
@@ -136,7 +137,7 @@ Examples:
   msitool extract update.msp C:\out\patch --base-msi setup.msi
   msitool pack C:\payload C:\out\app.msi --name "My App" --version 1.2.3
   msitool pack C:\payload C:\out\app.msi --install-dir "LocalAppDataFolder\My App"
-  msitool pack C:\payload C:\out\app.msi --install-dir "Tools\MyApp"
+  msitool pack C:\payload C:\out\app.msi --install-dir "D:\Apps\MyApp"
   msitool pack C:\payload C:\out\app.msi --config examples\pack.ini
   msitool pack C:\payload C:\out\app.msi --cab-size 16 --ui minimal
   msitool pack C:\payload C:\out\app.msi --files "app.exe;cfg\app.ini"

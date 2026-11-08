@@ -290,7 +290,7 @@ msitool pack <源目录> <输出.msi> [选项]
 | `--product-code <GUID>` | 随机 GUID | 固定 ProductCode（省略花括号会自动补全） |
 | `--upgrade-code <GUID>` | 随机 GUID | 固定 UpgradeCode |
 | `--platform <x64\|Intel>` | `Intel` | `x64` → `ProgramFiles64Folder` + 64 位组件；`Intel` → `ProgramFilesFolder` |
-| `--install-dir <路径>` | — | 安装位置：留空 = `Program Files\<ProductName>`；`App` / `Tools\App` 相对 Program Files；`LocalAppDataFolder\App` 等标准目录前缀（详见 [安装位置](#安装位置)） |
+| `--install-dir <路径>` | — | 安装位置：留空 = `Program Files\<ProductName>`；`App` / `Tools\App` 相对 Program Files；`LocalAppDataFolder\App` 等标准目录前缀；`D:\Apps\App` / `\\server\share\App` 绝对路径（`INSTALLFOLDER` 属性钉位）。详见 [安装位置](#安装位置) |
 | `--language <LCID>` | `1033` | ProductLanguage 与 SummaryInformation Template |
 | `--cab-size <n>[M\|G]` | `0` | 按未压缩字节把文件切到多个内嵌 CAB；`0` = 单 CAB。支持 `64K` / `16M` / `1G` 等后缀 |
 | `--no-empty-dirs` | — | 不写 `CreateFolder` 表，空目录不会在安装时创建 |
@@ -348,16 +348,20 @@ msiexec /a app.msi /qn TARGETDIR=C:\out\admin
 | `--install-dir "LocalAppDataFolder\My App"` | `[LocalAppDataFolder]\My App`，适合免管理员/按用户安装 |
 | `--install-dir "CommonAppDataFolder\Vendor\App"` | `[CommonAppDataFolder]\Vendor\App` |
 | `--install-dir "LocalAppDataFolder"` | 直接装进该标准目录（`INSTALLFOLDER` 的 `DefaultDir` 为 `.`） |
+| `--install-dir "D:\Apps\My App"` | 绝对路径：`Directory` 表保持相对结构，另写一条 `Property` 行 `INSTALLFOLDER = D:\Apps\My App` 把它钉到绝对位置 |
+| `--install-dir "\\server\share\App"` | UNC 路径，同上（目标机器上的安装账号要能访问该共享） |
 
 标准目录前缀（大小写不敏感）：`ProgramFilesFolder`、`ProgramFiles64Folder`、`CommonFilesFolder`、`CommonFiles64Folder`、`ProgramMenuFolder`、`StartMenuFolder`、`StartupFolder`、`DesktopFolder`、`AppDataFolder`、`LocalAppDataFolder`、`CommonAppDataFolder`、`PersonalFolder`、`SendToFolder`、`TemplatesFolder`、`FavoritesFolder`、`FontsFolder`、`MyPicturesFolder`、`AdminToolsFolder`、`TempFolder`、`WindowsFolder`、`WindowsVolume`、`SystemFolder`、`System64Folder`。
 
-`--install-dir` 只改**打包时的默认值**，`INSTALLFOLDER` 仍是安装根，所以终端用户依旧可以整体搬家：
+绝对路径为什么不能写成 `Directory.DefaultDir`：那一列里 `:` 是 `[targetname]:[sourcename]` 分隔符，`D:\Apps\App` 会被读成 target = `D`、source = `\Apps\App`（实测：`msiexec /a` 报 2714「Invalid value for default folder name」，`msiexec /i` 则老老实实建了个名叫 `D` 的文件夹）。按 MSI 文档「Directory 列可以是一个被设为目标完整路径的属性的名字」，正确做法是保留相对目录树，再用一条 `Property` 行把 `INSTALLFOLDER` 属性设成绝对路径 —— 打包器现在就是这么做的，`Directory` 表的 `DefaultDir` 仍取绝对路径的最后一段（如 `MyApp`），所以 `extract` 与 `msiexec /a` 照旧还原出相对树。
+
+`--install-dir` 只改**打包时的默认值**，`INSTALLFOLDER` 仍是安装根，所以终端用户依旧可以整体搬家（命令行属性优先于 `Property` 表里的钉位值）：
 
 ```bat
 msiexec /i app.msi /qb INSTALLFOLDER="D:\Apps\My App"
 ```
 
-**不支持绝对路径**（`D:\Apps\App`、`\\server\share\App` 会直接报错）：`Directory.DefaultDir` 里 `:` 是 target:source 分隔符，带盘符的值会被 Windows Installer 判为 2714「Invalid value for default folder name」。真要固定到某个盘，只能让安装方传 `TARGETDIR=` / `INSTALLFOLDER=`，或改用标准目录前缀。清单 `[pack]` 段同样接受 `install-dir`，命令行同名选项优先。
+清单 `[pack]` 段同样接受 `install-dir`，命令行同名选项优先。
 
 #### UI
 
@@ -588,7 +592,7 @@ msiexec /a C:\out\app.msi /qn TARGETDIR=C:\out\admin
 | `pack --cab-size 64K`（5 文件） | 3 个内嵌 CAB | 3 条 `Media` 行 + 3 个 `_Streams`；`extract` 全量还原；`msiexec /a` 也解出全部文件 |
 | `pack --config` 全量清单 | 21 张表 | `Feature` 3 / `Shortcut` 2 + `Icon` 1 / `Registry` 2 / `ServiceInstall`+`ServiceControl` / `Environment` / 5 个 `Dialog`；`MsiVerifyPackage` OK，`msiexec /a` 成功 |
 | `pack --ui minimal` | 自包含向导 | 欢迎 / 进度 / 完成 / 取消 / 错误对话框；`msiexec /i /qb` 安装成功 |
-| `pack --install-dir` | 自定义安装位置 | `Tools\MyApp` / `LocalAppDataFolder\My App\Sub` / `CommonAppDataFolder\Vendor\App`：`msiexec /i /qn` 后文件真的落在 `%LocalAppData%\My App\Sub` 等位置，`msiexec /a` 与 `extract` 也同构；`INSTALLFOLDER=` 可再覆盖；绝对路径按预期报错 |
+| `pack --install-dir` | 自定义安装位置 | `Tools\MyApp` / `LocalAppDataFolder\My App\Sub` / `CommonAppDataFolder\Vendor\App`：`msiexec /i /qn` 后文件真的落在 `%LocalAppData%\My App\Sub` 等位置，`msiexec /a` 与 `extract` 也同构；绝对路径 `E:\...\MyApp` 通过 `Property` 行钉位，实测装到该目录，命令行 `INSTALLFOLDER=` 可再覆盖，`/a` 与 `extract` 仍还原相对树 |
 | `pack --sign-cert`（自签名 PFX） | 已签名 MSI | `\x05DigitalSignature` + `\x05MsiDigitalSignatureEx` 流写入，`MsiVerifyPackage` 仍 OK |
 | `pack`（2.3 GiB 稀疏文件） | 未压缩伴随 layout | `FileSize=0`、`Attributes=8192`、一条空 `Cabinet` 的 `Media` 行；`extract` 从伴随目录完整还原 2,300,000,000 字节 |
 | 纯空目录（0 文件 / 3 目录） | 仅 `CreateFolder` 表 | `MsiVerifyPackage` OK；`msiexec /i` 会真正创建空目录树 |

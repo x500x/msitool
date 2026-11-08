@@ -823,8 +823,11 @@ public:
 // (ProgramFilesFolder, LocalAppDataFolder, ...) or ProgramFilesFolder for a
 // plain relative path. INSTALLFOLDER always stays the directory that receives
 // the source root, so "msiexec INSTALLFOLDER=<path>" keeps working.
-// Absolute paths are not representable: Directory.DefaultDir uses ':' as the
-// target:source separator, so a drive letter is rejected by Windows Installer.
+//
+// An absolute path cannot be stored in Directory.DefaultDir (the ':' of the
+// drive letter is the target:source separator), so it is pinned through the
+// documented property override instead: a Property row for INSTALLFOLDER whose
+// value is the full path.
 // ---------------------------------------------------------------------------
 
 struct DirRow {
@@ -876,6 +879,7 @@ const StandardDir* findStandardDir(const std::wstring& name) {
 struct InstallTarget {
     std::vector<DirRow> chain;  // TARGETDIR -> ... -> INSTALLFOLDER's parent
     std::wstring leaf;          // INSTALLFOLDER's DefaultDir
+    std::wstring pinned;        // absolute target, written as a Property row
     std::wstring display;       // resolved location, only used for logging
 };
 
@@ -907,18 +911,36 @@ InstallTarget parseInstallTarget(const std::wstring& raw,
     }
     for (wchar_t& c : spec)
         if (c == L'/') c = L'\\';
-    while (spec.size() > 1 && spec.back() == L'\\') spec.pop_back();
 
+    // An absolute path cannot live in Directory.DefaultDir: the ':' that starts
+    // a drive letter is the target:source separator, so "D:\Apps\App" would be
+    // read as target "D" + source "\Apps\App" (Windows Installer then reports
+    // 2714 or creates a folder literally named "D"). The documented way to pin
+    // a full path is the Directory key *property*: "The Directory column can
+    // contain the name of a property that is set to the full path of a target
+    // directory." So the Directory tree stays relative and a Property row
+    // INSTALLFOLDER=<path> fixes the location (still overridable on the
+    // command line).
     const bool absolute =
         (spec.size() >= 2 && spec[1] == L':') ||
         (spec.size() >= 2 && spec[0] == L'\\' && spec[1] == L'\\');
-    if (absolute)
-        util::fail(L"--install-dir cannot use an absolute path: Windows Installer "
-                   L"rejects drive letters in Directory.DefaultDir (the ':' is the "
-                   L"target:source separator). Install into a standard folder "
-                   L"(e.g. \"LocalAppDataFolder\\App\") or let the user pick the "
-                   L"target at install time with TARGETDIR= / INSTALLFOLDER= : " +
-                   spec);
+    if (absolute) {
+        while (spec.size() > 3 && spec.back() == L'\\') spec.pop_back();
+        if (spec.size() == 2 && spec[1] == L':') spec.push_back(L'\\');
+        for (wchar_t c : spec)
+            if (c < 0x20 || wcschr(L"*?\"<>|;[]", c) != nullptr)
+                util::fail(L"--install-dir contains a character that is not valid "
+                           L"in a Windows Installer property: " + spec);
+        size_t slash = spec.find_last_of(L"\\/");
+        std::wstring leaf = slash == std::wstring::npos ? spec
+                                                        : spec.substr(slash + 1);
+        addProgramFiles();
+        t.leaf = leaf.empty() ? productName : leaf;
+        t.pinned = spec;
+        t.display = spec + L" (INSTALLFOLDER property)";
+        return t;
+    }
+    while (spec.size() > 1 && spec.back() == L'\\') spec.pop_back();
 
     std::vector<std::wstring> parts;
     size_t pos = 0;
@@ -1765,6 +1787,9 @@ Stats pack(const Options& opt) {
         prop(L"ProductLanguage", std::to_wstring(o.language));
         prop(L"INSTALLLEVEL", L"1");
         prop(L"ALLUSERS", L"1");
+        // --install-dir with an absolute path: pin the resolved location of the
+        // INSTALLFOLDER directory (command line INSTALLFOLDER= still wins).
+        if (!installTarget.pinned.empty()) prop(L"INSTALLFOLDER", installTarget.pinned);
         if (needDialogs) prop(L"DefaultUIFont", L"DlgFont8");
 
         for (const auto& a : kSequence)

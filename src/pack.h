@@ -27,8 +27,9 @@ struct Options {
     //   ""                         -> ProgramFiles(64)Folder\<ProductName>
     //   "App" / "Tools\App"       -> relative to ProgramFiles(64)Folder
     //   "LocalAppDataFolder\App"  -> any standard Windows Installer folder
-    // Absolute paths are not possible: Windows Installer treats ':' in
-    // Directory.DefaultDir as the target:source separator.
+    //   "D:\Apps\App" / UNC       -> absolute path, pinned by a Property row
+    //                                 (INSTALLFOLDER = <path>); DefaultDir
+    //                                 cannot hold a drive letter
     // Sub-directories below --install-dir still mirror the source tree.
     std::wstring installDir;
 
