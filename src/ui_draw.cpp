@@ -496,6 +496,15 @@ void Gfx::icon(Ic id, const RECT& r, COLORREF color, int strokeWidth) {
     case Ic::ChevronDown:
         d.path({{7, 10}, {12, 15}, {17, 10}});
         break;
+    case Ic::ChevronRight:
+        d.path({{10, 7}, {15, 12}, {10, 17}});
+        break;
+    case Ic::ArrowLeft:
+        d.path({{20, 12}, {4, 12}, {10, 6}, {4, 12}, {10, 18}});
+        break;
+    case Ic::ArrowUp:
+        d.path({{12, 20}, {12, 4}, {6, 10}, {12, 4}, {18, 10}});
+        break;
     case Ic::Close:
     case Ic::Cross:
         d.seg(6, 6, 18, 18);

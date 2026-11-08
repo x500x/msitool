@@ -704,10 +704,14 @@ int DataGrid::maxScrollX() const {
 
 void DataGrid::setData(std::vector<std::wstring> headers,
                        std::vector<std::vector<std::wstring>> rows,
-                       std::vector<int> widths) {
+                       std::vector<int> widths,
+                       std::vector<Ic> rowIcons) {
     headers_ = std::move(headers);
     rows_ = std::move(rows);
     widths_ = std::move(widths);
+    rowIcons_ = std::move(rowIcons);
+    if (!rowIcons_.empty() && rowIcons_.size() < rows_.size())
+        rowIcons_.resize(rows_.size(), Ic::None);
     size_t n = headers_.size();
     for (const auto& r : rows_) n = std::max(n, r.size());
     if (widths_.empty() && n) {
@@ -740,6 +744,12 @@ void DataGrid::setData(std::vector<std::wstring> headers,
 }
 
 void DataGrid::clear() { setData({}, {}, {}); }
+
+void DataGrid::setColumnWidths(std::vector<int> widths) {
+    if (widths.empty()) return;
+    widths_ = std::move(widths);
+    invalidate();
+}
 
 void DataGrid::setRect(const RECT& r) {
     Widget::setRect(r);
@@ -868,8 +878,16 @@ void DataGrid::paint(Gfx& g) {
             int cw = widths_[c];
             if (x + cw > 0 && x < w) {
                 RECT cr{x + S(12), y, x + cw - S(8), y + rh};
-                g.text(cr, cell(i, static_cast<int>(c)),
-                       i == selected_ ? t.text : t.text, t.fBody,
+                if (c == 0 && i < static_cast<int>(rowIcons_.size()) &&
+                    rowIcons_[i] != Ic::None) {
+                    int is = std::min(S(18), rh - S(6));
+                    RECT ir{x + S(10), y + (rh - is) / 2,
+                            x + S(10) + is, y + (rh + is) / 2};
+                    COLORREF ic = (rowIcons_[i] == Ic::Folder) ? t.warning : t.subText;
+                    g.icon(rowIcons_[i], ir, ic, 2);
+                    cr.left = x + S(10) + is + S(6);
+                }
+                g.text(cr, cell(i, static_cast<int>(c)), t.text, t.fBody,
                        DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
             }
             x += cw;
@@ -899,7 +917,8 @@ void DataGrid::paint(Gfx& g) {
         RECT thumb{w - S(5), hh + pos + S(2), w - S(1), hh + pos + thumbH - S(2)};
         g.round(thumb, S(3), t.scrollThumb);
     }
-    g.round(RECT{0, 0, w, h}, S(8), kNone, t.border, 1);
+    if (rounded) g.round(RECT{0, 0, w, h}, S(8), kNone, t.border, 1);
+    else g.rect(RECT{0, 0, w - 1, h - 1}, t.border, 1);
     RestoreDC(g.dc(), -1);
 }
 
@@ -939,6 +958,12 @@ void DataGrid::onKey(int vk, bool down) {
     case VK_RETURN:
         if (rowActivated && selected_ >= 0) rowActivated(selected_);
         return;
+    case VK_BACK:
+        if (goUp) goUp();
+        return;
+    case VK_F5:
+        if (refreshRequested) refreshRequested();
+        return;
     default: return;
     }
     select(cur);
@@ -948,6 +973,20 @@ LRESULT DataGrid::message(UINT msg, WPARAM /*wp*/, LPARAM lp, bool& handled) {
     if (msg == WM_LBUTTONDOWN && enabled()) {
         SetFocus(hwnd_);
         int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp);
+        if (headerVisible && y < headHeight() && headerClicked) {
+            int cx = -scrollX_;
+            for (size_t c = 0; c < widths_.size(); ++c) {
+                cx += widths_[c];
+                if (x < cx) { headerClicked(static_cast<int>(c)); handled = true; return 0; }
+            }
+        }
+        if (iconClicked && y >= headHeight() && x < S(26)) {
+            int row = -1;
+            hitTest(x, y, row);
+            if (row >= 0) iconClicked(row);
+            handled = true;
+            return 0;
+        }
         if (maxScrollY() > 0 && x > width() - S(16)) {
             dragging_ = true;
             dragStartY_ = y;
@@ -1156,6 +1195,72 @@ void ToastView::paint(Gfx& g) {
          : kind == 3 ? Ic::Check : Ic::InfoCircle, ir, c, 2);
     g.text(RECT{S(50), 0, w - S(10), h}, text, t.text, t.fBody,
            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+}
+
+// ---------------------------------------------------------------------------
+// Breadcrumb (Explorer-style address bar)
+// ---------------------------------------------------------------------------
+void Breadcrumb::setSegments(std::vector<Segment> s) {
+    segments = std::move(s);
+    hover_ = -1;
+    invalidate();
+}
+
+int Breadcrumb::hit(int x) const {
+    for (size_t i = 0; i < rects_.size(); ++i)
+        if (x >= rects_[i].left && x < rects_[i].right) return static_cast<int>(i);
+    return -1;
+}
+
+void Breadcrumb::paint(Gfx& g) {
+    Theme& t = theme();
+    int w = width(), h = height();
+    g.round(RECT{0, 0, w, h}, S(6), t.control, t.border, 1);
+    RECT iconR{S(6), (h - S(18)) / 2, S(6) + S(18), (h + S(18)) / 2};
+    g.icon(Ic::Database, iconR, t.accent, 2);
+
+    rects_.clear();
+    int x = S(30);
+    for (size_t i = 0; i < segments.size(); ++i) {
+        if (i) {
+            RECT cr{x, (h - S(14)) / 2, x + S(16), (h + S(14)) / 2};
+            g.icon(Ic::ChevronRight, cr, t.muted, 2);
+            x += S(16);
+        }
+        std::wstring text = segments[i].text;
+        SIZE sz = g.measure(text, t.fBody);
+        int segW = std::max(S(40), static_cast<int>(sz.cx) + S(18));
+        if (x + segW > w - S(6)) segW = w - S(6) - x;
+        if (segW < S(18)) break;
+        RECT seg{x, S(4), x + segW, h - S(4)};
+        rects_.push_back(seg);
+        if (static_cast<int>(i) == hover_)
+            g.round(seg, S(4), t.gridHover);
+        else if (static_cast<int>(i) + 1 == static_cast<int>(segments.size()))
+            g.round(seg, S(4), t.accentSoft);
+        g.text(inset(seg, S(8), 0), text,
+               static_cast<int>(i) + 1 == static_cast<int>(segments.size())
+                   ? t.text : t.subText,
+               t.fBody, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        x += segW;
+    }
+}
+
+void Breadcrumb::onMouseMove(int x, int /*y*/) {
+    int i = hit(x);
+    if (i != hover_) { hover_ = i; invalidate(); }
+}
+
+LRESULT Breadcrumb::message(UINT msg, WPARAM /*wp*/, LPARAM lp, bool& handled) {
+    if (msg == WM_LBUTTONUP) {
+        int i = hit(GET_X_LPARAM(lp));
+        if (i >= 0 && i < static_cast<int>(segments.size()) && picked)
+            picked(segments[i].dir);
+        handled = true;
+        return 0;
+    }
+    if (msg == WM_MOUSELEAVE) { hover_ = -1; invalidate(); }
+    return 0;
 }
 
 // ---------------------------------------------------------------------------

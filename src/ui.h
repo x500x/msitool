@@ -77,7 +77,8 @@ bool   systemPrefersDark();
 // ---------------------------------------------------------------------------
 enum class Ic {
     None, App, Home, Info, Table, Query, Extract, Export, Pack, Shield,
-    Settings, Sun, Moon, Folder, Play, Stop, ChevronDown, Close, Min, Max,
+    Settings, Sun, Moon, Folder, Play, Stop, ChevronDown, ChevronRight,
+    ArrowLeft, ArrowUp, Close, Min, Max,
     Restore, Check, Cross, Refresh, Search, Copy, Add, Bolt, Database, File,
     Open, Save, Clock, ArrowRight, Terminal, InfoCircle, Warning, Sparkle
 };
@@ -296,11 +297,17 @@ public:
     std::function<void(int)> selectionChanged;
     std::function<void(int)> rowActivated;
     std::function<void(int row, POINT screen)> itemContextMenu;
+    std::function<void(int col)> headerClicked;   // click a column to sort
+    std::function<void(int row)> iconClicked;     // click the row's icon area
+    std::function<void()> goUp;                   // Backspace
+    std::function<void()> refreshRequested;       // F5
 
     void setData(std::vector<std::wstring> headers,
                  std::vector<std::vector<std::wstring>> rows,
-                 std::vector<int> widths = {});
+                 std::vector<int> widths = {},
+                 std::vector<Ic> rowIcons = {});
     void clear();
+    void setColumnWidths(std::vector<int> widths);  // adaptive column sizing
     void setRect(const RECT& r) override;   // clamps scroll after a resize
     int  selected() const noexcept { return selected_; }
     void select(int row);
@@ -318,6 +325,7 @@ private:
     std::vector<std::wstring>              headers_;
     std::vector<std::vector<std::wstring>> rows_;
     std::vector<int>                       widths_;
+    std::vector<Ic>                        rowIcons_;
     int scrollY_ = 0, scrollX_ = 0;
     int hoverRow_ = -1, selected_ = -1;
     int headH_ = 0, rowH_ = 0;
@@ -366,6 +374,22 @@ public:
     std::wstring text;
     int  kind = 0;               // 0 info, 1 warn, 2 error, 3 ok
     void paint(Gfx& g) override;
+};
+
+// Explorer-style address bar: clickable breadcrumb segments.
+class Breadcrumb : public Widget {
+public:
+    struct Segment { std::wstring text; int dir; };  // -1 = package root
+    std::vector<Segment> segments;
+    std::function<void(int dir)> picked;
+    void setSegments(std::vector<Segment> s);
+    void paint(Gfx& g) override;
+    void onMouseMove(int x, int y) override;
+    LRESULT message(UINT msg, WPARAM wp, LPARAM lp, bool& handled) override;
+private:
+    std::vector<RECT> rects_;
+    int hover_ = -1;
+    int hit(int x) const;
 };
 
 // Lightweight owner-drawn context menu (right click on grids / trees).

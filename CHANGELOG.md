@@ -23,6 +23,7 @@
 - **包验证**：所有命令打开数据库前检查 OLE 复合文件签名、`MsiOpenDatabaseW` 与 `_Tables` 结构；`verify` 输出完整报告并以退出码区分 VALID / INVALID。
 - **构建**：`build.bat`（x64/x86/clean，自动定位 vcvars）与 `CMakeLists.txt`（VS / NMake 生成器）。
 - **图形界面（Fluent UI）**：新增 `src/ui.h` / `ui_draw.cpp` / `ui_widgets.cpp` / `ui_app.cpp`，纯 Win32 API（user32 / gdi32 / shell32 / ole32 / advapi32）自绘，无任何第三方 UI 库。包含九个页面（概览 / 包信息 / 数据表 / SQL 查询 / 解包 / 导出 / 打包 / 验证 / 设置）、亮暗主题与跟随系统、Per-Monitor V2 高 DPI、圆角卡片与矢量图标、数据网格 / 下拉 / 开关 / 进度条 / 日志 / Toast、拖放打开、后台任务与实时日志。
+- **解包 · 整页资源管理器**：解包页去掉重复的全局「当前包文件」栏与页面大标题，以文件浏览器为主体：命令 / 地址栏（后退、前进、上一级、刷新、可点击面包屑、搜索、解包全部 / 解包选中、选项、日志）+ 左侧导航树 + 右侧详细信息列表（文件夹与文件混排、图标、类型列、点击表头排序、双击进入目录 / 双击单文件解包、右键菜单、Backspace 返回上级、F5 刷新、状态栏），选项面板与日志抽屉默认折叠，主体区域随窗口全量自适应。
 - **解包 · 资源管理器式浏览**：GUI 解包页新增基于 `Directory` / `File` 表的目录树 + 文件列表（关键字筛选、已解包状态、双击展开/折叠），支持双击单文件解包、右键菜单（解包此文件 / 解包到… / 解包此目录（递归）/ 复制相对路径 / 复制文件键 / 在资源管理器中显示）、「解包全部 / 解包选中」按钮与输出目录自动填充（`<包名>_files`）。新增 `extract::browse()` 目录清单接口与 `extract::Options::onlyFiles` 选择性解包：只解选中文件，未选中的 CAB 不再被解压到 `_unmapped`。
 - **入口**：同一个 exe 支持两种模式 —— 无参数（或 `gui` / `--gui` / `/gui [file]`）启动 GUI，带命令参数时在终端里以原样 CLI 运行；`util::outLine` / `errLine` 增加可选日志钩子供 GUI 捕获输出。
 - **文档**：README、CONTRIBUTING、SECURITY、LICENSE 与 issue 模板。
