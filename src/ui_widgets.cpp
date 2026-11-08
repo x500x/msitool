@@ -366,6 +366,21 @@ void TextBox::paint(Gfx& g) {
     // would leave stale coloured segments behind on partial repaints.
     COLORREF edge = hovered() ? t.borderStrong : t.border;
     g.round(r, S(6), face, edge, 1);
+    if (dropGlow_) {
+        // A file drag is currently over the window: advertise this field as a
+        // drop target. Only the ring the native EDIT does not cover can show
+        // paint here, so the cue is a thicker outline plus two accent ticks
+        // in the left / right margin (never a fill of the text area, which
+        // would sit under a child window that is not repainted with us).
+        COLORREF hot = dropGlow_ == 2 ? t.accent : mix(t.accent, t.card, 50);
+        g.round(r, S(6), kNone, hot, dropGlow_ == 2 ? S(2) : 1);
+        if (dropGlow_ == 2 && h > S(16) && w > S(28)) {
+            g.fill(RECT{r.left + S(5), r.top + S(6), r.left + S(8),
+                        r.bottom - S(6)}, t.accent);
+            g.fill(RECT{r.right - S(8), r.top + S(6), r.right - S(5),
+                        r.bottom - S(6)}, t.accent);
+        }
+    }
     if (focused()) {
         g.fill(RECT{r.left + S(8), r.bottom - S(3), r.right - S(8), r.bottom - S(1)},
                t.accent);
@@ -476,6 +491,12 @@ std::wstring TextBox::value() const {
 
 void TextBox::setValue(const std::wstring& s) {
     if (edit_) SetWindowTextW(edit_, s.c_str());
+}
+
+void TextBox::setDropGlow(int level) {
+    if (dropGlow_ == level) return;
+    dropGlow_ = level;
+    invalidate();
 }
 
 void TextBox::selectAll() {

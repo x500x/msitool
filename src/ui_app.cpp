@@ -6,6 +6,7 @@
 
 #include <objbase.h>
 #include <shobjidl_core.h>
+#include <oleidl.h>
 
 #include <chrono>
 #include <cmath>
@@ -239,8 +240,132 @@ const Ic kPageIcon[PgCount] = {
 };
 
 // ---------------------------------------------------------------------------
+// Drag & drop
+//
+// A drop is routed by *position first, content second*: every page publishes
+// the fields that accept a drop, the field under the cursor wins, and the
+// window-wide fallback decides by what was dragged. On the pack page a folder
+// becomes "源目录", a manifest goes to "配置文件", a .pfx to "签名证书" and
+// everything else keeps the long-standing "open the package" behaviour.
+// ---------------------------------------------------------------------------
+enum DropKind {
+    DkNone = 0,
+    DkSourceDir,    // pack: source directory
+    DkOutputMsi,    // pack: output .msi path
+    DkManifest,     // pack: pack.ini manifest
+    DkCert,         // pack: .pfx signing certificate
+    DkOutDir,       // extract / export: destination directory
+    DkPackage,      // open an .msi / .msp
+    DkAuto          // pack page background: route by content
+};
+
+struct DropZone {
+    RECT           hit{};      // inflated area that selects this zone
+    RECT           core{};     // exact field rect, used to resolve overlaps
+    RECT           frame{};    // card outlined by the window (may be empty)
+    DropKind       kind = DkNone;
+    std::wstring   name;       // field name used in the hint
+    TextBox*       glow = nullptr;   // field that lights up (nullptr = frame)
+};
+
+RECT grow(const RECT& r, int x, int y) {
+    return RECT{r.left - x, r.top - y, r.right + x, r.bottom + y};
+}
+
+// Squared distance from a point to a rect, 0 when the point is inside it.
+int distToRect(const RECT& r, POINT p) {
+    int l = static_cast<int>(r.left), t = static_cast<int>(r.top);
+    int rr = static_cast<int>(r.right) - 1, b = static_cast<int>(r.bottom) - 1;
+    int x = static_cast<int>(p.x), y = static_cast<int>(p.y);
+    int dx = std::max(0, std::max(l - x, x - rr));
+    int dy = std::max(0, std::max(t - y, y - b));
+    return dx * dx + dy * dy;
+}
+
+bool extIs(const std::wstring& path, std::initializer_list<const wchar_t*> list) {
+    std::wstring e = util::toLower(util::path::ext(path));
+    if (e.empty()) return false;
+    for (const wchar_t* s : list) if (e == s) return true;
+    return false;
+}
+
+// True when `path` is `root` itself or lives inside it.
+bool pathUnder(const std::wstring& path, const std::wstring& rootIn) {
+    if (rootIn.empty() || path.size() < rootIn.size()) return false;
+    std::wstring root = rootIn;
+    bool sep = root.back() == L'\\' || root.back() == L'/';
+    if (!sep) {
+        while (root.size() > 3 && (root.back() == L'\\' || root.back() == L'/'))
+            root.pop_back();
+    }
+    if (path.size() < root.size()) return false;
+    if (!util::iequals(path.substr(0, root.size()), root)) return false;
+    if (path.size() == root.size() || sep) return true;
+    wchar_t c = path[root.size()];
+    return c == L'\\' || c == L'/';
+}
+
+// The directory a dropped item stands for: the folder itself, or the folder
+// that holds the file.
+std::wstring itemDir(const std::wstring& p) {
+    std::wstring full = util::path::full(p);
+    if (util::path::isDirectory(full)) return full;
+    return util::path::parent(full);
+}
+
+// Deepest directory that contains every dropped item. Empty when the items
+// live on different drives, i.e. when no single source directory exists.
+std::wstring commonRoot(const std::vector<std::wstring>& ps) {
+    if (ps.empty()) return L"";
+    std::wstring cur = itemDir(ps[0]);
+    for (size_t i = 1; i < ps.size() && !cur.empty(); ++i) {
+        std::wstring other = itemDir(ps[i]);
+        while (!cur.empty() && !pathUnder(other, cur)) {
+            std::wstring up = util::path::parent(cur);
+            if (up == cur) { cur.clear(); break; }
+            cur = up;
+        }
+    }
+    return cur;
+}
+
+// CF_HDROP of a drag / drop as a path list. Empty when the payload carries no
+// files (plain text, images, shell "shell items" only), which the caller
+// turns into DROPEFFECT_NONE so the cursor shows "not allowed".
+std::vector<std::wstring> dropPaths(IDataObject* obj) {
+    std::vector<std::wstring> out;
+    if (!obj) return out;
+    FORMATETC fe{};
+    fe.cfFormat = CF_HDROP;
+    fe.ptd = nullptr;
+    fe.dwAspect = DVASPECT_CONTENT;
+    fe.lindex = -1;
+    fe.tymed = TYMED_HGLOBAL;
+    STGMEDIUM med{};
+    if (FAILED(obj->GetData(&fe, &med))) return out;
+    if (med.tymed == TYMED_HGLOBAL && med.hGlobal) {
+        HDROP drop = static_cast<HDROP>(GlobalLock(med.hGlobal));
+        if (drop) {
+            UINT n = DragQueryFileW(drop, 0xFFFFFFFFu, nullptr, 0);
+            for (UINT i = 0; i < n; ++i) {
+                UINT need = DragQueryFileW(drop, i, nullptr, 0);
+                if (!need) continue;
+                std::vector<wchar_t> buf(static_cast<size_t>(need) + 2, L'\0');
+                if (DragQueryFileW(drop, i, buf.data(), need + 1))
+                    out.emplace_back(buf.data());
+            }
+            GlobalUnlock(med.hGlobal);
+        }
+    }
+    ReleaseStgMedium(&med);
+    return out;
+}
+
+// ---------------------------------------------------------------------------
 // Application window
 // ---------------------------------------------------------------------------
+class AppDropTarget;         // defined below, OLE entry point for drag & drop
+
 class App {
 public:
     static LRESULT CALLBACK proc(HWND h, UINT msg, WPARAM wp, LPARAM lp);
@@ -263,6 +388,7 @@ public:
     std::wstring toastText_;
     int toastKind_ = 0;              // 0 info, 1 warn, 2 error, 3 ok
     bool toastVisible_ = false;
+    bool toastSticky_ = false;       // held open while a file drag is active
     ULONGLONG toastUntil_ = 0;
     std::wstring lastOutputDir_, lastPackOutput_;
 
@@ -414,6 +540,16 @@ public:
     Check* chkPackVerbose_ = nullptr;
     Check* chkEmptyDirs_ = nullptr;
     Button* btnPack_ = nullptr;
+    // drag & drop -----------------------------------------------------------
+    // The pack form is split over three tabs, so the drop targets are
+    // collected from the currently visible fields plus one window-wide
+    // fallback; the outline of the form card is drawn by the window itself.
+    IDropTarget* dropTarget_ = nullptr;
+    std::vector<DropZone> zones_;
+    std::vector<std::wstring> dragPaths_;
+    int  zoneHit_ = -1;
+    bool dragging_ = false;
+    RECT packForm_{};
     // verify ---------------------------------------------------------------
     DataGrid* gridVerify_ = nullptr;
     Button* btnVerify_ = nullptr;
@@ -476,6 +612,7 @@ public:
         accel_ = CreateAcceleratorTableW(acc, 2);
         SetTimer(hwnd_, kTimer, 40, nullptr);
         DragAcceptFiles(hwnd_, TRUE);
+        installDropTarget();
         setDwmAttribute(hwnd_, 33 /*DWMWA_WINDOW_CORNER_PREFERENCE*/, 2 /*ROUND*/);
         setLogTarget(hwnd_);
         loadRecentOutDirs();
@@ -1268,13 +1405,14 @@ public:
         RECT tabBar  = R(body.left, body.top, W(body), tabH);
         RECT form    = R(body.left, tabBar.bottom + gap, W(body), formH);
         RECT logCard = R(body.left, form.bottom + gap, W(body), logH);
+        packForm_ = form;        // drop fallback target of this page
 
         static const wchar_t* kTitle[3] = {
             L"基本信息", L"高级选项", L"代码签名（可选）"};
         static const wchar_t* kSub[3] = {
-            L"源目录、输出路径与产品标识",
-            L"分卷、清单、大文件与构建开关",
-            L"Authenticode 签名需要 signtool.exe 与代码签名证书"};
+            L"源目录、输出路径与产品标识 · 支持拖放",
+            L"分卷、清单、大文件与构建开关 · 支持拖放",
+            L"Authenticode 签名需要 signtool.exe 与证书 · 支持拖放"};
         static const Ic kIcon[3] = {Ic::Pack, Ic::Settings, Ic::Shield};
         addCard(tabBar, L"", L"");
         addCard(form, kTitle[packTab_], kSub[packTab_], kIcon[packTab_]);
@@ -1533,6 +1671,26 @@ public:
         for (const Label& l : labels_)
             g.text(l.r, l.text, l.color, l.font, l.fmt);
 
+        // Drag & drop: outline the card that will receive the drop when the
+        // target is the window-wide fallback (field targets glow themselves).
+        if (dragging_ && zoneHit_ >= 0 && zoneHit_ < (int)zones_.size()) {
+            const DropZone& z = zones_[zoneHit_];
+            if (W(z.frame) > 0) {
+                g.round(z.frame, S(10), kNone, t.accent, S(2));
+                RECT chip = R(z.frame.right - S(200), z.frame.top + S(9),
+                              S(190), S(28));
+                g.round(chip, S(8), t.accentSoft, t.accent, 1);
+                g.icon(z.kind == DkAuto ? Ic::Sparkle : Ic::Add,
+                       R(chip.left + S(6), chip.top + S(7), S(14), S(14)),
+                       t.accent, 2);
+                g.text(R(chip.left + S(24), chip.top, W(chip) - S(28), H(chip)),
+                       z.kind == DkAuto ? L"拖放自动分配"
+                                        : L"拖放到此处",
+                       t.accent, t.fSmall,
+                       DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            }
+        }
+
         // Info page: detail strip for the selected table row (or a hint).
         if (page_ == PgInfo && !infoDetail_.empty() &&
             infoDetailRect_.right > infoDetailRect_.left) {
@@ -1572,11 +1730,14 @@ public:
         toastView_->invalidate();
     }
 
-    void toast(const std::wstring& text, int kind) {
+    // `sticky` keeps the notification open: used by the drag & drop hint, so
+    // the text does not disappear half way through a drag.
+    void toast(const std::wstring& text, int kind, bool sticky = false) {
         toastText_ = text;
         toastKind_ = kind;
-        toastUntil_ = GetTickCount64() + 3600;
+        toastUntil_ = sticky ? ~0ULL : GetTickCount64() + 3600ULL;
         toastVisible_ = true;
+        toastSticky_ = sticky;
         if (toastView_) {
             toastView_->text = text;
             toastView_->kind = kind;
@@ -1601,6 +1762,7 @@ public:
 
     void hideToast() {
         toastVisible_ = false;
+        toastSticky_ = false;
         toastText_.clear();
         if (toastView_ && toastView_->hwnd())
             toastView_->setVisible(false);
@@ -2785,17 +2947,359 @@ public:
                   L"正在打包 " + util::path::fileName(o.outputMsi), L"打包完成");
     }
 
-    // ---- window procedure helpers ----------------------------------------
-    void onDrop(HDROP drop) {
-        wchar_t path[MAX_PATH]{};
-        if (DragQueryFileW(drop, 0, path, MAX_PATH)) {
-            std::wstring p = path;
-            std::wstring ext = util::path::ext(p);
-            if (util::iequals(ext, L".msi") || util::iequals(ext, L".msp"))
-                loadPackage(p);
-            else toast(L"请拖入 .msi 或 .msp 文件", 1);
+    // ---- drag & drop -----------------------------------------------------
+    //
+    // RegisterDragDrop() on the frame window also receives drags that hover a
+    // child control: OLE walks up the parent chain to find the target, and it
+    // keeps telling us the cursor position while the drag moves. The legacy
+    // WM_DROPFILES path (kept as a fallback) only reports the landing point.
+
+    // Defined after AppDropTarget below: it has to instantiate that class.
+    void installDropTarget();
+
+    void releaseDropTarget() {
+        if (dropTarget_) {
+            dragCancel();
+            RevokeDragDrop(hwnd_);
+            dropTarget_->Release();
+            dropTarget_ = nullptr;
         }
+    }
+
+    // Drop targets of the page (and tab) currently shown, most specific
+    // first; the last one always covers the whole window.
+    void buildZones() {
+        zones_.clear();
+        zoneHit_ = -1;
+        RECT rc{};
+        GetClientRect(hwnd_, &rc);
+        auto row = [&](TextBox* tb, std::initializer_list<Button*> extra) {
+            RECT r = tb->rect();
+            for (Button* b : extra)
+                if (b && b->visible()) r.right = std::max(r.right, b->rect().right);
+            return r;
+        };
+        auto field = [&](TextBox* tb, DropKind kind, const wchar_t* name,
+                         std::initializer_list<Button*> extra) {
+            if (!tb || !tb->visible() || !tb->enabled()) return;
+            DropZone z;
+            z.core = row(tb, extra);
+            z.hit = grow(z.core, S(14), S(8));
+            z.kind = kind;
+            z.name = name;
+            z.glow = tb;
+            zones_.push_back(z);
+        };
+        auto fallback = [&](RECT hit, RECT frame, DropKind kind,
+                            const wchar_t* name) {
+            DropZone z;
+            z.hit = hit;
+            z.frame = frame;
+            z.kind = kind;
+            z.name = name;
+            zones_.push_back(z);
+        };
+
+        switch (page_) {
+        case PgPack:
+            field(tbSrcDir_,   DkSourceDir,  L"源目录",  {btnSrcBrowse_});
+            field(tbOutMsi_,   DkOutputMsi,  L"输出 MSI", {btnOutMsiBrowse_});
+            field(tbConfig_,   DkManifest,   L"配置文件", {btnConfigBrowse_});
+            field(tbSignCert_, DkCert,       L"签名证书", {btnSignCertBrowse_});
+            fallback(rc, packForm_, DkAuto, L"自动分配");
+            break;
+        case PgExtract:
+            field(tbOutDir_, DkOutDir, L"解包到",
+                  {btnOutBrowse_, btnRecentDirs_, btnExtractOpen_});
+            fallback(rc, {}, DkPackage, L"安装包");
+            break;
+        case PgExport:
+            field(tbExportDir_, DkOutDir, L"输出目录", {btnExportBrowse_});
+            fallback(rc, {}, DkPackage, L"安装包");
+            break;
+        default:
+            fallback(rc, {}, DkPackage, L"安装包");
+            break;
+        }
+    }
+
+    // Field zones win over the window-wide fallback, and when the generous
+    // hit rects of two rows overlap (very short rows at a small window size)
+    // the field actually closest to the cursor wins.
+    int zoneAt(POINT c) const {
+        int best = -1, bestDist = 0x7fffffff;
+        for (size_t i = 0; i < zones_.size(); ++i) {
+            const DropZone& z = zones_[i];
+            if (!z.glow || !PtInRect(&z.hit, c)) continue;
+            int d = distToRect(z.core, c);
+            if (d < bestDist) { bestDist = d; best = static_cast<int>(i); }
+        }
+        if (best >= 0) return best;
+        for (size_t i = 0; i < zones_.size(); ++i)
+            if (!zones_[i].glow && PtInRect(&zones_[i].hit, c))
+                return static_cast<int>(i);
+        return -1;
+    }
+
+    POINT toClient(POINTL screen) const {
+        POINT c{screen.x, screen.y};
+        ScreenToClient(hwnd_, &c);
+        return c;
+    }
+
+    // We only ever *read* the dropped paths, so COPY is the only effect we
+    // may report: returning MOVE or LINK tells the source to delete or
+    // relink the original files after the drop.
+    DWORD allowedEffect() const {
+        return dragPaths_.empty() ? DROPEFFECT_NONE : DROPEFFECT_COPY;
+    }
+
+    std::wstring dragHint() const {
+        if (zoneHit_ < 0 || zoneHit_ >= static_cast<int>(zones_.size()))
+            return L"";
+        const DropZone& z = zones_[zoneHit_];
+        if (z.kind == DkAuto)
+            return L"松开：文件夹→源目录 · .ini→配置文件 · .pfx→证书";
+        if (z.kind == DkPackage)
+            return L"松开：打开安装包 (.msi / .msp)";
+        return util::fmt(L"松开：设为「%s」", z.name.c_str());
+    }
+
+    void glowZones() {
+        for (size_t i = 0; i < zones_.size(); ++i) {
+            if (zones_[i].glow)
+                zones_[i].glow->setDropGlow(dragging_ &&
+                                            static_cast<int>(i) == zoneHit_ ? 2 : 1);
+        }
+    }
+
+    void dragEnter(IDataObject* obj, POINTL pt, DWORD* effect) {
+        dragPaths_ = dropPaths(obj);
+        buildZones();
+        dragging_ = !dragPaths_.empty();
+        *effect = allowedEffect();
+        if (dragging_) dragMove(pt, effect);
+        else toast(L"这里只能拖入文件或文件夹", 1);
+    }
+
+    void dragMove(POINTL pt, DWORD* effect) {
+        *effect = allowedEffect();
+        if (!dragging_) return;
+        int hit = zoneAt(toClient(pt));
+        if (hit == zoneHit_) return;
+        zoneHit_ = hit;
+        glowZones();
+        std::wstring hint = dragHint();
+        if (hint.empty()) { if (toastSticky_) hideToast(); }
+        else toast(hint, 0, true);
+        InvalidateRect(hwnd_, nullptr, FALSE);
+    }
+
+    void dragCancel() {
+        releaseDrag();
+        dragPaths_.clear();
+    }
+
+    void dragDrop(IDataObject* obj, POINTL pt, DWORD* effect) {
+        std::vector<std::wstring> paths = dropPaths(obj);
+        if (paths.empty()) paths = dragPaths_;
+        applyDrop(dropKindAt(pt), paths);
+        dragCancel();
+        if (paths.empty()) { *effect = DROPEFFECT_NONE; return; }
+        *effect = DROPEFFECT_COPY;
+    }
+
+    // What a landing point means. Outside every zone - the caption bar, a
+    // spot the layout does not claim - the pack page still auto-routes and
+    // the other pages keep the long-standing "open that package" behaviour.
+    DropKind dropKindAt(POINTL pt) const { return dropKindFor(toClient(pt)); }
+
+    DropKind dropKindFor(POINT c) const {
+        int hit = zoneAt(c);
+        if (hit >= 0) return zones_[hit].kind;
+        return page_ == PgPack ? DkAuto : DkPackage;
+    }
+
+    void releaseDrag() {
+        if (!dragging_) return;
+        dragging_ = false;
+        zoneHit_ = -1;
+        glowZones();
+        zones_.clear();
+        if (toastSticky_) hideToast();
+        InvalidateRect(hwnd_, nullptr, FALSE);
+    }
+
+    // Landing point decides the field; the field then decides what a folder,
+    // a package or a manifest means. Content only breaks ties in DkAuto.
+    void applyDrop(DropKind kind, const std::vector<std::wstring>& paths) {
+        if (paths.empty()) return;
+        switch (kind) {
+        case DkSourceDir:  dropSource(paths);  break;
+        case DkOutputMsi:  dropOutputMsi(paths); break;
+        case DkManifest:   dropManifest(paths); break;
+        case DkCert:       dropCert(paths);   break;
+        case DkOutDir:     dropOutDir(paths); break;
+        case DkAuto:       dropAuto(paths);   break;
+        default:           dropOpen(paths);   break;
+        }
+    }
+
+    // "源目录": a dropped folder is used as is; a dropped file (or several
+    // items) collapses to the deepest directory that still covers them all.
+    void dropSource(const std::vector<std::wstring>& paths) {
+        std::wstring dir = commonRoot(paths);
+        if (dir.empty()) {
+            toast(L"拖放的项不在同一个位置，无法确定源目录", 2);
+            return;
+        }
+        if (packTab_ != 0) setPackTab(0);
+        tbSrcDir_->setValue(dir);
+        suggestPackDefaults();
+        bool oneDir = paths.size() == 1 && util::path::isDirectory(paths[0]);
+        logLine(L"[drop] 源目录 = " + dir);
+        toast(oneDir ? L"源目录：" + dir
+                     : L"源目录：" + dir + L"（打包以目录为单位，含其下全部内容）",
+              oneDir ? 3 : 1);
+    }
+
+    // "输出 MSI": a dropped .msi becomes the target path, a dropped directory
+    // becomes the folder a "<product name>.msi" is written into.
+    void dropOutputMsi(const std::vector<std::wstring>& paths) {
+        const std::wstring& p = paths.front();
+        if (packTab_ != 0) setPackTab(0);
+        if (util::path::isDirectory(p)) {
+            std::wstring name = util::trim(tbName_->value());
+            if (name.empty()) {
+                std::wstring src = util::trim(tbSrcDir_->value());
+                name = src.empty() ? L"package" : util::path::fileName(src);
+            }
+            std::wstring out = util::path::join(util::path::full(p), name + L".msi");
+            tbOutMsi_->setValue(out);
+            lastOutputDir_ = util::path::full(p);
+            logLine(L"[drop] 输出 = " + out);
+            toast(L"输出 MSI：" + out, 3);
+            return;
+        }
+        if (extIs(p, {L".msi"})) {
+            std::wstring full = util::path::full(p);
+            bool exists = util::path::exists(full);
+            tbOutMsi_->setValue(full);
+            lastOutputDir_ = util::path::dirName(full);
+            logLine(L"[drop] 输出 = " + full);
+            toast(L"输出 MSI：" + full +
+                      (exists ? L"（勾选「覆盖已存在文件」才能写入）" : L""),
+                  exists ? 1 : 3);
+            return;
+        }
+        toast(L"「输出 MSI」需要 .msi 文件，或一个用于存放包的目录", 2);
+    }
+
+    // "配置文件": an INI manifest; dropping a directory looks for the
+    // well-known manifest names inside it.
+    void dropManifest(const std::vector<std::wstring>& paths) {
+        static const wchar_t* kNames[] = {L"pack.ini", L"msitool.ini",
+                                          L"manifest.ini", L"pack.cfg"};
+        std::wstring file;
+        for (const std::wstring& p : paths) {
+            if (util::path::isDirectory(p)) {
+                for (const wchar_t* n : kNames) {
+                    std::wstring cand = util::path::join(p, n);
+                    if (util::path::exists(cand)) { file = cand; break; }
+                }
+            } else if (file.empty()) {
+                file = p;
+            }
+            if (!file.empty()) break;
+        }
+        if (file.empty()) {
+            toast(L"没找到清单：拖入 .ini / .cfg / .txt，或含 pack.ini 的目录", 2);
+            return;
+        }
+        std::wstring full = util::path::full(file);
+        bool known = extIs(full, {L".ini", L".cfg", L".conf", L".txt"});
+        if (packTab_ != 1) setPackTab(1);
+        tbConfig_->setValue(full);
+        logLine(L"[drop] 清单 = " + full);
+        toast(L"配置文件：" + util::path::fileName(full) +
+                  (known ? L"" : L"（清单为 INI 格式）"),
+              known ? 3 : 1);
+    }
+
+    void dropCert(const std::vector<std::wstring>& paths) {
+        for (const std::wstring& p : paths) {
+            if (util::path::isDirectory(p)) continue;
+            if (!extIs(p, {L".pfx", L".p12"})) continue;
+            std::wstring full = util::path::full(p);
+            if (packTab_ != 2) setPackTab(2);
+            tbSignCert_->setValue(full);
+            logLine(L"[drop] 证书 = " + full);
+            toast(L"签名证书：" + util::path::fileName(full), 3);
+            return;
+        }
+        toast(L"请拖入 .pfx / .p12 代码签名证书", 2);
+    }
+
+    // Destination folder of the extract / export pages ("解包到" / "输出目录").
+    void dropOutDir(const std::vector<std::wstring>& paths) {
+        std::wstring dir;
+        for (const std::wstring& p : paths)
+            if (util::path::isDirectory(p)) { dir = util::path::full(p); break; }
+        if (dir.empty()) dir = itemDir(paths.front());
+        if (dir.empty()) { toast(L"请拖入一个目录", 1); return; }
+        if (page_ == PgExtract) {
+            tbOutDir_->setValue(dir);
+            refreshBrowseList();
+        } else if (page_ == PgExport) {
+            tbExportDir_->setValue(dir);
+        }
+        lastOutputDir_ = dir;
+        addRecentOutDir(dir);
+        toast(L"输出目录：" + dir, 3);
+    }
+
+    // Blank area of the pack page: the content picks the field.
+    void dropAuto(const std::vector<std::wstring>& paths) {
+        for (const std::wstring& p : paths)
+            if (util::path::isDirectory(p)) { dropSource(paths); return; }
+        const std::wstring& p = paths.front();
+        if (extIs(p, {L".pfx", L".p12"})) { dropCert(paths); return; }
+        if (extIs(p, {L".ini", L".cfg", L".conf"})) { dropManifest(paths); return; }
+        if (extIs(p, {L".msi", L".msp"})) { dropOpen(paths); return; }
+        dropSource(paths);
+    }
+
+    void dropOpen(const std::vector<std::wstring>& paths) {
+        for (const std::wstring& p : paths)
+            if (extIs(p, {L".msi", L".msp"})) { loadPackage(p); return; }
+        toast(L"请拖入 .msi / .msp 安装包，或把文件夹拖到「打包」页", 1);
+    }
+
+    void logLine(const std::wstring& text) {
+        if (log_) log_->append(text, LogView::Kind::Info);
+    }
+
+    // ---- window procedure helpers ----------------------------------------
+    // Legacy WM_DROPFILES fallback: same routing, but the position only is
+    // known after the drop, so there is no hover feedback here.
+    void onDrop(HDROP drop) {
+        std::vector<std::wstring> paths;
+        UINT n = DragQueryFileW(drop, 0xFFFFFFFFu, nullptr, 0);
+        for (UINT i = 0; i < n; ++i) {
+            UINT need = DragQueryFileW(drop, i, nullptr, 0);
+            if (!need) continue;
+            std::vector<wchar_t> buf(static_cast<size_t>(need) + 2, L'\0');
+            if (DragQueryFileW(drop, i, buf.data(), need + 1))
+                paths.emplace_back(buf.data());
+        }
+        POINT where{};
+        DragQueryPoint(drop, &where);      // client coordinates
         DragFinish(drop);
+        if (paths.empty()) return;
+        buildZones();
+        DropKind kind = dropKindFor(where);
+        zones_.clear();
+        applyDrop(kind, paths);
     }
 
     void focusNext(HWND current, bool backwards) {
@@ -2939,7 +3443,8 @@ public:
                     progress_->phase += 5;
                     progress_->invalidate();
                 }
-                if (toastVisible_ && GetTickCount64() >= toastUntil_) hideToast();
+                if (toastVisible_ && !toastSticky_ &&
+                    GetTickCount64() >= toastUntil_) hideToast();
             }
             return 0;
         case WM_DROPFILES:
@@ -2986,6 +3491,7 @@ public:
         case WM_DESTROY:
             setLogTarget(nullptr);
             util::setLogSink(nullptr);
+            releaseDropTarget();
             KillTimer(hwnd_, kTimer);
             if (accel_) DestroyAcceleratorTable(accel_);
             PostQuitMessage(0);
@@ -2997,7 +3503,65 @@ public:
     }
 };
 
+// ---------------------------------------------------------------------------
+// IDropTarget glue. OLE calls these on our own (STA) thread from inside the
+// message loop, so they can drive App directly without any synchronisation.
+// ---------------------------------------------------------------------------
+class AppDropTarget : public IDropTarget {
+public:
+    explicit AppDropTarget(App* app) : app_(app) {}
+    virtual ~AppDropTarget() = default;   // for `delete this` in Release()
+
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppv) override {
+        if (!ppv) return E_POINTER;
+        *ppv = nullptr;
+        if (riid == IID_IUnknown || riid == IID_IDropTarget) {
+            *ppv = static_cast<IDropTarget*>(this);
+            AddRef();
+            return S_OK;
+        }
+        return E_NOINTERFACE;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return static_cast<ULONG>(++refs_); }
+    ULONG STDMETHODCALLTYPE Release() override {
+        ULONG left = static_cast<ULONG>(--refs_);
+        if (!left) delete this;
+        return left;
+    }
+
+    HRESULT STDMETHODCALLTYPE DragEnter(IDataObject* data, DWORD, POINTL pt,
+                                        DWORD* effect) override {
+        app_->dragEnter(data, pt, effect);
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE DragOver(DWORD, POINTL pt,
+                                       DWORD* effect) override {
+        app_->dragMove(pt, effect);
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE DragLeave() override {
+        app_->dragCancel();
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE Drop(IDataObject* data, DWORD, POINTL pt,
+                                   DWORD* effect) override {
+        app_->dragDrop(data, pt, effect);
+        return S_OK;
+    }
+
+private:
+    App* app_;
+    LONG refs_ = 1;   // ours; RegisterDragDrop() adds / RevokeDragDrop drops
+};
+
 App* g_app = nullptr;
+
+void App::installDropTarget() {
+    if (dropTarget_) return;
+    auto* t = new AppDropTarget(this);
+    if (FAILED(RegisterDragDrop(hwnd_, t))) { t->Release(); return; }
+    dropTarget_ = t;
+}
 
 LRESULT CALLBACK App::proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     App* self = reinterpret_cast<App*>(GetWindowLongPtrW(h, GWLP_USERDATA));

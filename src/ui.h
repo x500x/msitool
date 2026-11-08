@@ -240,6 +240,10 @@ public:
     void setValue(const std::wstring& s);
     void selectAll();
     void focusEdit();
+    // Drag & drop feedback: 0 = off, 1 = a file drag is over the window and
+    // this field accepts it, 2 = the drag currently hovers this field.
+    void setDropGlow(int level);
+    int  dropGlow() const noexcept { return dropGlow_; }
     void onThemeChanged() override;
     void invalidate() override;       // also refresh the inner EDIT child
     void takeFocus() override;        // focus the inner EDIT, not the frame
@@ -254,6 +258,7 @@ private:
     void layoutEdit();
     HWND    edit_ = nullptr;
     WNDPROC oldEdit_ = nullptr;
+    int     dropGlow_ = 0;
 };
 
 class Popup : public Widget {
