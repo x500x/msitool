@@ -585,6 +585,7 @@ public:
     TextBox* tbSrcDir_ = nullptr;      Button* btnSrcBrowse_ = nullptr;
     TextBox* tbOutMsi_ = nullptr;      Button* btnOutMsiBrowse_ = nullptr;
     TextBox* tbName_ = nullptr;
+    TextBox* tbInstallDir_ = nullptr;  // --install-dir
     TextBox* tbVersion_ = nullptr;
     TextBox* tbManufacturer_ = nullptr;
     DropDown* ddPlatform_ = nullptr;
@@ -1010,6 +1011,7 @@ public:
         btnOutMsiBrowse_ = makeButton(PgPack, L"保存", Ic::Save, false,
                                       [this] { browseSaveMsi(); });
         tbName_ = makeText(PgPack, L"留空则使用目录名");
+        tbInstallDir_ = makeText(PgPack, L"留空：Program Files\\<产品名>");
         tbVersion_ = makeText(PgPack, L"1.0.0");
         tbVersion_->setValue(L"1.0.0");
         tbManufacturer_ = makeText(PgPack, L"msitool");
@@ -1045,7 +1047,7 @@ public:
         };
         tag(0, {tbSrcDir_, btnSrcBrowse_, tbOutMsi_, btnOutMsiBrowse_,
                 tbName_, tbVersion_, tbManufacturer_, ddPlatform_,
-                tbLanguage_, ddUi_});
+                tbLanguage_, ddUi_, tbInstallDir_});
         tag(1, {tbCabSize_, tbConfig_, btnConfigBrowse_, ddLargeFiles_,
                 chkForce_, chkPackDry_, chkPackVerbose_, chkEmptyDirs_});
         tag(2, {tbSignCert_, btnSignCertBrowse_, tbSignPassword_, tbSignTime_});
@@ -1501,7 +1503,7 @@ public:
         int leftX = form.left + padX;
         int rightX = leftX + colW + colGap;
         const int headerPad = S(58);
-        const int rows = 4;
+        const int rows = packTab_ == 0 ? 5 : 4;
         int usable = std::max(S(120), H(form) - headerPad - S(16));
         int rowH = std::min(S(76), std::max(S(34), usable / rows));
         int labelH = S(18);
@@ -1534,10 +1536,13 @@ public:
             field(0, 1, L"输出 MSI", tbOutMsi_, btnOutMsiBrowse_);
             field(0, 2, L"产品名称", tbName_, nullptr);
             field(0, 3, L"产品版本", tbVersion_, nullptr);
+            field(0, 4, L"安装目录", tbInstallDir_, nullptr);
             field(1, 0, L"制造商", tbManufacturer_, nullptr);
             field(1, 1, L"平台", ddPlatform_, nullptr);
             field(1, 2, L"语言 (LCID)", tbLanguage_, nullptr);
             field(1, 3, L"安装界面", ddUi_, nullptr);
+            note(1, 4, 1, L"留空 = Program Files\\<产品名>；也接受 Tools\\App、"
+                          L"LocalAppDataFolder\\App 等标准目录前缀。");
         } else if (packTab_ == 1) {
             field(0, 0, L"CAB 分卷大小", tbCabSize_, nullptr);
             field(0, 1, L"配置文件 (pack.ini)", tbConfig_, btnConfigBrowse_);
@@ -3029,6 +3034,8 @@ public:
             return;
         }
         o.productName = util::trim(tbName_->value());
+        o.installDir = util::trim(tbInstallDir_->value());
+        o.installDirSet = !o.installDir.empty();
         o.version = util::trim(tbVersion_->value());
         if (o.version.empty()) o.version = L"1.0.0";
         o.manufacturer = util::trim(tbManufacturer_->value());

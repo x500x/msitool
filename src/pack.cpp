@@ -519,6 +519,7 @@ struct EnvDef {
 
 struct Manifest {
     std::wstring ui, largeFiles, signCert, signPassword, signTimestamp, signTool;
+    std::wstring installDir;
     unsigned long long cabSize = 0;
     bool keepEmptyDirs = true;
     std::vector<FeatureDef> features;
@@ -539,6 +540,7 @@ Manifest loadManifest(const std::wstring& path) {
             m.signPassword = cfg(s, L"sign-password", m.signPassword);
             m.signTimestamp = cfg(s, L"sign-timestamp", m.signTimestamp);
             m.signTool = cfg(s, L"sign-tool", m.signTool);
+            m.installDir = cfg(s, L"install-dir", m.installDir);
             m.keepEmptyDirs = parseBool(cfg(s, L"keep-empty-dirs"), m.keepEmptyDirs);
             unsigned long long mib = static_cast<unsigned long long>(
                 parseInt(cfg(s, L"cab-size"), 0));
@@ -783,9 +785,10 @@ std::wstring sanitizeName(std::wstring name) {
 class LayoutBuilder {
 public:
     std::map<std::wstring, DirInfo> dirs;  // lower(relDir) -> info
-    std::wstring rootKey = L"ProgramFilesFolder";
+    std::wstring rootKey = L"ProgramFilesFolder";  // parent of INSTALLFOLDER
+    std::wstring installLeaf;                      // INSTALLFOLDER's DefaultDir
 
-    std::wstring ensure(const std::wstring& rel, const std::wstring& productName) {
+    std::wstring ensure(const std::wstring& rel) {
         std::wstring k = util::toLower(rel);
         auto it = dirs.find(k);
         if (it != dirs.end()) return it->second.key;
@@ -794,12 +797,13 @@ public:
         if (rel.empty()) {
             d.key = L"INSTALLFOLDER";
             d.parentKey = rootKey;
-            d.leaf = sanitizeName(productName);
+            // "." means "same directory as the parent" and must stay as-is.
+            d.leaf = installLeaf == L"." ? L"." : sanitizeName(installLeaf);
         } else {
             size_t pos = rel.rfind(L'\\');
             std::wstring parent = pos == std::wstring::npos ? L"" : rel.substr(0, pos);
             std::wstring leaf = pos == std::wstring::npos ? rel : rel.substr(pos + 1);
-            std::wstring parentKey = ensure(parent, productName);
+            std::wstring parentKey = ensure(parent);
             d.key = L"D" + std::to_wstring(dirs.size() + 1);
             d.parentKey = parentKey;
             d.leaf = sanitizeName(leaf);
@@ -810,6 +814,145 @@ public:
         return result;
     }
 };
+
+// ---------------------------------------------------------------------------
+// Install location (--install-dir)
+//
+// The Directory tree is TARGETDIR -> <anchor> -> ... -> INSTALLFOLDER -> the
+// mirrored source tree. The anchor is a standard Windows Installer folder
+// (ProgramFilesFolder, LocalAppDataFolder, ...) or ProgramFilesFolder for a
+// plain relative path. INSTALLFOLDER always stays the directory that receives
+// the source root, so "msiexec INSTALLFOLDER=<path>" keeps working.
+// Absolute paths are not representable: Directory.DefaultDir uses ':' as the
+// target:source separator, so a drive letter is rejected by Windows Installer.
+// ---------------------------------------------------------------------------
+
+struct DirRow {
+    std::wstring key;
+    std::wstring parent;
+    std::wstring leaf;
+};
+
+struct StandardDir {
+    const wchar_t* key;
+    const wchar_t* parent;
+    const wchar_t* def;
+};
+
+// Windows Installer resolves these by their well-known property name, so the
+// placeholder row only has to exist with a "." DefaultDir.
+const StandardDir kStandardDirs[] = {
+    {L"ProgramFilesFolder",   L"TARGETDIR", L"."},
+    {L"ProgramFiles64Folder", L"TARGETDIR", L"."},
+    {L"CommonFilesFolder",    L"TARGETDIR", L"."},
+    {L"CommonFiles64Folder",  L"TARGETDIR", L"."},
+    {L"ProgramMenuFolder",    L"TARGETDIR", L"."},
+    {L"StartMenuFolder",      L"TARGETDIR", L"."},
+    {L"StartupFolder",        L"TARGETDIR", L"."},
+    {L"DesktopFolder",        L"TARGETDIR", L"."},
+    {L"AppDataFolder",        L"TARGETDIR", L"."},
+    {L"LocalAppDataFolder",   L"TARGETDIR", L"."},
+    {L"CommonAppDataFolder",  L"TARGETDIR", L"."},
+    {L"PersonalFolder",       L"TARGETDIR", L"."},
+    {L"SendToFolder",         L"TARGETDIR", L"."},
+    {L"TemplatesFolder",      L"TARGETDIR", L"."},
+    {L"FavoritesFolder",      L"TARGETDIR", L"."},
+    {L"FontsFolder",          L"TARGETDIR", L"."},
+    {L"MyPicturesFolder",     L"TARGETDIR", L"."},
+    {L"AdminToolsFolder",     L"TARGETDIR", L"."},
+    {L"TempFolder",           L"TARGETDIR", L"."},
+    {L"WindowsFolder",        L"TARGETDIR", L"."},
+    {L"WindowsVolume",        L"TARGETDIR", L"."},
+    {L"SystemFolder",         L"TARGETDIR", L"."},
+    {L"System64Folder",       L"TARGETDIR", L"."},
+};
+
+const StandardDir* findStandardDir(const std::wstring& name) {
+    for (const StandardDir& d : kStandardDirs)
+        if (util::iequals(name, d.key)) return &d;
+    return nullptr;
+}
+
+struct InstallTarget {
+    std::vector<DirRow> chain;  // TARGETDIR -> ... -> INSTALLFOLDER's parent
+    std::wstring leaf;          // INSTALLFOLDER's DefaultDir
+    std::wstring display;       // resolved location, only used for logging
+};
+
+void checkInstallPart(const std::wstring& part, const std::wstring& spec) {
+    if (part.empty() || part == L"." || part == L"..")
+        util::fail(L"--install-dir needs a plain directory path "
+                   L"(no empty, \".\" or \"..\" parts): " + spec);
+    for (wchar_t c : part)
+        if (c < 0x20 || wcschr(L"*?\"<>|:", c) != nullptr)
+            util::fail(L"--install-dir contains a character that is not valid in a "
+                       L"directory name: " + spec);
+}
+
+InstallTarget parseInstallTarget(const std::wstring& raw,
+                                 const std::wstring& programFilesKey,
+                                 const std::wstring& productName) {
+    InstallTarget t;
+    std::wstring spec = util::trim(raw);
+    auto addProgramFiles = [&] {
+        t.chain.push_back({programFilesKey, L"TARGETDIR", L"."});
+        return programFilesKey;
+    };
+
+    if (spec.empty()) {
+        addProgramFiles();
+        t.leaf = productName;
+        t.display = L"[" + programFilesKey + L"]\\" + productName;
+        return t;
+    }
+    for (wchar_t& c : spec)
+        if (c == L'/') c = L'\\';
+    while (spec.size() > 1 && spec.back() == L'\\') spec.pop_back();
+
+    const bool absolute =
+        (spec.size() >= 2 && spec[1] == L':') ||
+        (spec.size() >= 2 && spec[0] == L'\\' && spec[1] == L'\\');
+    if (absolute)
+        util::fail(L"--install-dir cannot use an absolute path: Windows Installer "
+                   L"rejects drive letters in Directory.DefaultDir (the ':' is the "
+                   L"target:source separator). Install into a standard folder "
+                   L"(e.g. \"LocalAppDataFolder\\App\") or let the user pick the "
+                   L"target at install time with TARGETDIR= / INSTALLFOLDER= : " +
+                   spec);
+
+    std::vector<std::wstring> parts;
+    size_t pos = 0;
+    while (true) {
+        size_t sep = spec.find(L'\\', pos);
+        std::wstring part = spec.substr(
+            pos, sep == std::wstring::npos ? std::wstring::npos : sep - pos);
+        checkInstallPart(part, spec);
+        parts.push_back(part);
+        if (sep == std::wstring::npos) break;
+        pos = sep + 1;
+    }
+
+    std::wstring parent;
+    size_t next = 0;
+    if (const StandardDir* std = findStandardDir(parts[0])) {
+        t.chain.push_back({std->key, std->parent, std->def});
+        parent = std->key;
+        next = 1;
+    } else {
+        parent = addProgramFiles();
+    }
+    t.display = L"[" + parent + L"]";
+    for (size_t i = next; i < parts.size(); ++i) t.display += L"\\" + parts[i];
+    // Everything between the anchor and the last segment becomes a plain
+    // directory row; the last segment is INSTALLFOLDER itself.
+    for (size_t i = next; i + 1 < parts.size(); ++i) {
+        std::wstring key = L"ID" + std::to_wstring(t.chain.size());
+        t.chain.push_back({key, parent, parts[i]});
+        parent = key;
+    }
+    t.leaf = parts.size() > next ? parts.back() : L".";
+    return t;
+}
 
 unsigned long long fileSize(const std::wstring& p) {
     WIN32_FILE_ATTRIBUTE_DATA fad{};
@@ -1120,6 +1263,7 @@ Stats pack(const Options& opt) {
             o.signTool = cfgData.signTool;
         }
         if (!cfgData.keepEmptyDirs) o.keepEmptyDirs = false;
+        if (!o.installDirSet && o.installDir.empty()) o.installDir = cfgData.installDir;
     }
     o.ui = util::toLower(o.ui);
     if (o.ui != L"none" && o.ui != L"basic" && o.ui != L"minimal")
@@ -1138,6 +1282,16 @@ Stats pack(const Options& opt) {
         util::fail(L"--platform must be x64 or Intel: " + platform);
     const std::wstring rootDirKey =
         util::iequals(platform, L"x64") ? L"ProgramFiles64Folder" : L"ProgramFilesFolder";
+    const InstallTarget installTarget =
+        parseInstallTarget(o.installDir, rootDirKey, productName);
+    if (installTarget.chain[0].key == L"ProgramFiles64Folder" &&
+        !util::iequals(platform, L"x64"))
+        util::errLine(L"[warn] --install-dir uses ProgramFiles64Folder while "
+                      L"--platform is Intel");
+    if (installTarget.chain[0].key == L"ProgramFilesFolder" &&
+        util::iequals(platform, L"x64"))
+        util::errLine(L"[warn] --install-dir uses ProgramFilesFolder while "
+                      L"--platform is x64");
 
     std::vector<Entry> files;
     std::vector<std::wstring> allDirs;
@@ -1206,8 +1360,9 @@ Stats pack(const Options& opt) {
     }
 
     LayoutBuilder layout;
-    layout.rootKey = rootDirKey;
-    for (const auto& d : allDirs) layout.ensure(d, productName);
+    layout.rootKey = installTarget.chain.back().key;
+    layout.installLeaf = installTarget.leaf;
+    for (const auto& d : allDirs) layout.ensure(d);
     for (auto& kv : layout.dirs) {
         for (const auto& f : ordered) {
             if (util::iequals(f.relDir, kv.first)) {
@@ -1235,6 +1390,7 @@ Stats pack(const Options& opt) {
                             static_cast<unsigned long long>(st.directories),
                             outMsi.c_str()));
     util::outLine(L"Product   : " + productName + L" " + o.version);
+    util::outLine(L"Install   : " + installTarget.display);
     util::outLine(L"Codes     : ProductCode=" + productCode + L" UpgradeCode=" + upgradeCode);
     util::outLine(L"Platform  : " + platform + L";" + std::to_wstring(o.language));
     util::outLine(util::fmt(L"Cabinets  : %llu embedded CAB(s), %llu feature(s), "
@@ -1307,55 +1463,39 @@ Stats pack(const Options& opt) {
             create(kExtraSchema[11], L"TextStyle");
         }
 
-        // Directory table: standard roots + one row per source directory.
-        insertRow(h, L"Directory", {L"Directory", L"Directory_Parent", L"DefaultDir"},
-                  {S(L"TARGETDIR"), Null(), S(L"SourceDir")});
-        insertRow(h, L"Directory", {L"Directory", L"Directory_Parent", L"DefaultDir"},
-                  {S(rootDirKey), S(L"TARGETDIR"), S(L".")});
-        for (const auto& kv : layout.dirs) {
-            const DirInfo& d = kv.second;
+        // Directory table: TARGETDIR, the install location chain and one row
+        // per source directory. Directory_Parent is a foreign key, so parents
+        // must be inserted before their children.
+        std::unordered_set<std::wstring> knownDirs;
+        auto ensureDirRow = [&](const std::wstring& key, const std::wstring& parent,
+                                const std::wstring& leaf) {
+            if (!knownDirs.insert(util::toLower(key)).second) return;
             insertRow(h, L"Directory", {L"Directory", L"Directory_Parent", L"DefaultDir"},
-                      {S(d.key), S(d.parentKey), S(d.leaf)});
-        }
+                      {S(key), parent.empty() ? Null() : S(parent), S(leaf)});
+        };
+        ensureDirRow(L"TARGETDIR", L"", L"SourceDir");
+        for (const DirRow& r : installTarget.chain)
+            ensureDirRow(r.key, r.parent, r.leaf);
+        for (const auto& kv : layout.dirs)
+            ensureDirRow(kv.second.key, kv.second.parentKey, kv.second.leaf);
 
         // Extra directories for shortcut folders (standard Windows Installer
         // folders resolve by their well-known Directory key).
-        std::unordered_set<std::wstring> knownDirs;
-        knownDirs.insert(L"TARGETDIR");
-        knownDirs.insert(util::toLower(rootDirKey));
-        for (const auto& kv : layout.dirs) knownDirs.insert(util::toLower(kv.second.key));
         int customDirNo = 0;
-        auto ensureExtraDir = [&](const std::wstring& key,
-                                  const std::wstring& parent,
-                                  const std::wstring& leaf) {
-            if (knownDirs.insert(util::toLower(key)).second)
-                insertRow(h, L"Directory",
-                          {L"Directory", L"Directory_Parent", L"DefaultDir"},
-                          {S(key), parent.empty() ? Null() : S(parent), S(leaf)});
-        };
-        static const wchar_t* kStandardFolders[] = {
-            L"ProgramMenuFolder", L"StartMenuFolder", L"DesktopFolder",
-            L"StartupFolder", L"AppDataFolder", L"LocalAppDataFolder",
-            L"CommonAppDataFolder", L"PersonalFolder", L"SendToFolder",
-            L"TemplatesFolder", L"FavoritesFolder", L"FontsFolder",
-            L"MyPicturesFolder", L"AdminToolsFolder", L"TempFolder",
-        };
         auto isStandardFolder = [&](const std::wstring& s) {
-            for (const wchar_t* f : kStandardFolders)
-                if (util::iequals(s, f)) return true;
-            return false;
+            return findStandardDir(s) != nullptr;
         };
         auto shortcutDirKey = [&](const std::wstring& raw) {
             if (raw.empty()) return std::wstring(L"INSTALLFOLDER");
             if (isStandardFolder(raw)) {
-                ensureExtraDir(raw, L"TARGETDIR", L".");
+                ensureDirRow(raw, L"TARGETDIR", L".");
                 return raw;
             }
             for (const auto& kv : layout.dirs)
                 if (util::iequals(raw, kv.second.key) || util::iequals(raw, kv.first))
                     return kv.second.key;
             std::wstring key = L"SD" + std::to_wstring(++customDirNo);
-            ensureExtraDir(key, L"INSTALLFOLDER", sanitizeName(raw));
+            ensureDirRow(key, L"INSTALLFOLDER", sanitizeName(raw));
             return key;
         };
 

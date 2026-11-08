@@ -14,6 +14,7 @@
 - **解包 · transform 视图**：`--transform <file.mst>`（可重复）用 `MsiDatabaseApplyTransformW` 在只读句柄上叠加临时视图，`verify` / `info` / `tables` / `schema` / `query` / `list` / `extract` 都读 transform 后的表。
 - **解包 · .msp**：`extract <file.msp>` 分类 `_Streams`（CAB / transform / 原始流），FDI 解出 `payload\`、导出 `transforms\*.mst` 与 `streams\`、写 `manifest.txt`；`--base-msi <file.msi>` 把补丁 transform 应用到目标 MSI 临时视图并在 `layout\` 下按真实目录名还原。
 - **打包**：`pack`，用 FCI 生成 MSZIP CAB 并用 Msi API 建库，产出自包含 MSI；支持 `--name` / `--version` / `--manufacturer` / `--product-code` / `--upgrade-code` / `--platform` / `--language` / `--force` / `--dry-run`。
+- **打包 · 安装位置**：`--install-dir <path>`（清单 `[pack] install-dir`、GUI「基本」页「安装目录」）把源目录映射到指定位置：`App` / `Tools\App` 相对 Program Files，`LocalAppDataFolder\App`、`CommonAppDataFolder\Vendor\App` 等标准目录前缀按其关键目录键展开，中间层自动生成 `Directory` 行；`INSTALLFOLDER` 仍是安装根，`msiexec INSTALLFOLDER=` 依旧可覆盖；绝对路径（含盘符 / UNC）直接报错并提示原因（`Directory.DefaultDir` 中 `:` 是 target:source 分隔符，Windows Installer 会报 2714）。
 - **打包 · 分卷**：`--cab-size`，按未压缩字节把文件切到多个内嵌 CAB（`Media` / `_Streams` 一一对应），`extract` 与 `msiexec /a` 均可还原。
 - **打包 · 大文件**：`--large-files layout|error`，> 2 GiB 的文件以未压缩伴随 layout 文件保存（空 `Cabinet` 的 `Media` 行 + `File.Attributes=8192`），`extract` 从伴随目录复制还原；`error` 恢复直接拒绝。
 - **打包 · 空目录**：默认写 `CreateFolder` 表并在安装 / 管理安装序列里保留 `CreateFolders` 动作，`--no-empty-dirs` 可关闭。

@@ -22,6 +22,16 @@ struct Options {
     std::wstring platform = L"Intel";// "x64" or "Intel"
     int         language = 1033;
 
+    // Install location of the payload, i.e. the directory the source tree is
+    // mapped onto. Accepted forms (case-insensitive):
+    //   ""                         -> ProgramFiles(64)Folder\<ProductName>
+    //   "App" / "Tools\App"       -> relative to ProgramFiles(64)Folder
+    //   "LocalAppDataFolder\App"  -> any standard Windows Installer folder
+    // Absolute paths are not possible: Windows Installer treats ':' in
+    // Directory.DefaultDir as the target:source separator.
+    // Sub-directories below --install-dir still mirror the source tree.
+    std::wstring installDir;
+
     bool        force = false;
     bool        dryRun = false;
     bool        verbose = false;
@@ -57,6 +67,7 @@ struct Options {
     bool        largeFilesSet = false;
     bool        cabSizeSet = false;
     bool        signCertSet = false;
+    bool        installDirSet = false;
 };
 
 struct Stats {

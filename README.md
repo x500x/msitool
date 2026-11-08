@@ -44,7 +44,7 @@
 | 查看 | SummaryInformation、Property、所有表与行数、列定义/类型/主键、任意 MSI SQL 查询 |
 | 导出 | 全部表为 `.idt`、全部 `_Streams` 原始流、`Binary` 条目、`summary.txt`、CAB + `manifest.txt` |
 | 解包 | 还原安装目录树；内嵌 CAB（`_Streams`）、外部 CAB、未压缩 layout、跨 CAB 连续文件（FDI 分卷集）、`.msp` 补丁负载都支持；`--transform` 可查看应用 transform 后的视图；GUI 另提供资源管理器式浏览（目录树 + 文件列表、筛选、右键菜单、双击单文件解包、目录递归解包、自动输出目录） |
-| 打包 | 把目录做成自包含 MSI：FCI 生成一个或多个 MSZIP CAB + Msi API 建库/写流/写摘要，可选分卷、空目录、快捷方式、注册表、服务、环境变量、多 Feature、UI 与数字签名 |
+| 打包 | 把目录做成自包含 MSI：FCI 生成一个或多个 MSZIP CAB + Msi API 建库/写流/写摘要，可选安装位置（`--install-dir`）、分卷、空目录、快捷方式、注册表、服务、环境变量、多 Feature、UI 与数字签名 |
 | 输出 | UTF-8 文本表格或 `--tsv`；控制字符转义为 `\xNN`；警告与详细日志走 stderr |
 | 图形界面 | 纯 Win32 API（user32 / gdi32 / shell32 / ole32）自绘的 Fluent 界面：亮/暗主题、高 DPI、导航、卡片、数据网格、SQL 查询、解包/导出/打包表单、实时日志与进度；**不使用任何第三方库或 UI 框架** |
 
@@ -127,7 +127,7 @@ build\msitool_x64.exe gui setup.msi         :: 启动 GUI 并直接打开一个�
 | SQL 查询 | MSI SQL 编辑器、示例查询、结果网格与耗时 |
 | 解包 | **整页是文件资源管理器**：命令 / 地址栏（后退、前进、上一级、刷新、可点击面包屑、搜索框、解包全部、解包选中、选项、日志）+ 左侧导航树 + 右侧详细信息列表（文件夹与文件混排、图标、类型列、点击表头排序、双击进入目录 / 双击文件解包、右键菜单）；常驻「解包到」位置条可直接编辑路径、点「浏览…」选目录、从「最近」下拉复用历史目录、点「打开」查看，默认自动填 `<包名>_files`；六个开关、MST transform 与基准 MSI 收进可折叠「选项」，运行日志收进可折叠「日志」抽屉（展开后按窗口高度自适应，约占页面 1/3，最大化时更高） |
 | 导出 | CAB / 完整归档两种模式、运行日志 |
-| 打包 | 「基本 / 高级 / 签名」三个标签页，字段按窗口尺寸自适应两列排布；右上角「开始打包」常驻，完成后自动打开新 MSI；文件 / 文件夹可直接拖入（见 [拖放](#拖放)） |
+| 打包 | 「基本 / 高级 / 签名」三个标签页，字段按窗口尺寸自适应两列排布（基本页含源目录、输出 MSI、产品名称、产品版本、安装目录）；右上角「开始打包」常驻，完成后自动打开新 MSI；文件 / 文件夹可直接拖入（见 [拖放](#拖放)） |
 | 验证 | 签名 / `MsiOpenDatabase` / `MsiVerifyPackage` / `_Tables` / 媒体检查报告 |
 | 设置 | 主题、DPI 信息、关于（版本 / 协议 / 可点击项目主页 / 构建信息）与快捷键 |
 
@@ -290,6 +290,7 @@ msitool pack <源目录> <输出.msi> [选项]
 | `--product-code <GUID>` | 随机 GUID | 固定 ProductCode（省略花括号会自动补全） |
 | `--upgrade-code <GUID>` | 随机 GUID | 固定 UpgradeCode |
 | `--platform <x64\|Intel>` | `Intel` | `x64` → `ProgramFiles64Folder` + 64 位组件；`Intel` → `ProgramFilesFolder` |
+| `--install-dir <路径>` | — | 安装位置：留空 = `Program Files\<ProductName>`；`App` / `Tools\App` 相对 Program Files；`LocalAppDataFolder\App` 等标准目录前缀（详见 [安装位置](#安装位置)） |
 | `--language <LCID>` | `1033` | ProductLanguage 与 SummaryInformation Template |
 | `--cab-size <n>[M\|G]` | `0` | 按未压缩字节把文件切到多个内嵌 CAB；`0` = 单 CAB。支持 `64K` / `16M` / `1G` 等后缀 |
 | `--no-empty-dirs` | — | 不写 `CreateFolder` 表，空目录不会在安装时创建 |
@@ -312,6 +313,7 @@ msitool pack C:\payload C:\out\app.msi --name "My App" --version 1.2.3 --platfor
 ```
 Packing 7 file(s) in 4 directory(ies) -> E:\work\winmsi\app.msi
 Product   : My App 1.2.3
+Install   : [ProgramFiles64Folder]\My App
 Codes     : ProductCode={...} UpgradeCode={...}
 Platform  : x64;1033
 Cabinets  : 1 embedded CAB(s), 1 feature(s), 0 empty dir(s), 0 >2 GiB layout file(s)
@@ -334,6 +336,28 @@ msiexec /a app.msi /qn TARGETDIR=C:\out\admin
 - `--cab-size 16`：按**未压缩**输入字节把文件切成多个内嵌 CAB（`cab1.cab`、`cab2.cab`…）。每个 CAB 一条 `Media` 行（`DiskId` / `LastSequence` / `#cabN.cab`），全部写进 `_Streams`；单个文件超过阈值时独占一个 CAB。省略时仍是单 CAB。`extract` 与 `msiexec /a` 都能按 `Media.LastSequence` 还原。
 - 默认写 `CreateFolder` 表，配合已在序列里的 `CreateFolders` 标准动作，源目录里的**空目录**（含嵌套空目录）在安装时也会被创建；`--no-empty-dirs` 可关闭。
 - `File.FileSize` 是 32 位整数，FCI 的 seek 回调也只能表示 32 位偏移，因此 > 2 GiB 的文件无法进 CAB。默认 `--large-files layout`：把它作为**未压缩 layout 文件**写到 MSI 同目录的 `<ProductName>\...` 伴随目录，写一条 `Cabinet` 为空的 `Media` 行和 `File.Attributes=8192`（Noncompressed），`FileSize` 记 0 并给出警告。`extract` 会从该伴随目录复制还原。这类包必须把伴随目录和 MSI 一起分发。`--large-files error` 恢复旧的「直接拒绝」行为。
+
+#### 安装位置
+
+默认把源目录映射到 `Program Files\<ProductName>`：`Directory` 表是 `TARGETDIR` → `ProgramFilesFolder` → `INSTALLFOLDER`（`DefaultDir` = ProductName）→ 源目录层级。`--install-dir` 换掉锚点与名字，`--files` 选择的相对路径仍保持在安装根之下：
+
+| 写法 | 结果 |
+| --- | --- |
+| `--install-dir "My App"` | `[ProgramFilesFolder]\My App`（或 `ProgramFiles64Folder`，跟随 `--platform`） |
+| `--install-dir "Vendor\My App"` | `[ProgramFilesFolder]\Vendor\My App`，中间层各写一行 `Directory`（`ID1`…） |
+| `--install-dir "LocalAppDataFolder\My App"` | `[LocalAppDataFolder]\My App`，适合免管理员/按用户安装 |
+| `--install-dir "CommonAppDataFolder\Vendor\App"` | `[CommonAppDataFolder]\Vendor\App` |
+| `--install-dir "LocalAppDataFolder"` | 直接装进该标准目录（`INSTALLFOLDER` 的 `DefaultDir` 为 `.`） |
+
+标准目录前缀（大小写不敏感）：`ProgramFilesFolder`、`ProgramFiles64Folder`、`CommonFilesFolder`、`CommonFiles64Folder`、`ProgramMenuFolder`、`StartMenuFolder`、`StartupFolder`、`DesktopFolder`、`AppDataFolder`、`LocalAppDataFolder`、`CommonAppDataFolder`、`PersonalFolder`、`SendToFolder`、`TemplatesFolder`、`FavoritesFolder`、`FontsFolder`、`MyPicturesFolder`、`AdminToolsFolder`、`TempFolder`、`WindowsFolder`、`WindowsVolume`、`SystemFolder`、`System64Folder`。
+
+`--install-dir` 只改**打包时的默认值**，`INSTALLFOLDER` 仍是安装根，所以终端用户依旧可以整体搬家：
+
+```bat
+msiexec /i app.msi /qb INSTALLFOLDER="D:\Apps\My App"
+```
+
+**不支持绝对路径**（`D:\Apps\App`、`\\server\share\App` 会直接报错）：`Directory.DefaultDir` 里 `:` 是 target:source 分隔符，带盘符的值会被 Windows Installer 判为 2714「Invalid value for default folder name」。真要固定到某个盘，只能让安装方传 `TARGETDIR=` / `INSTALLFOLDER=`，或改用标准目录前缀。清单 `[pack]` 段同样接受 `install-dir`，命令行同名选项优先。
 
 #### UI
 
@@ -564,6 +588,7 @@ msiexec /a C:\out\app.msi /qn TARGETDIR=C:\out\admin
 | `pack --cab-size 64K`（5 文件） | 3 个内嵌 CAB | 3 条 `Media` 行 + 3 个 `_Streams`；`extract` 全量还原；`msiexec /a` 也解出全部文件 |
 | `pack --config` 全量清单 | 21 张表 | `Feature` 3 / `Shortcut` 2 + `Icon` 1 / `Registry` 2 / `ServiceInstall`+`ServiceControl` / `Environment` / 5 个 `Dialog`；`MsiVerifyPackage` OK，`msiexec /a` 成功 |
 | `pack --ui minimal` | 自包含向导 | 欢迎 / 进度 / 完成 / 取消 / 错误对话框；`msiexec /i /qb` 安装成功 |
+| `pack --install-dir` | 自定义安装位置 | `Tools\MyApp` / `LocalAppDataFolder\My App\Sub` / `CommonAppDataFolder\Vendor\App`：`msiexec /i /qn` 后文件真的落在 `%LocalAppData%\My App\Sub` 等位置，`msiexec /a` 与 `extract` 也同构；`INSTALLFOLDER=` 可再覆盖；绝对路径按预期报错 |
 | `pack --sign-cert`（自签名 PFX） | 已签名 MSI | `\x05DigitalSignature` + `\x05MsiDigitalSignatureEx` 流写入，`MsiVerifyPackage` 仍 OK |
 | `pack`（2.3 GiB 稀疏文件） | 未压缩伴随 layout | `FileSize=0`、`Attributes=8192`、一条空 `Cabinet` 的 `Media` 行；`extract` 从伴随目录完整还原 2,300,000,000 字节 |
 | 纯空目录（0 文件 / 3 目录） | 仅 `CreateFolder` 表 | `MsiVerifyPackage` OK；`msiexec /i` 会真正创建空目录树 |

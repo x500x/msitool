@@ -28,6 +28,7 @@ struct Cli {
     std::wstring              productCode;
     std::wstring              upgradeCode;
     std::wstring              platform = L"Intel";
+    std::wstring              installDir;                // --install-dir
     int                       language = 1033;
     std::wstring              configFile;
     unsigned long long        cabSize = 0;
@@ -42,6 +43,7 @@ struct Cli {
     bool                      largeFilesSet = false;
     bool                      cabSizeSet = false;
     bool                      signCertSet = false;
+    bool                      installDirSet = false;
     std::wstring              baseMsi;                    // extract .msp with a target MSI
     std::vector<std::wstring> transforms;               // --transform (repeatable)
     std::vector<std::wstring> files;                    // --files (repeatable)
@@ -96,6 +98,11 @@ Options:
   --product-code <GUID>    pack: fixed ProductCode (default: random GUID)
   --upgrade-code <GUID>    pack: fixed UpgradeCode (default: random GUID)
   --platform <x64|Intel>   pack: platform (default: Intel)
+  --install-dir <path>     pack: where the payload is installed. "App" or
+                           "Tools\App" is relative to Program Files, and
+                           "LocalAppDataFolder\App" starts from a standard
+                           Windows Installer folder (default:
+                           Program Files\<ProductName>)
   --language <LCID>        pack: ProductLanguage (default: 1033)
   --cab-size <n>[M|G]      pack: split into CABs of ~n MiB (default: one CAB)
   --no-empty-dirs          pack: do not emit CreateFolder rows
@@ -128,6 +135,8 @@ Examples:
   msitool extract update.msp C:\out\patch
   msitool extract update.msp C:\out\patch --base-msi setup.msi
   msitool pack C:\payload C:\out\app.msi --name "My App" --version 1.2.3
+  msitool pack C:\payload C:\out\app.msi --install-dir "LocalAppDataFolder\My App"
+  msitool pack C:\payload C:\out\app.msi --install-dir "Tools\MyApp"
   msitool pack C:\payload C:\out\app.msi --config examples\pack.ini
   msitool pack C:\payload C:\out\app.msi --cab-size 16 --ui minimal
   msitool pack C:\payload C:\out\app.msi --files "app.exe;cfg\app.ini"
@@ -197,7 +206,7 @@ Cli parseCommandLine(int argc, wchar_t** argv) {
         }
         if (a == L"--name" || a == L"--version" || a == L"--manufacturer" ||
             a == L"--product-code" || a == L"--upgrade-code" ||
-            a == L"--platform" || a == L"--language" ||
+            a == L"--platform" || a == L"--language" || a == L"--install-dir" ||
             a == L"--config" || a == L"--cab-size" || a == L"--large-files" ||
             a == L"--ui" || a == L"--sign-cert" || a == L"--sign-password" ||
             a == L"--sign-timestamp" || a == L"--sign-tool") {
@@ -209,6 +218,7 @@ Cli parseCommandLine(int argc, wchar_t** argv) {
             else if (a == L"--product-code") cli.productCode = v;
             else if (a == L"--upgrade-code") cli.upgradeCode = v;
             else if (a == L"--platform") cli.platform = v;
+            else if (a == L"--install-dir") { cli.installDir = v; cli.installDirSet = true; }
             else if (a == L"--config") cli.configFile = v;
             else if (a == L"--cab-size") { cli.cabSize = parseSize(v); cli.cabSizeSet = true; }
             else if (a == L"--large-files") { cli.largeFiles = v; cli.largeFilesSet = true; }
@@ -532,6 +542,8 @@ void cmdPack(const Cli& cli) {
     opt.productCode = cli.productCode;
     opt.upgradeCode = cli.upgradeCode;
     opt.platform = cli.platform;
+    opt.installDir = cli.installDir;
+    opt.installDirSet = cli.installDirSet;
     opt.language = cli.language;
     opt.force = cli.force;
     opt.dryRun = cli.dryRun;
