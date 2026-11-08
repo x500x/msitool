@@ -26,3 +26,7 @@ CMakeUserPresets.json
 *.swp
 Thumbs.db
 Desktop.ini
+
+# Python (tools/)
+__pycache__/
+*.pyc

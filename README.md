@@ -46,7 +46,7 @@
 | 解包 | 还原安装目录树；内嵌 CAB（`_Streams`）、外部 CAB、未压缩 layout、跨 CAB 连续文件（FDI 分卷集）、`.msp` 补丁负载都支持；`--transform` 可查看应用 transform 后的视图；GUI 另提供资源管理器式浏览（目录树 + 文件列表、筛选、右键菜单、双击单文件解包、目录递归解包、自动输出目录） |
 | 打包 | 把目录做成自包含 MSI：FCI 生成一个或多个 MSZIP CAB + Msi API 建库/写流/写摘要，可选安装位置（`--install-dir`）、分卷、空目录、快捷方式、注册表、服务、环境变量、多 Feature、UI 与数字签名 |
 | 输出 | UTF-8 文本表格或 `--tsv`；控制字符转义为 `\xNN`；警告与详细日志走 stderr |
-| 图形界面 | 纯 Win32 API（user32 / gdi32 / shell32 / ole32）自绘的 Fluent 界面：亮/暗主题、高 DPI、导航、卡片、数据网格、SQL 查询、解包/导出/打包表单、实时日志与进度；**不使用任何第三方库或 UI 框架** |
+| 图形界面 | 纯 Win32 API（user32 / gdi32 / shell32 / ole32）自绘的 Fluent 界面：亮/暗主题、高 DPI（Per-Monitor V2，实测 75%–300%，跨显示器热切换会重排布局与列宽）、导航、卡片、数据网格、SQL 查询、解包/导出/打包表单、实时日志与进度；**不使用任何第三方库或 UI 框架** |
 
 ---
 
@@ -475,6 +475,8 @@ MSI SQL 是 SQL 的**子集**（例如没有 `COUNT(*)` 这类聚合函数），
 │   └── main.cpp                 入口：无参数进 GUI，带参数进 CLI（全部命令）
 ├── examples/
 │   └── pack.ini                 打包清单示例（features/shortcuts/registry/services/env）
+├── tools/
+│   └── dpi_probe.py             GUI 高 DPI 截图 / 伪造跨屏切换的验证脚本
 ├── build.bat                    MSVC 构建脚本（x64 / x86 / clean）
 ├── CMakeLists.txt               CMake 构建（MSVC）
 ├── CHANGELOG.md                 变更记录
@@ -578,6 +580,29 @@ msiexec /a C:\out\app.msi /qn TARGETDIR=C:\out\admin
 ```
 
 负向用例也应覆盖：非 MSI 文件、目录、伪造 CFB 头、缺失外部 CAB、中文/空格路径、`--dry-run`、`--force`。详见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+
+### GUI 高 DPI 检查
+
+界面是自绘的，缩放全部来自 `theme().dpi`（`S(px) = MulDiv(px, dpi, 96)`）。单显示器开发机也能验证任意缩放：`MSITOOL_DPI` 环境变量会覆盖进程实际 DPI，`tools/dpi_probe.py` 负责启动窗口、截图（`PrintWindow`），并可**伪造一次显示器切换**（向主窗口发 `WM_DPICHANGED`，wParam 带新 DPI）来走真实的 `WM_DPICHANGED` 代码路径。
+
+```bat
+:: 100% / 150% 同一逻辑尺寸（1160x860）截图，肉眼或工具对比
+python tools\dpi_probe.py --dpi 96  --out shots\p100.bmp
+python tools\dpi_probe.py --dpi 144 --out shots\p150.bmp
+
+:: 跨屏热切换：96 → 144（真实 WM_DPICHANGED 路径），切换前后各一张
+python tools\dpi_probe.py --dpi 96 --transition 144 ^
+    --out shots\switch_before.bmp --out2 shots\switch_after.bmp
+
+:: 往返不漂移：96 → 120 → 96，第三张应与原生 96 截图一致
+python tools\dpi_probe.py --dpi 96 --transition 120,96 --out shots\roundtrip.bmp
+
+:: 先点到「包信息」页再切换（--click 用真实鼠标输入，坐标是 96 DPI 下的客户区逻辑坐标）
+python tools\dpi_probe.py --dpi 96 --click 100,178 --transition 144 ^
+    --out shots\grid_before.bmp --out2 shots\grid_after.bmp
+```
+
+已实测的缩放档位：72 / 96 / 110 / 120 / 144 / 168 / 192 / 240 / 288（75%–300%），均无裁剪、错位或字体截断；窗口 DPI 感知上下文为 `PER_MONITOR_AWARE_V2`（脚本会打印）。
 
 ---
 

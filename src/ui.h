@@ -59,7 +59,9 @@ struct Theme {
            brBg = nullptr, brHead = nullptr;
 
     int s(int px) const noexcept { return MulDiv(px, dpi, 96); }
-    void rebuild(HWND hwnd, bool darkMode);
+    // dpiOverride > 0 uses that DPI instead of the window's (WM_DPICHANGED
+    // carries the new value in wParam; 0 re-queries the window / system).
+    void rebuild(HWND hwnd, bool darkMode, int dpiOverride = 0);
     void dispose() noexcept;
 };
 
@@ -381,6 +383,10 @@ private:
     int scrollY_ = 0, scrollX_ = 0;
     int hoverRow_ = -1, selected_ = -1;
     int headH_ = 0, rowH_ = 0;
+    int  builtDpi_ = 0;              // DPI the current widths_ were fitted for
+    bool autoWidths_ = true;          // widths_ came from auto-fit, not from a caller
+    void fitWidths();                 // (re)compute widths_ for the current DPI
+    void syncDpi();                   // re-fit / rescale after a DPI change
     bool dragging_ = false;
     int  dragStartY_ = 0, dragStartScroll_ = 0;
 

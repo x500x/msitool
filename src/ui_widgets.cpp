@@ -1003,19 +1003,10 @@ int DataGrid::maxScrollX() const {
     return std::max(0, totalWidth() - width() + S(10));
 }
 
-void DataGrid::setData(std::vector<std::wstring> headers,
-                       std::vector<std::vector<std::wstring>> rows,
-                       std::vector<int> widths,
-                       std::vector<Ic> rowIcons) {
-    headers_ = std::move(headers);
-    rows_ = std::move(rows);
-    widths_ = std::move(widths);
-    rowIcons_ = std::move(rowIcons);
-    if (!rowIcons_.empty() && rowIcons_.size() < rows_.size())
-        rowIcons_.resize(rows_.size(), Ic::None);
+void DataGrid::fitWidths() {
     size_t n = headers_.size();
     for (const auto& r : rows_) n = std::max(n, r.size());
-    if (widths_.empty() && n) {
+    if (autoWidths_ && n) {
         HDC dc = GetDC(nullptr);
         widths_.assign(n, S(120));
         for (size_t c = 0; c < n; ++c) {
@@ -1039,6 +1030,41 @@ void DataGrid::setData(std::vector<std::wstring> headers,
             for (int& c : widths_) c += extra;
         }
     }
+    builtDpi_ = theme().dpi;
+}
+
+// The grid stores its geometry in physical pixels (column widths, row height),
+// which is what the hit-testing and painting code needs. Those numbers were
+// however fitted with the *fonts and paddings of the DPI that was active when
+// the data arrived*: after WM_DPICHANGED (window dragged to a monitor with a
+// different scale) they would be far too narrow / too short and every cell
+// would end in an ellipsis. So re-fit as soon as the DPI is seen to change:
+// auto-fitted columns are measured again with the new fonts, while explicit
+// widths (S(230) style constants chosen by the caller) are scaled linearly.
+void DataGrid::syncDpi() {
+    int d = theme().dpi;
+    if (builtDpi_ == 0) { builtDpi_ = d; return; }
+    if (d == builtDpi_) return;
+    if (autoWidths_) {
+        fitWidths();
+    } else {
+        for (int& w : widths_) w = MulDiv(w, d, builtDpi_);
+        builtDpi_ = d;
+    }
+}
+
+void DataGrid::setData(std::vector<std::wstring> headers,
+                       std::vector<std::vector<std::wstring>> rows,
+                       std::vector<int> widths,
+                       std::vector<Ic> rowIcons) {
+    headers_ = std::move(headers);
+    rows_ = std::move(rows);
+    widths_ = std::move(widths);
+    autoWidths_ = widths_.empty();
+    rowIcons_ = std::move(rowIcons);
+    if (!rowIcons_.empty() && rowIcons_.size() < rows_.size())
+        rowIcons_.resize(rows_.size(), Ic::None);
+    fitWidths();
     scrollY_ = scrollX_ = 0;
     hoverRow_ = selected_ = -1;
     invalidate();
@@ -1049,11 +1075,16 @@ void DataGrid::clear() { setData({}, {}, {}); }
 void DataGrid::setColumnWidths(std::vector<int> widths) {
     if (widths.empty()) return;
     widths_ = std::move(widths);
+    autoWidths_ = false;
+    builtDpi_ = theme().dpi;
     invalidate();
 }
 
 void DataGrid::setRect(const RECT& r) {
     Widget::setRect(r);
+    // After the new size is in place: a re-fit at a new DPI distributes the
+    // spare width over the columns and needs the *new* client width.
+    syncDpi();
     // A resize (or a first layout pass with a tiny client area) can leave the
     // old scroll offset pointing past the end; rows would then be skipped and
     // hit-testing would select the wrong row.
@@ -1132,6 +1163,7 @@ void DataGrid::hitTest(int x, int y, int& row) {
 }
 
 void DataGrid::paint(Gfx& g) {
+    syncDpi();
     Theme& t = theme();
     int w = width(), h = height();
     if (w < 4 || h < 4) return;

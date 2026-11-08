@@ -726,9 +726,11 @@ public:
     }
 
     // ---- theme -----------------------------------------------------------
-    void applyTheme() {
+    // dpiOverride > 0 = rebuild for that DPI instead of asking the window:
+    // WM_DPICHANGED passes the new value in its wParam.
+    void applyTheme(int dpiOverride = 0) {
         bool dark = themeMode_ == 1 || (themeMode_ == 2 && systemPrefersDark());
-        theme().rebuild(hwnd_, dark);
+        theme().rebuild(hwnd_, dark, dpiOverride);
         setDwmAttribute(hwnd_, 20 /*DWMWA_USE_IMMERSIVE_DARK_MODE*/, dark ? 1 : 0);
         for (auto& w : widgets_) { w->onThemeChanged(); w->invalidate(); }
         if (toastView_) { toastView_->onThemeChanged(); toastView_->invalidate(); }
@@ -955,8 +957,6 @@ public:
             toast(L"已复制当前表格为 TSV", 3);
         });
         gridInfo_ = add<DataGrid>(PgInfo);
-        gridInfo_->rowHeightPx = S(28);   // denser: more rows visible at once
-        gridInfo_->headHeightPx = S(32);
         gridInfo_->selectionChanged = [this](int row) { updateInfoDetail(row); };
 
         // ---- Tables -------------------------------------------------------
@@ -1036,7 +1036,6 @@ public:
         gridBrowseDirs_ = add<DataGrid>(PgExtract);
         gridBrowseDirs_->headerVisible = false;
         gridBrowseDirs_->rounded = false;
-        gridBrowseDirs_->rowHeightPx = S(28);
         gridBrowseDirs_->headHeightPx = 0;
         gridBrowseDirs_->selectionChanged = [this](int row) {
             if (!suppressTreeSel_ && row >= 0 &&
@@ -1052,8 +1051,6 @@ public:
         // Details view (right pane).
         gridBrowseFiles_ = add<DataGrid>(PgExtract);
         gridBrowseFiles_->rounded = false;
-        gridBrowseFiles_->rowHeightPx = S(28);
-        gridBrowseFiles_->headHeightPx = S(32);
         gridBrowseFiles_->selectionChanged = [this](int row) { onBrowseRowSelected(row); };
         gridBrowseFiles_->rowActivated = [this](int row) { activateBrowseRow(row); };
         gridBrowseFiles_->headerClicked = [this](int col) { sortBy(col); };
@@ -1249,9 +1246,17 @@ public:
     }
 
     void layout() {
+        if (!gridHome_) return;   // WM_SIZE can arrive before onCreate() ran
         cards_.clear();
         labels_.clear();
         bars_.clear();
+        // Dense read-only grids. Re-applied on every layout pass (instead of
+        // once in buildWidgets) so WM_DPICHANGED rescales them like the rest.
+        gridInfo_->rowHeightPx = S(28);
+        gridInfo_->headHeightPx = S(32);
+        gridBrowseDirs_->rowHeightPx = S(28);
+        gridBrowseFiles_->rowHeightPx = S(28);
+        gridBrowseFiles_->headHeightPx = S(32);
         Base b = baseLayout();
         Theme& t = theme();
         int cap = S(40), navW = S(216), statusH = S(34);
@@ -3734,9 +3739,12 @@ public:
             if (wp != SIZE_MINIMIZED) layout();
             return 0;
         case WM_DPICHANGED: {
-            theme().rebuild(hwnd_, theme().dark);
-            for (auto& w : widgets_) w->onThemeChanged();
-            applyTheme();
+            // wParam carries the new DPI (LOWORD = x, HIWORD = y); trust it
+            // rather than re-querying the window, which is also what lets a
+            // synthetic message exercise this path in tests.
+            int newDpi = HIWORD(wp);
+            if (newDpi < 72 || newDpi > 480) newDpi = 0;   // 0 = ask the window
+            applyTheme(newDpi);
             auto* suggested = reinterpret_cast<RECT*>(lp);
             if (suggested)
                 SetWindowPos(hwnd_, nullptr, suggested->left, suggested->top,

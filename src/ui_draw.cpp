@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cwchar>
 
 namespace ui {
@@ -62,10 +63,10 @@ void Theme::dispose() noexcept {
     brCard = brControl = brAccent = brBg = brHead = nullptr;
 }
 
-void Theme::rebuild(HWND hwnd, bool darkMode) {
+void Theme::rebuild(HWND hwnd, bool darkMode, int dpiOverride) {
     dispose();
     dark = darkMode;
-    dpi = systemDpi(hwnd);
+    dpi = dpiOverride > 0 ? dpiOverride : systemDpi(hwnd);
 
     if (!dark) {
         bgTop        = RGB(247, 249, 252);
@@ -162,6 +163,16 @@ void Theme::rebuild(HWND hwnd, bool darkMode) {
 }
 
 int systemDpi(HWND hwnd) {
+    // QA hook: "MSITOOL_DPI=144" renders the whole UI at 144 DPI (150%) even on
+    // a 100% display, so layout and scaling can be checked / screenshot-tested
+    // on a single-DPI machine. Out-of-range values are ignored.
+    wchar_t forced[16]{};
+    DWORD n = GetEnvironmentVariableW(L"MSITOOL_DPI", forced, 16);
+    if (n > 0 && n < 16) {
+        int v = _wtoi(forced);
+        if (v >= 72 && v <= 480) return v;
+    }
+
     using Fn = UINT(WINAPI*)(HWND);
     auto fn = reinterpret_cast<Fn>(
         GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetDpiForWindow"));
