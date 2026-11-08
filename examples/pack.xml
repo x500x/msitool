@@ -13,8 +13,8 @@
 <msitool xmlns="https://msitool.dev/schema/pack/v1" minVersion="1">
 
   <pack name="My App" version="1.2.3" manufacturer="Acme" platform="x64"
-        language="1033" ui="wizard" cabSize="16M" largeFiles="layout"
-        keepEmptyDirs="true"/>
+        language="1033" scope="perMachine" ui="wizard" cabSize="16M"
+        largeFiles="layout" keepEmptyDirs="true"/>
 
   <features>
     <feature id="Core" title="Core files" description="The application binaries" dirs="bin" level="1"/>

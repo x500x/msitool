@@ -556,8 +556,8 @@ const wchar_t* kSchema[] = {
     // Metadata table used by the Windows Installer validation tools (ICE /
     // msival2). msiexec itself does not need it, but without it smoke.exe
     // cannot build its temporary _ICESequence table.
-    L"CREATE TABLE `_Validation` (`Table` CHAR(64) NOT NULL, `Column` CHAR(64) NOT NULL, "
-    L"`Nullable` CHAR(4), `MinValue` LONG, `MaxValue` LONG, `KeyTable` CHAR(64), "
+    L"CREATE TABLE `_Validation` (`Table` CHAR(32) NOT NULL, `Column` CHAR(32) NOT NULL, "
+    L"`Nullable` CHAR(4) NOT NULL, `MinValue` LONG, `MaxValue` LONG, `KeyTable` CHAR(255), "
     L"`KeyColumn` SHORT, `Category` CHAR(32), `Set` CHAR(255), `Description` CHAR(255) "
     L"PRIMARY KEY `Table`, `Column`)",
 };
@@ -704,6 +704,47 @@ const SequenceAction kUiSequenceBasic[] = {
     {L"ExecuteAction", 1300},
 };
 
+// Fills _Validation with column metadata derived from the DDL we executed.
+// Windows Installer itself does not need the table, but ICE / smoke.exe use it
+// to learn column types before running the consistency evaluators.
+void insertValidationRows(MSIHANDLE db, const std::vector<std::wstring>& ddls) {
+    for (const std::wstring& ddl : ddls) {
+        const std::wstring prefix = L"CREATE TABLE `";
+        size_t p = ddl.find(prefix);
+        if (p == std::wstring::npos) continue;
+        size_t nameStart = p + prefix.size();
+        size_t nameEnd = ddl.find(L'`', nameStart);
+        if (nameEnd == std::wstring::npos) continue;
+        std::wstring table = ddl.substr(nameStart, nameEnd - nameStart);
+
+        size_t lp = ddl.find(L'(', nameEnd);
+        size_t rp = ddl.rfind(L')');
+        if (lp == std::wstring::npos || rp == std::wstring::npos || rp <= lp) continue;
+        std::wstring body = ddl.substr(lp + 1, rp - lp - 1);
+        size_t pk = body.find(L"PRIMARY KEY");
+        std::wstring cols = pk == std::wstring::npos ? body : body.substr(0, pk);
+
+        size_t pos = 0;
+        while (pos <= cols.size()) {
+            size_t comma = cols.find(L',', pos);
+            std::wstring part = util::trim(cols.substr(
+                pos, comma == std::wstring::npos ? std::wstring::npos : comma - pos));
+            pos = comma == std::wstring::npos ? cols.size() + 1 : comma + 1;
+            if (part.empty() || part.front() != L'`') continue;
+            size_t close = part.find(L'`', 1);
+            if (close == std::wstring::npos) continue;
+            std::wstring column = part.substr(1, close - 1);
+            std::wstring rest = part.substr(close + 1);
+            bool nullable = rest.find(L"NOT NULL") == std::wstring::npos;
+            insertRow(db, L"_Validation",
+                      {L"Table", L"Column", L"Nullable", L"MinValue", L"MaxValue",
+                       L"KeyTable", L"KeyColumn", L"Category", L"Set", L"Description"},
+                      {S(table), S(column), S(nullable ? L"Y" : L"N"), Null(), Null(),
+                       Null(), Null(), Null(), Null(), Null()});
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Signing (optional, uses signtool.exe from the Windows SDK)
 // ---------------------------------------------------------------------------
@@ -810,6 +851,7 @@ void applyManifest(Options& o, const Manifest& m) {
     if (!o.upgradeCodeSet && !m.pack.upgradeCode.empty())
         o.upgradeCode = m.pack.upgradeCode;
     if (!o.platformSet && !m.pack.platform.empty()) o.platform = m.pack.platform;
+    if (!o.scopeSet && !m.pack.scope.empty()) o.scope = m.pack.scope;
     if (!o.languageSet && m.pack.hasLanguage) o.language = m.pack.language;
     if (!o.installDirSet && o.installDir.empty() && !m.pack.installDir.empty())
         o.installDir = m.pack.installDir;
@@ -946,8 +988,15 @@ Stats pack(const Options& opt) {
     std::wstring platform = o.platform;
     if (!util::iequals(platform, L"x64") && !util::iequals(platform, L"Intel"))
         util::fail(L"--platform must be x64 or Intel: " + platform);
+    std::wstring scope = util::toLower(util::trim(o.scope));
+    if (scope.empty()) scope = L"permachine";
+    if (scope != L"permachine" && scope != L"peruser")
+        util::fail(L"scope must be perMachine or perUser: " + o.scope);
+    const bool perUser = scope == L"peruser";
     const std::wstring rootDirKey =
-        util::iequals(platform, L"x64") ? L"ProgramFiles64Folder" : L"ProgramFilesFolder";
+        perUser ? std::wstring(L"LocalAppDataFolder")
+                : (util::iequals(platform, L"x64") ? L"ProgramFiles64Folder"
+                                                    : L"ProgramFilesFolder");
     const InstallTarget installTarget =
         parseInstallTarget(o.installDir, rootDirKey, productName);
     if (installTarget.chain[0].key == L"ProgramFiles64Folder" &&
@@ -1098,7 +1147,8 @@ Stats pack(const Options& opt) {
     util::outLine(L"Product   : " + productName + L" " + o.version);
     util::outLine(L"Install   : " + installTarget.display);
     util::outLine(L"Codes     : ProductCode=" + productCode + L" UpgradeCode=" + upgradeCode);
-    util::outLine(L"Platform  : " + platform + L";" + std::to_wstring(o.language));
+    util::outLine(L"Platform  : " + platform + L";" + std::to_wstring(o.language) +
+                  (perUser ? L";per-user" : L";per-machine"));
     util::outLine(util::fmt(L"Cabinets  : %llu embedded CAB(s), %llu feature(s), "
                             L"%llu empty dir(s), %llu >2 GiB layout file(s)",
                             static_cast<unsigned long long>(st.cabinets),
@@ -1155,13 +1205,18 @@ Stats pack(const Options& opt) {
                        L"MsiOpenDatabaseW(create) " + outMsi);
         MSIHANDLE h = db.get();
 
-        for (const wchar_t* ddl : kSchema) execSql(h, ddl);
+        std::vector<std::wstring> executedDdl;
+        for (const wchar_t* ddl : kSchema) {
+            execSql(h, ddl);
+            executedDdl.push_back(ddl);
+        }
         std::unordered_set<std::wstring> created;
         auto create = [&](const wchar_t* table) {
             if (!created.insert(util::toLower(table)).second) return;
             for (const ExtraTable& t : kExtraTables) {
                 if (util::iequals(t.name, table)) {
                     execSql(h, t.ddl);
+                    executedDdl.push_back(t.ddl);
                     return;
                 }
             }
@@ -1192,6 +1247,8 @@ Stats pack(const Options& opt) {
         if (uiTables.error) create(L"Error");
         if (uiTables.checkBox) create(L"CheckBox");
         if (uiTables.billboard) { create(L"Billboard"); create(L"BBControl"); }
+
+        insertValidationRows(h, executedDdl);
 
         // Directory table.
         std::unordered_set<std::wstring> knownDirs;
@@ -1375,7 +1432,7 @@ Stats pack(const Options& opt) {
                       {S(comp), S(newGuid()), S(dirKey), I(compAttrs | 4), Null(), S(reg)});
             insertRow(h, L"Registry",
                       {L"Registry", L"Root", L"Key", L"Name", L"Value", L"Component_"},
-                      {S(reg), I(2), S(L"Software\\msitool\\ShortcutFolders"),
+                      {S(reg), I(perUser ? 1 : 2), S(L"Software\\msitool\\ShortcutFolders"),
                        S(reg), S(L"1"), S(comp)});
             insertRow(h, L"FeatureComponents", {L"Feature_", L"Component_"},
                       {S(feature), S(comp)});
@@ -1607,7 +1664,9 @@ Stats pack(const Options& opt) {
         prop(L"Manufacturer", o.manufacturer);
         prop(L"ProductLanguage", std::to_wstring(o.language));
         prop(L"INSTALLLEVEL", L"1");
-        prop(L"ALLUSERS", L"1");
+        // Per-machine installs set ALLUSERS=1; per-user installs leave it
+        // unset so msiexec installs into the user profile (WiX does the same).
+        if (!perUser) prop(L"ALLUSERS", L"1");
         if (!installTarget.pinned.empty()) prop(L"INSTALLFOLDER", installTarget.pinned);
 
         // Execute sequences.

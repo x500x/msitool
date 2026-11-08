@@ -8,8 +8,10 @@
 > - 清单解析使用 MSXML6，禁用 DTD / 外部实体（XXE）。
 > - 内置向导以 RCDATA 嵌入 `resources/ui/`，`--dump-ui` 可导出。
 > - GUI 的快捷方式编辑器采用“每行一条”的多行文本框（而非表格控件），字段与 XML 一致。
-> - `_Validation` 表为空：`msiexec` / `MsiVerifyPackage` 不受影响；WiX `smoke.exe` 依赖验证元数据，可能无法跑完全部 ICE。
+> - `_Validation` 已写入列元数据；`msiexec` / `MsiVerifyPackage` 不受影响；WiX `smoke.exe` 合并 `darice.cub` 时仍会在 `_ICESequence` 上报错（其加载方式，非包结构问题）。
 > - `AdminExecuteSequence` 未包含 `CreateFolders`（该动作不允许出现在此序列）。
+> - 安装范围已支持 per-user / per-machine（`--per-user` / `<pack scope>`），per-user 的子菜单 keypath 组件改用 HKCU；`ALLUSERS=1` 仅在 per-machine 下写入。
+> - 真实 UI 已自动化走查：`tools/ui_walkthrough.py`（install / repair / remove，en / zh-CN，per-user）。
 
 ---
 

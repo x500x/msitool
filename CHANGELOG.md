@@ -8,6 +8,9 @@
 
 ### Added
 
+- **打包 · 安装范围**：`--per-user` / `--all-users`（或清单 `<pack scope="perUser">`）切换 per-user / per-machine；per-user 不写 `ALLUSERS`，默认装到 `LocalAppDataFolder\<产品名>`，快捷方式与子菜单目录的 keypath 组件改用 HKCU；GUI「高级」页新增「安装范围」下拉。实测 `msiexec /i /qn` 后文件、桌面 / 开始菜单快捷方式落在当前用户，`/x` 完整清理。
+- **打包 · `_Validation` 元数据**：数据库提交前根据已执行的 DDL 写入 `_Validation` 列元数据（表 / 列 / Nullable），方便 ICE 类工具读取列类型（`_Validation` 表结构改为与 WiX 一致）。
+- **测试 · 向导自动走查**：新增 `tools/ui_walkthrough.py`，用真实 `msiexec /i`（per-user，无需管理员）驱动 Windows Installer 对话框：欢迎 → 许可（校验 Next 先禁用、勾选后启用）→ 目标文件夹（打开并取消 BrowseDlg）→ 确认 → 安装 → 完成，然后校验负载并 `/x` 卸载；`--mode repair` / `--mode remove` 先静默安装再驱动维护向导的修复 / 删除；en / zh-CN 均已实测通过。`tools/pack_regression.ps1` 新增 per-user 用例，并在装有 Python 时跑 install / repair / remove / zh-CN 四轮走查。
 - **打包 · XML 清单（破坏性）**：`--config` 改为只接受 XML（根 `<msitool>`，命名空间 `https://msitool.dev/schema/pack/v1`），覆盖 `<pack>` / `<features>` / `<shortcuts>` / `<registry>` / `<services>` / `<environment>` / `<sign>` / `<ui>`；删除 INI 解析器，传 `.ini` 会报错并指向 `examples/pack.xml`。新增 `examples/pack.xml` 与 `examples/ui-custom.xml`。
 - **打包 · 内置多页向导**：`--ui wizard` 生成 12 个对话框（欢迎 / 许可 / 目标文件夹 + BrowseDlg / 确认 / 进度 / 完成 / 取消 / 错误 / 维护欢迎 / 维护类型），许可页用 `ScrollableText` + `CheckBox` + `ControlCondition`，目录页用 `PathEdit` + `DirectoryList` / `DirectoryCombo`（`_BrowseProperty` + `Indirect`），维护模式用 `Installed` / `NOT Installed` 条件切换，修复 / 删除走 `Reinstall All` / `Remove All`；中英两套文案与字体（`--ui-locale`，1033 → en，2052 / 1028 → zh-CN）；`--dump-ui <dir>` 导出内置 XML / EULA / banner / background。
 - **打包 · UI 模板**：`--ui-template <msi>` 读取现有包的 `Dialog` / `Control` / `ControlEvent` / `ControlCondition` / `CheckBox` / `RadioButton` / `ComboBox` / `ListBox` / `ListView` / `TextStyle` / `Binary` / `Error` / `Billboard` / `BBControl` 与 `InstallUISequence` / `AdminUISequence`，只保留标准动作；非标准 `DoAction`（如 `WixUIValidatePath` / `WixUIPrintEula`）丢弃并告警。

@@ -35,6 +35,7 @@
     <xs:attribute name="platform" type="xs:string"/>
     <xs:attribute name="language" type="xs:integer"/>
     <xs:attribute name="installDir" type="xs:string"/>
+    <xs:attribute name="scope" type="xs:string"/>
     <xs:attribute name="ui" type="xs:string"/>
     <xs:attribute name="cabSize" type="xs:string"/>
     <xs:attribute name="largeFiles" type="xs:string"/>

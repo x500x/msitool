@@ -47,7 +47,7 @@ struct SignDef {
 
 struct PackDef {
     std::wstring name, version, manufacturer, productCode, upgradeCode;
-    std::wstring platform, installDir, ui, largeFiles;
+    std::wstring platform, installDir, ui, largeFiles, scope;
     int          language = 0;
     bool         hasLanguage = false;
     unsigned long long cabSize = 0;

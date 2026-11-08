@@ -31,6 +31,7 @@ struct Cli {
     std::wstring              productCode;
     std::wstring              upgradeCode;
     std::wstring              platform = L"Intel";
+    std::wstring              scope = L"perMachine";   // --per-user
     std::wstring              installDir;                // --install-dir
     int                       language = 1033;
     std::wstring              configFile;
@@ -57,6 +58,7 @@ struct Cli {
     bool                      productCodeSet = false;
     bool                      upgradeCodeSet = false;
     bool                      platformSet = false;
+    bool                      scopeSet = false;
     bool                      languageSet = false;
     std::wstring              baseMsi;                    // extract .msp with a target MSI
     std::vector<std::wstring> transforms;               // --transform (repeatable)
@@ -112,6 +114,9 @@ Options:
   --product-code <GUID>    pack: fixed ProductCode (default: random GUID)
   --upgrade-code <GUID>    pack: fixed UpgradeCode (default: random GUID)
   --platform <x64|Intel>   pack: platform (default: Intel)
+  --per-user               pack: per-user install (no ALLUSERS, defaults to
+                           LocalAppDataFolder\<ProductName>)
+  --all-users              pack: per-machine install (default, ALLUSERS=1)
   --install-dir <path>     pack: where the payload is installed. "App" or
                            "Tools\App" is relative to Program Files,
                            "LocalAppDataFolder\App" starts from a standard
@@ -212,6 +217,8 @@ Cli parseCommandLine(int argc, wchar_t** argv) {
         if (a == L"--keep-temp") { cli.keepTemp = true; continue; }
         if (a == L"--force") { cli.force = true; continue; }
         if (a == L"--no-empty-dirs") { cli.keepEmptyDirs = false; continue; }
+        if (a == L"--per-user") { cli.scope = L"perUser"; cli.scopeSet = true; continue; }
+        if (a == L"--all-users") { cli.scope = L"perMachine"; cli.scopeSet = true; continue; }
         if (a == L"--desktop-shortcut") { cli.desktopShortcut = true; continue; }
         if (a == L"--start-menu-shortcut") { cli.startMenuShortcut = true; continue; }
         if (a == L"--transform" || a == L"--base-msi" || a == L"--files") {
@@ -571,6 +578,7 @@ void cmdPack(const Cli& cli) {
     opt.productCode = cli.productCode;
     opt.upgradeCode = cli.upgradeCode;
     opt.platform = cli.platform;
+    opt.scope = cli.scope;
     opt.installDir = cli.installDir;
     opt.installDirSet = cli.installDirSet;
     opt.language = cli.language;
@@ -602,6 +610,7 @@ void cmdPack(const Cli& cli) {
     opt.productCodeSet = cli.productCodeSet;
     opt.upgradeCodeSet = cli.upgradeCodeSet;
     opt.platformSet = cli.platformSet;
+    opt.scopeSet = cli.scopeSet;
     opt.languageSet = cli.languageSet;
     pack::pack(opt);
 }

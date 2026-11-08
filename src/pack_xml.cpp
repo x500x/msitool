@@ -104,7 +104,7 @@ void parsePack(const xml::Node& n, Manifest& m) {
     const std::wstring ctx = L"pack";
     checkAttrs(n, {L"name", L"version", L"manufacturer", L"productCode",
                    L"upgradeCode", L"platform", L"language", L"installDir",
-                   L"ui", L"cabSize", L"largeFiles", L"keepEmptyDirs"},
+                   L"scope", L"ui", L"cabSize", L"largeFiles", L"keepEmptyDirs"},
                ctx);
     m.pack.name = n.attr(L"name");
     m.pack.version = n.attr(L"version");
@@ -113,6 +113,7 @@ void parsePack(const xml::Node& n, Manifest& m) {
     m.pack.upgradeCode = n.attr(L"upgradeCode");
     m.pack.platform = n.attr(L"platform");
     m.pack.installDir = n.attr(L"installDir");
+    m.pack.scope = n.attr(L"scope");
     m.pack.ui = n.attr(L"ui");
     m.pack.largeFiles = n.attr(L"largeFiles");
     if (n.has(L"language")) {

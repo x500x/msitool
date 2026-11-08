@@ -627,6 +627,7 @@ public:
     TextBox* tbCabSize_ = nullptr;
     TextBox* tbConfig_ = nullptr;      Button* btnConfigBrowse_ = nullptr;
     DropDown* ddLargeFiles_ = nullptr;
+    DropDown* ddScope_ = nullptr;
     TextBox* tbSignCert_ = nullptr;    Button* btnSignCertBrowse_ = nullptr;
     TextBox* tbSignPassword_ = nullptr;
     TextBox* tbSignTime_ = nullptr;
@@ -1159,6 +1160,8 @@ public:
                                           L"选择清单", L"XML 清单", L"*.xml"); });
         ddLargeFiles_ = add<DropDown>(PgPack);
         ddLargeFiles_->setItems({L"layout（>2GiB 作为伴随文件）", L"error（拒绝大文件）"});
+        ddScope_ = add<DropDown>(PgPack);
+        ddScope_->setItems({L"per-machine（所有用户）", L"per-user（当前用户）"});
         tbSignCert_ = makeText(PgPack, L"可选：.pfx 代码签名证书");
         btnSignCertBrowse_ = makeButton(PgPack, L"浏览", Ic::Folder, false,
                                         [this] { browseFileFor(tbSignCert_, false,
@@ -1183,7 +1186,7 @@ public:
         tag(0, {tbSrcDir_, btnSrcBrowse_, tbOutMsi_, btnOutMsiBrowse_,
                 tbName_, tbVersion_, tbManufacturer_, ddPlatform_,
                 tbLanguage_, ddUi_, tbInstallDir_});
-        tag(1, {tbCabSize_, tbConfig_, btnConfigBrowse_, ddLargeFiles_,
+        tag(1, {tbCabSize_, tbConfig_, btnConfigBrowse_, ddLargeFiles_, ddScope_,
                 tbUiTemplate_, btnUiTemplateBrowse_, tbUiLocale_,
                 chkForce_, chkPackDry_, chkPackVerbose_, chkEmptyDirs_});
         tag(2, {tbSignCert_, btnSignCertBrowse_, tbSignPassword_, tbSignTime_});
@@ -1665,7 +1668,7 @@ public:
         int leftX = form.left + padX;
         int rightX = leftX + colW + colGap;
         const int headerPad = S(58);
-        const int rows = (packTab_ == 0 || packTab_ == 3) ? 5 : 4;
+        const int rows = packTab_ == 2 ? 4 : 5;
         int usable = std::max(S(120), H(form) - headerPad - S(16));
         int rowH = std::min(S(76), std::max(S(34), usable / rows));
         int labelH = S(18);
@@ -1711,7 +1714,7 @@ public:
             field(1, 0, L"UI 模板 (.msi)", tbUiTemplate_, btnUiTemplateBrowse_);
             field(1, 1, L"UI 语言", tbUiLocale_, nullptr);
             field(0, 2, L"大文件处理", ddLargeFiles_, nullptr);
-            note(0, 3, 1, L"留空表示单个 CAB；支持 16M / 1G 等形式。清单可描述 Feature、快捷方式、注册表、服务、UI 与环境变量。");
+            field(0, 3, L"安装范围", ddScope_, nullptr);
             int cbw = colW / 2 - S(6);
             int cbh = std::max(S(18), std::min(S(30), rowH / 2 - S(2)));
             int cby = form.top + headerPad + rowH * 2;
@@ -1719,6 +1722,7 @@ public:
             chkPackDry_->setRect(R(rightX + colW / 2, cby, cbw, cbh));
             chkPackVerbose_->setRect(R(rightX, cby + cbh, cbw, cbh));
             chkEmptyDirs_->setRect(R(rightX + colW / 2, cby + cbh, cbw, cbh));
+            note(0, 4, 1, L"留空表示单个 CAB；支持 16M / 1G。per-user 默认装到 LocalAppDataFolder\\<产品名>，并省略 ALLUSERS。");
             note(1, 2, 1, L"UI 模板会替换内置向导；UI 语言 auto = 跟随 --language。");
         } else if (packTab_ == 3) {
             field(0, 0, L"主程序（留空自动识别）", tbMainExe_, nullptr);
@@ -3239,6 +3243,8 @@ public:
         if (o.manufacturer.empty()) o.manufacturer = L"msitool";
         o.platform = ddPlatform_->index == 1 ? L"x64" : L"Intel";
         o.platformSet = true;
+        o.scope = ddScope_->index == 1 ? L"perUser" : L"perMachine";
+        o.scopeSet = true;
         o.language = _wtoi(tbLanguage_->value().c_str());
         if (o.language <= 0) o.language = 1033;
         o.languageSet = true;

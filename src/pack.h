@@ -21,6 +21,8 @@ struct Options {
     std::wstring productCode;      // empty => generate a GUID
     std::wstring upgradeCode;      // empty => generate a GUID
     std::wstring platform = L"Intel";// "x64" or "Intel"
+    // "perMachine" (ALLUSERS=1) or "perUser" (no ALLUSERS, LocalAppData).
+    std::wstring scope = L"perMachine";
     int         language = 1033;
 
     // Install location of the payload, i.e. the directory the source tree is
@@ -76,6 +78,7 @@ struct Options {
     // True when the corresponding value came from the command line (manifest
     // values are only defaults, never override explicit CLI options).
     bool        uiSet = false;
+    bool        scopeSet = false;
     bool        largeFilesSet = false;
     bool        cabSizeSet = false;
     bool        signCertSet = false;

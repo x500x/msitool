@@ -49,6 +49,8 @@ Invoke-Pack "none" @("--ui", "none") | Out-Null
 Invoke-Pack "custom" @("--config", "examples\ui-custom.xml") | Out-Null
 Invoke-Pack "manifest" @("--config", "examples\pack.xml") | Out-Null
 Invoke-Pack "shortcuts" @("--ui", "wizard", "--desktop-shortcut", "--start-menu-shortcut") | Out-Null
+Invoke-Pack "peruser" @("--ui", "wizard", "--per-user", "--desktop-shortcut", "--start-menu-shortcut") | Out-Null
+Invoke-Pack "peruser_zh" @("--ui", "wizard", "--per-user", "--language", "2052", "--name", "Reg peruser zh") | Out-Null
 
 $wix = Join-Path ${env:ProgramFiles(x86)} "WiX Toolset v3.14\bin\dark.exe"
 if (Test-Path $wix) {
@@ -60,6 +62,22 @@ if (Test-Path $wix) {
     Write-Host "   OK (no dark.exe table warnings)"
 } else {
     Write-Host "== dark.exe not installed, skipped"
+}
+
+if (Get-Command python -ErrorAction SilentlyContinue) {
+    Write-Host "== UI walkthrough (per-user, real dialogs)"
+    $per = Join-Path $Work "peruser.msi"
+    $perZh = Join-Path $Work "peruser_zh.msi"
+    python tools\ui_walkthrough.py --msi $per
+    if ($LASTEXITCODE -ne 0) { throw "UI walkthrough failed (install)" }
+    python tools\ui_walkthrough.py --msi $per --mode repair
+    if ($LASTEXITCODE -ne 0) { throw "UI walkthrough failed (repair)" }
+    python tools\ui_walkthrough.py --msi $per --mode remove
+    if ($LASTEXITCODE -ne 0) { throw "UI walkthrough failed (remove)" }
+    python tools\ui_walkthrough.py --msi $perZh --language zh-CN "--install-dir" (Join-Path $env:LOCALAPPDATA "Reg peruser zh")
+    if ($LASTEXITCODE -ne 0) { throw "UI walkthrough failed (zh-CN)" }
+} else {
+    Write-Host "== python not found, UI walkthrough skipped"
 }
 
 Write-Host "All pack regression checks passed."

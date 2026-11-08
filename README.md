@@ -127,7 +127,7 @@ build\msitool_x64.exe gui setup.msi         :: 启动 GUI 并直接打开一个�
 | SQL 查询 | MSI SQL 编辑器、示例查询、结果网格与耗时 |
 | 解包 | **整页是文件资源管理器**：命令 / 地址栏（后退、前进、上一级、刷新、可点击面包屑、搜索框、解包全部、解包选中、选项、日志）+ 左侧导航树 + 右侧详细信息列表（文件夹与文件混排、图标、类型列、点击表头排序、双击进入目录 / 双击文件解包、右键菜单）；常驻「解包到」位置条可直接编辑路径、点「浏览…」选目录、从「最近」下拉复用历史目录、点「打开」查看，默认自动填 `<包名>_files`；六个开关、MST transform 与基准 MSI 收进可折叠「选项」，运行日志收进可折叠「日志」抽屉（展开后按窗口高度自适应，约占页面 1/3，最大化时更高） |
 | 导出 | CAB / 完整归档两种模式、运行日志 |
-| 打包 | 「基本 / 高级 / 签名 / 快捷方式」四个标签页，字段按窗口尺寸自适应两列排布（基本页含源目录、输出 MSI、产品名称、产品版本、安装目录；高级页含 CAB 分卷、XML 清单、UI 模板与语言；快捷方式页含主程序、桌面 / 开始菜单勾选与额外的逐行快捷方式编辑器）；右上角「开始打包」常驻，完成后自动打开新 MSI；文件 / 文件夹可直接拖入（见 [拖放](#拖放)） |
+| 打包 | 「基本 / 高级 / 签名 / 快捷方式」四个标签页，字段按窗口尺寸自适应两列排布（基本页含源目录、输出 MSI、产品名称、产品版本、安装目录；高级页含 CAB 分卷、XML 清单、UI 模板、UI 语言与安装范围；快捷方式页含主程序、桌面 / 开始菜单勾选与额外的逐行快捷方式编辑器）；右上角「开始打包」常驻，完成后自动打开新 MSI；文件 / 文件夹可直接拖入（见 [拖放](#拖放)） |
 | 验证 | 签名 / `MsiOpenDatabase` / `MsiVerifyPackage` / `_Tables` / 媒体检查报告 |
 | 设置 | 主题、DPI 信息、可自定义快捷键（点击按键框重新录制、Backspace 清除、一键恢复默认）与关于（版本 / 协议 / 可点击项目主页 / 构建信息） |
 
@@ -295,6 +295,7 @@ msitool pack <源目录> <输出.msi> [选项]
 | `--product-code <GUID>` | 随机 GUID | 固定 ProductCode（省略花括号会自动补全） |
 | `--upgrade-code <GUID>` | 随机 GUID | 固定 UpgradeCode |
 | `--platform <x64\|Intel>` | `Intel` | `x64` → `ProgramFiles64Folder` + 64 位组件；`Intel` → `ProgramFilesFolder` |
+| `--per-user` / `--all-users` | `--all-users` | `--per-user`：不写 `ALLUSERS`，默认装到 `LocalAppDataFolder\<ProductName>`，快捷方式落在当前用户的桌面 / 开始菜单；`--all-users`：写 `ALLUSERS=1`，默认 `Program Files`（per-machine） |
 | `--install-dir <路径>` | — | 安装位置：留空 = `Program Files\<ProductName>`；`App` / `Tools\App` 相对 Program Files；`LocalAppDataFolder\App` 等标准目录前缀；`D:\Apps\App` / `\\server\share\App` 绝对路径（`INSTALLFOLDER` 属性钉位）。详见 [安装位置](#安装位置) |
 | `--language <LCID>` | `1033` | ProductLanguage 与 SummaryInformation Template |
 | `--cab-size <n>[M\|G]` | `0` | 按未压缩字节把文件切到多个内嵌 CAB；`0` = 单 CAB。支持 `64K` / `16M` / `1G` 等后缀 |
@@ -334,7 +335,7 @@ MsiVerifyPackage: OK (Windows Installer accepts this package)
 Done      : E:\work\winmsi\app.msi
 ```
 
-基础包含 9 张表：`Directory`、`Component`、`File`、`Media`、`Feature`、`FeatureComponents`、`Property`、`InstallExecuteSequence`、`AdminExecuteSequence`，以及完整 SummaryInformation 和供 ICE / smoke 校验用的空 `_Validation` 表；按需再加 `CreateFolder`、`Shortcut`、`Icon`、`MsiShortcutProperty`、`RemoveFile`、`Registry`、`ServiceInstall`、`ServiceControl`、`Environment`，以及 UI 的 `InstallUISequence` / `AdminUISequence` / `Dialog` / `Control` / `ControlEvent` / `ControlCondition` / `CheckBox` / `RadioButton` / `ComboBox` / `ListBox` / `ListView` / `TextStyle` / `Binary` / `Error` / `Billboard`。因为带 `AdminExecuteSequence`，可以用不写注册表的方式让 Windows Installer 自己验证：
+基础包含 9 张表：`Directory`、`Component`、`File`、`Media`、`Feature`、`FeatureComponents`、`Property`、`InstallExecuteSequence`、`AdminExecuteSequence`，以及完整 SummaryInformation 和写入列元数据的 `_Validation` 表；按需再加 `CreateFolder`、`Shortcut`、`Icon`、`MsiShortcutProperty`、`RemoveFile`、`Registry`、`ServiceInstall`、`ServiceControl`、`Environment`，以及 UI 的 `InstallUISequence` / `AdminUISequence` / `Dialog` / `Control` / `ControlEvent` / `ControlCondition` / `CheckBox` / `RadioButton` / `ComboBox` / `ListBox` / `ListView` / `TextStyle` / `Binary` / `Error` / `Billboard`。因为带 `AdminExecuteSequence`，可以用不写注册表的方式让 Windows Installer 自己验证：
 
 ```bat
 msiexec /a app.msi /qn TARGETDIR=C:\out\admin
@@ -350,7 +351,7 @@ msiexec /a app.msi /qn TARGETDIR=C:\out\admin
 
 #### 安装位置
 
-默认把源目录映射到 `Program Files\<ProductName>`：`Directory` 表是 `TARGETDIR` → `ProgramFilesFolder` → `INSTALLFOLDER`（`DefaultDir` = ProductName）→ 源目录层级。`--install-dir` 换掉锚点与名字，`--files` 选择的相对路径仍保持在安装根之下：
+默认把源目录映射到 `Program Files\<ProductName>`（per-machine）：`Directory` 表是 `TARGETDIR` → `ProgramFilesFolder` → `INSTALLFOLDER`（`DefaultDir` = ProductName）→ 源目录层级。`--per-user` 时锚点换成 `LocalAppDataFolder`，并且不写 `ALLUSERS`（`DesktopFolder` / `ProgramMenuFolder` 随之解析到当前用户）。`--install-dir` 换掉锚点与名字，`--files` 选择的相对路径仍保持在安装根之下：
 
 | 写法 | 结果 |
 | --- | --- |
@@ -544,7 +545,8 @@ MSI SQL 是 SQL 的**子集**（例如没有 `COUNT(*)` 这类聚合函数），
 ├── tools/
 │   ├── dpi_probe.py             GUI 高 DPI 截图 / 伪造跨屏切换的验证脚本
 │   ├── make_ui_art.ps1          生成内置 banner / background / 示例 EULA
-│   └── pack_regression.ps1      打包回归：全部 UI 模式 + verify + /a + dark.exe
+│   ├── pack_regression.ps1      打包回归：全部 UI 模式 + verify + /a + dark.exe
+│   └── ui_walkthrough.py        真实安装向导自动走查（en / zh-CN，per-user）
 ├── build.bat                    MSVC 构建脚本（x64 / x86 / clean）
 ├── CMakeLists.txt               CMake 构建（MSVC）
 ├── CHANGELOG.md                 变更记录
@@ -653,10 +655,19 @@ build\msitool_x64.exe extract update.msp C:\out\patch --base-msi setup.msi
 msiexec /a C:\out\app.msi /qn TARGETDIR=C:\out\admin
 ```
 
-打包侧的一键回归：`tools/pack_regression.ps1` 会自动生成临时载荷，依次打包 `none` / `basic` / `minimal` / `wizard`（中英）/ `custom` / XML 清单 / 快捷方式，逐个 `verify` + `msiexec /a`，并在安装了 WiX 3.x 时用 `dark.exe` 反编译检查表结构告警：
+打包侧的一键回归：`tools/pack_regression.ps1` 会自动生成临时载荷，依次打包 `none` / `basic` / `minimal` / `wizard`（中英）/ `custom` / XML 清单 / 快捷方式 / per-user，逐个 `verify` + `msiexec /a`，并在安装了 WiX 3.x 时用 `dark.exe` 反编译检查表结构告警；若装了 Python，还会跑一遍真实安装向导走查（见下）。
 
 ```bat
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\pack_regression.ps1
+```
+
+真实安装向导走查（per-user，不需管理员，自动安装 + 校验 + 卸载）：
+
+```bat
+python tools\ui_walkthrough.py --msi build\regression\peruser.msi
+python tools\ui_walkthrough.py --msi build\regression\peruser.msi --mode repair
+python tools\ui_walkthrough.py --msi build\regression\peruser.msi --mode remove
+python tools\ui_walkthrough.py --msi build\regression\peruser_zh.msi --language zh-CN
 ```
 
 负向用例也应覆盖：非 MSI 文件、目录、伪造 CFB 头、缺失外部 CAB、中文/空格路径、`--dry-run`、`--force`。详见 [CONTRIBUTING.md](CONTRIBUTING.md)。
@@ -701,6 +712,7 @@ python tools\dpi_probe.py --dpi 96 --click 100,178 --transition 144 ^
 | `pack --cab-size 64K`（5 文件） | 3 个内嵌 CAB | 3 条 `Media` 行 + 3 个 `_Streams`；`extract` 全量还原；`msiexec /a` 也解出全部文件 |
 | `pack --config` 全量清单 | 3 个 Feature + 快捷方式 + 注册表 + 服务 + 环境变量 + 12 页向导 | `Shortcut` 2（桌面 / 开始菜单子目录）+ `Icon` 1 / `Registry` 3 / `ServiceInstall`+`ServiceControl` / `Environment` / `Dialog` 12 / `Control` 80+ / `ControlCondition` / `InstallUISequence` / `Binary` 2；`MsiVerifyPackage` OK，`msiexec /a` 成功 |
 | `pack --ui wizard`（en / zh-CN） | 自包含多页向导 | 欢迎 / 许可 / 目标文件夹 / 浏览 / 确认 / 进度 / 完成 / 取消 / 错误 / 维护共 12 个对话框；`msiexec /a` 成功，`dark.exe` 反编译无表结构告警 |
+| `pack --per-user` | per-user 安装 | 不写 `ALLUSERS`，文件装到 `%LocalAppData%\<产品名>`；`msiexec /i /qn` 后桌面 / 开始菜单快捷方式出现在当前用户（实测 `E:\Desktop\...` 与 `%AppData%\...\Programs\...`），`/x` 卸载后快捷方式与 HKCU 子菜单 keypath 注册表值被删除 |
 | `pack --ui template ref.msi` | 复用 WiX UI 表 | 22 个对话框 + `CheckBox` / `RadioButton` / `Binary` 导入，自定义动作按白名单丢弃并告警 |
 | `pack --install-dir` | 自定义安装位置 | `Tools\MyApp` / `LocalAppDataFolder\My App\Sub` / `CommonAppDataFolder\Vendor\App`：`msiexec /i /qn` 后文件真的落在 `%LocalAppData%\My App\Sub` 等位置，`msiexec /a` 与 `extract` 也同构；绝对路径 `E:\...\MyApp` 通过 `Property` 行钉位，实测装到该目录，命令行 `INSTALLFOLDER=` 可再覆盖，`/a` 与 `extract` 仍还原相对树 |
 | `pack --sign-cert`（自签名 PFX） | 已签名 MSI | `\x05DigitalSignature` + `\x05MsiDigitalSignatureEx` 流写入，`MsiVerifyPackage` 仍 OK |
@@ -749,9 +761,9 @@ python tools\dpi_probe.py --dpi 96 --click 100,178 --transition 144 ^
 **打包**
 
 - 基础形态是单 Feature、单 CAB 的最小包；快捷方式 / 注册表 / 服务 / 环境变量 / 多 Feature / UI / 签名都通过 XML 清单或对应选项按需生成。**不生成自定义动作**：UI 事件里的 `DoAction` 只接受标准动作，导入 UI 模板时未知自定义动作会被丢弃并告警。
-- UI 清单只支持自有 XML（不再支持 INI）；`_Validation` 表为空，`msiexec` / `MsiVerifyPackage` 不受影响，但 WiX `smoke.exe` 这类依赖验证元数据的工具可能无法跑完全部 ICE。
-- 向导的交互流程（点“下一步”触发 `NewDialog`、BrowseDlg 选目录、维护模式修复 / 删除）需要在真实桌面环境手工走查；自动化回归覆盖表结构、`MsiVerifyPackage`、`msiexec /a` 与 `dark.exe` 反编译。
-- `ALLUSERS=1` 写死，快捷方式位置按 per-machine 语义解析（`DesktopFolder` / `ProgramMenuFolder` 指向公共桌面 / 公共开始菜单）；不提供按用户安装或 `MSIINSTALLPERUSER` 开关。
+- UI 清单只支持自有 XML（不再支持 INI）；`_Validation` 已写入各表的列元数据（`msiexec` / `MsiVerifyPackage` 不受影响），但 WiX `smoke.exe` 在把自己的 `darice.cub` 合并进包时仍会在 `_ICESequence` 上报错（与其加载方式有关，非本包结构问题）；此时可用 `dark.exe` 反编译 + `verify` / `msiexec /a` 替代。
+- 向导的交互流程已提供自动化走查：`tools/ui_walkthrough.py` 用真实 `msiexec /i`（per-user，无需管理员）驱动 Windows Installer 对话框——欢迎 → 许可（校验 Next 先禁用、勾选后启用）→ 目标文件夹（打开并取消 BrowseDlg）→ 确认 → 安装 → 完成，然后校验负载并 `/x` 卸载；`--mode repair` / `--mode remove` 会先静默安装再驱动维护向导的修复 / 删除；en / zh-CN 均已实测。
+- 安装范围：默认 per-machine（`ALLUSERS=1`，快捷方式落在公共桌面 / 公共开始菜单）；`--per-user` 或清单 `<pack scope="perUser">` 可改为 per-user（不写 `ALLUSERS`，默认装到 `LocalAppDataFolder\<产品名>`，快捷方式在当前用户，子菜单目录的 keypath 组件改用 HKCU）。已完成 `msiexec /i /qn` + `/x` 的安装 / 卸载实测。
 - 分卷按**未压缩**字节估算，压缩后的 CAB 可能小于或略大于阈值；不生成 CAB 之间的连续文件（一个文件不会跨 CAB 切分）。
 - > 2 GiB 的文件不能进 CAB（`File.FileSize` 是 32 位整数、FCI 的 seek 也是 32 位）：默认以未压缩伴随文件的方式保留，`FileSize` 记 0，安装 / 还原时必须同时分发伴随目录。
 - 数字签名是可选的，需要 Windows SDK 的 `signtool.exe` 与一张代码签名证书；不提供证书管理。
