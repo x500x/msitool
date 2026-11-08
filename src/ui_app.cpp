@@ -393,6 +393,12 @@ public:
         // Don't let the first EDIT grab the initial focus: the cue banner
         // should be visible and no control should look "active" on launch.
         SetFocus(hwnd_);
+        // Force one more non-client calculation before the window becomes
+        // visible. Without this, DWM can draw the stock caption/frame from
+        // the initial WM_NCCALCSIZE pass until a minimize/restore occurs.
+        SetWindowPos(hwnd_, nullptr, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER |
+                     SWP_NOACTIVATE | SWP_FRAMECHANGED);
     }
 
     // ---- theme -----------------------------------------------------------
@@ -1681,20 +1687,24 @@ public:
         }
         case WM_ERASEBKGND:
             return 1;
-        case WM_NCCALCSIZE:
-            if (wp == TRUE) {
-                if (IsZoomed(hwnd_)) {
-                    auto* p = reinterpret_cast<NCCALCSIZE_PARAMS*>(lp);
-                    int b = GetSystemMetrics(SM_CXSIZEFRAME) +
-                            GetSystemMetrics(SM_CXPADDEDBORDER);
-                    p->rgrc[0].left += b;
-                    p->rgrc[0].right -= b;
-                    p->rgrc[0].top += b;
-                    p->rgrc[0].bottom -= b;
-                }
-                return 0;
+        case WM_NCCALCSIZE: {
+            // NEVER let DefWindowProc compute a non-client area. The very
+            // first sizing pass arrives with wParam == FALSE; falling through
+            // there leaves a standard caption bar until the window is
+            // minimized/restored (which recalculates with wParam == TRUE).
+            // Maximized windows need a small inset for DWM's invisible
+            // resize border so the client area stays on screen.
+            if (wp == TRUE && IsZoomed(hwnd_)) {
+                auto* p = reinterpret_cast<NCCALCSIZE_PARAMS*>(lp);
+                int b = GetSystemMetrics(SM_CXSIZEFRAME) +
+                        GetSystemMetrics(SM_CXPADDEDBORDER);
+                p->rgrc[0].left += b;
+                p->rgrc[0].right -= b;
+                p->rgrc[0].top += b;
+                p->rgrc[0].bottom -= b;
             }
-            return DefWindowProcW(hwnd_, msg, wp, lp);
+            return 0;
+        }
         case WM_NCHITTEST: {
             LRESULT hit = DefWindowProcW(hwnd_, msg, wp, lp);
             if (hit != HTCLIENT) return hit;
@@ -1723,8 +1733,18 @@ public:
         }
         case WM_GETMINMAXINFO: {
             auto* mm = reinterpret_cast<MINMAXINFO*>(lp);
-            mm->ptMinTrackSize.x = S(1160);
-            mm->ptMinTrackSize.y = S(860);
+            int minW = S(1160), minH = S(860);
+            // On a high-DPI / small display these scaled values can exceed
+            // the work area. Restoring a minimized window would then grow it
+            // beyond the screen and cover the status bar with the taskbar.
+            RECT work{};
+            if (SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0) &&
+                work.right > work.left && work.bottom > work.top) {
+                minW = std::min(minW, static_cast<int>(work.right - work.left) - S(60));
+                minH = std::min(minH, static_cast<int>(work.bottom - work.top) - S(60));
+            }
+            mm->ptMinTrackSize.x = minW;
+            mm->ptMinTrackSize.y = minH;
             return 0;
         }
         case WM_SIZE:

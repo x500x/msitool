@@ -37,6 +37,8 @@
 - `export` / `cabs` 在正斜杠路径下 `MsiDatabaseExportW` 报 161「路径无效」的问题（入口统一用 `GetFullPathNameW` 规范化）。
 - 盘符根路径（`C:`）的递归建目录处理。
 - `list streams` 对 `_Streams` 的 `Data` 列显示流大小而不是读入全部数据。
+- GUI 窗口首次显示时残留系统标准标题栏 / 边框（此前要最小化再恢复才消失）：`WM_NCCALCSIZE` 在 `wParam == FALSE` 时也返回 0，并在首次显示前用 `SWP_FRAMECHANGED` 强制重算非客户区。
+- GUI 最小尺寸在高 DPI 下超过工作区，恢复窗口时底部被任务栏遮住：最小尺寸改为受工作区限制。
 
 ### Changed
 
