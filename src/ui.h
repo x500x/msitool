@@ -215,6 +215,19 @@ public:
     void  onKey(int vk, bool down) override;
 };
 
+// Inline hyperlink: underlined accent text with a hand cursor. `url` is
+// opened with ShellExecuteW("open") on click / Enter / Space.
+class Link : public Widget {
+public:
+    std::wstring text;
+    std::wstring url;
+    bool  mono = false;          // use the monospace face (for key/value rows)
+    void  paint(Gfx& g) override;
+    void  onClick() override;
+    void  onKey(int vk, bool down) override;
+    LRESULT message(UINT msg, WPARAM wp, LPARAM lp, bool& handled) override;
+};
+
 class Check : public Widget {
 public:
     enum class Style { Box, Switch };

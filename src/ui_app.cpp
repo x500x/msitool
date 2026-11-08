@@ -18,6 +18,19 @@
 namespace ui {
 namespace {
 
+// Project metadata for 设置 → 关于. Keep in sync with README / CHANGELOG.
+constexpr wchar_t kAppVersion[] = L"1.0.0";
+constexpr wchar_t kAppLicense[] = L"MIT License";
+constexpr wchar_t kAppHome[]    = L"https://github.com/x500x/msitool";
+
+// Build stamp for the About card: compiler, architecture and build date.
+std::wstring buildStamp() {
+    std::wstring date = util::widen(__DATE__);
+    return util::fmt(L"%s · MSVC %d.%d · %s", date.c_str(),
+                     _MSC_VER / 100, _MSC_VER % 100,
+                     sizeof(void*) == 8 ? L"x64" : L"x86");
+}
+
 // ---------------------------------------------------------------------------
 // Small helpers
 // ---------------------------------------------------------------------------
@@ -605,6 +618,7 @@ public:
     Button* btnLight_ = nullptr;
     Button* btnDark_ = nullptr;
     Button* btnSystem_ = nullptr;
+    Link*   linkHome_ = nullptr;
     // A separate always-on-top popup window (like the context menu), so no
     // sibling widget, card or layout repaint can ever cover the notification.
     std::unique_ptr<ToastView> toastView_;
@@ -1048,6 +1062,10 @@ public:
                               [this] { setThemeMode(1); });
         btnSystem_ = makeButton(PgSettings, L"跟随系统", Ic::Sparkle, false,
                                 [this] { setThemeMode(2); });
+        linkHome_ = add<Link>(PgSettings);
+        linkHome_->text = kAppHome;
+        linkHome_->url = kAppHome;
+        linkHome_->mono = true;
 
         // Toast is a separate child window so it can float above the cards,
         // grids and every other widget.
@@ -1578,14 +1596,43 @@ public:
                  t.fSmall, t.muted);
 
         RECT c2 = R(body.left, c1.bottom + S(16), W(body), S(190));
-        addCard(c2, L"关于 msitool", L"", Ic::Info);
-        addLabel(R(c2.left + S(16), c2.top + S(50), W(c2) - S(32), S(120)),
-                 L"一个基于 Windows Installer (Msi) API 与 cabinet.dll (FDI/FCI) 的\n"
-                 L"MSI / MSP 查看、解包与打包工具。\n\n"
-                 L"UI 层：纯 Win32 API（user32 / gdi32 / shell32 / ole32）自绘，"
-                 L"包含 Fluent 亮暗主题、圆角卡片、导航、数据网格、进度与日志。\n"
-                 L"命令行模式完全保留：在终端里带参数运行即可使用全部命令。",
+        addCard(c2, L"关于 msitool",
+                util::fmt(L"版本 %s · %s · 项目主页与构建信息",
+                          kAppVersion, kAppLicense),
+                Ic::Info);
+        int c2pad = S(16);
+        int leftW = W(c2) * 56 / 100 - c2pad * 2;
+        addLabel(R(c2.left + c2pad, c2.top + S(50), leftW, S(170)),
+                 L"用 MSVC + C++17 + Windows Installer (Msi) API 与 cabinet.dll\n"
+                 L"(FDI/FCI) 编写的 MSI / MSP 查看、解包与打包工具。\n\n"
+                 L"UI 层为纯 Win32 API（user32 / gdi32 / shell32 / ole32）自绘：\n"
+                 L"Fluent 亮暗主题、圆角卡片、导航、数据网格、进度与日志。\n"
+                 L"命令行模式完全保留：在终端带参数运行即可使用全部命令。",
                  t.fBody, t.subText, DT_LEFT | DT_TOP | DT_WORDBREAK);
+
+        int infoX = c2.left + c2pad + leftW + c2pad;
+        int infoKeyW = S(76);
+        int infoValW = c2.right - c2pad - (infoX + infoKeyW);
+        int rowH = S(23);
+        int rowY = c2.top + S(46);
+        auto infoRow = [&](const wchar_t* key, const std::wstring& val) {
+            addLabel(R(infoX, rowY, infoKeyW, rowH), key, t.fMono, t.muted,
+                     DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            addLabel(R(infoX + infoKeyW, rowY, infoValW, rowH), val,
+                     t.fMono, t.subText,
+                     DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+            rowY += rowH;
+        };
+        infoRow(L"版本", std::wstring(L"v") + kAppVersion);
+        infoRow(L"协议", kAppLicense);
+        addLabel(R(infoX, rowY, infoKeyW, rowH), L"项目主页", t.fMono, t.muted,
+                 DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        if (linkHome_)
+            linkHome_->setRect(R(infoX + infoKeyW, rowY, infoValW, rowH));
+        rowY += rowH;
+        infoRow(L"构建", buildStamp());
+        infoRow(L"命令行", L"msitool.exe --help");
+        infoRow(L"依赖", L"msi.dll · cabinet.dll（Windows 自带）");
 
         RECT c3 = R(body.left, c2.bottom + S(16), W(body),
                     std::max(S(120), static_cast<int>(body.bottom - c2.bottom - S(16))));

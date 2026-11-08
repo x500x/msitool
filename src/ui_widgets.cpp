@@ -258,6 +258,54 @@ void Button::onKey(int vk, bool down) {
 }
 
 // ---------------------------------------------------------------------------
+// Link
+// ---------------------------------------------------------------------------
+void Link::paint(Gfx& g) {
+    Theme& t = theme();
+    int w = width(), h = height();
+    COLORREF c = !enabled() ? t.muted
+               : pressed() ? t.accentPressed
+               : (hovered() || focused()) ? t.accentHover : t.accent;
+    RECT tr{0, 0, w, h};
+    HFONT font = mono ? t.fMono : t.fBody;
+    g.text(tr, text, c, font,
+           DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    // DrawTextW has no underline flag, so draw the rule under the measured
+    // text ourselves (clamped when the URL is ellipsized).
+    SIZE sz = g.measure(text, font);
+    int uw = std::min(static_cast<int>(sz.cx), w);
+    int uy = h / 2 + sz.cy / 2 - S(2);
+    if (uw > 0) g.line(0, uy, uw, uy, c, 1);
+    if (focused()) {
+        int top = h / 2 - sz.cy / 2 - S(1);
+        g.round(RECT{-S(3), top, uw + S(3), h / 2 + sz.cy / 2}, S(3),
+                kNone, t.accent, 1);
+    }
+}
+
+void Link::onClick() {
+    Widget::onClick();
+    if (url.empty()) return;
+    HWND root = GetAncestor(hwnd_, GA_ROOT);
+    ShellExecuteW(root ? root : hwnd_, L"open", url.c_str(), nullptr,
+                  nullptr, SW_SHOWNORMAL);
+}
+
+void Link::onKey(int vk, bool down) {
+    if (down && (vk == VK_RETURN || vk == VK_SPACE)) onClick();
+}
+
+LRESULT Link::message(UINT msg, WPARAM /*wp*/, LPARAM lp, bool& handled) {
+    handled = false;
+    if (msg == WM_SETCURSOR && LOWORD(lp) == HTCLIENT) {
+        SetCursor(LoadCursorW(nullptr, IDC_HAND));
+        handled = true;
+        return TRUE;
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
 // Check / Switch
 // ---------------------------------------------------------------------------
 void Check::paint(Gfx& g) {
