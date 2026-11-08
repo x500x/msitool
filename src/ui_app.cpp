@@ -147,7 +147,8 @@ enum class Pick { Open, Folder, Save };
 
 bool pickPath(HWND owner, Pick kind, const wchar_t* title,
               const COMDLG_FILTERSPEC* filters, UINT count,
-              const wchar_t* defaultExt, std::wstring& out) {
+              const wchar_t* defaultExt, std::wstring& out,
+              const std::wstring& startDir = L"") {
     IFileDialog* dlg = nullptr;
     CLSID clsid = kind == Pick::Save ? CLSID_FileSaveDialog : CLSID_FileOpenDialog;
     if (FAILED(CoCreateInstance(clsid, nullptr, CLSCTX_INPROC_SERVER,
@@ -162,6 +163,15 @@ bool pickPath(HWND owner, Pick kind, const wchar_t* title,
     dlg->SetOptions(opts);
     if (title) dlg->SetTitle(title);
     if (filters && count) dlg->SetFileTypes(count, filters);
+    // Open the picker at the folder the user is currently extracting to.
+    if (!startDir.empty()) {
+        IShellItem* folder = nullptr;
+        if (SUCCEEDED(SHCreateItemFromParsingName(startDir.c_str(), nullptr,
+                                                  IID_PPV_ARGS(&folder)))) {
+            dlg->SetFolder(folder);
+            folder->Release();
+        }
+    }
     if (kind == Pick::Save && defaultExt) {
         IFileSaveDialog* save = nullptr;
         if (SUCCEEDED(dlg->QueryInterface(IID_PPV_ARGS(&save)))) {
@@ -327,7 +337,9 @@ public:
     Button*  btnNavFwd_ = nullptr;
     Button*  btnNavUp_ = nullptr;
     Button*  btnNavRefresh_ = nullptr;
+    Button*  btnRecentDirs_ = nullptr;
     Breadcrumb* crumb_ = nullptr;
+    std::vector<std::wstring> recentOutDirs_;
     TextBox* tbOutDir_ = nullptr;
     Button*  btnOutBrowse_ = nullptr;
     Check*   chkFlat_ = nullptr;
@@ -463,6 +475,7 @@ public:
         DragAcceptFiles(hwnd_, TRUE);
         setDwmAttribute(hwnd_, 33 /*DWMWA_WINDOW_CORNER_PREFERENCE*/, 2 /*ROUND*/);
         setLogTarget(hwnd_);
+        loadRecentOutDirs();
         std::wstring last = loadSetting(L"LastPackage");
         if (!initialFile_.empty()) loadPackage(initialFile_);
         else if (!last.empty() && util::path::exists(last)) loadPackage(last);
@@ -729,13 +742,23 @@ public:
         gridBrowseFiles_->refreshRequested = [this] { rebuildBrowse(); };
         gridBrowseFiles_->itemContextMenu = [this](int row, POINT p) { showItemMenu(row, p); };
 
-        // Collapsible options panel (tab 1).
-        tbOutDir_ = makeText(PgExtract, L"输出目录（留空自动使用 <包名>_files）");
+        // Always-visible "解包到" location bar. Choosing the destination is
+        // a primary action here, so it must not be buried in a folded panel.
+        tbOutDir_ = makeText(PgExtract, L"解包到（留空自动使用 <包名>_files）");
         tbOutDir_->changed = [this] { refreshBrowseList(); };
-        btnOutBrowse_ = makeButton(PgExtract, L"浏览", Ic::Folder, false,
-                                   [this] { browseFolderFor(tbOutDir_, L"选择解包输出目录"); });
-        btnExtractOpen_ = makeButton(PgExtract, L"打开目录", Ic::Open, false,
-                                     [this] { openOutputFolder(); });
+        btnOutBrowse_ = makeButton(PgExtract, L"浏览…", Ic::Folder, false,
+                                   [this] { chooseExtractOutDir(); });
+        btnRecentDirs_ = makeButton(PgExtract, L"最近", Ic::Clock, false,
+                                    [this] { showRecentOutDirs(); });
+        btnExtractOpen_ = makeButton(PgExtract, L"打开", Ic::Open, false,
+                                     [this] {
+                                         std::wstring d = util::trim(tbOutDir_->value());
+                                         if (!d.empty())
+                                             lastOutputDir_ = util::path::full(d);
+                                         openOutputFolder();
+                                     });
+
+        // Collapsible options panel (tab 1): advanced switches only.
         chkFlat_ = makeCheck(PgExtract, L"平铺所有文件", false);
         chkDry_ = makeCheck(PgExtract, L"仅预览 (dry-run)", false);
         chkSkip_ = makeCheck(PgExtract, L"跳过已存在文件", false);
@@ -752,7 +775,6 @@ public:
                                     [this] { browseFileFor(tbBaseMsi_, false,
                                         L"选择基准 MSI", L"MSI 包", L"*.msi"); });
         for (Widget* w : std::initializer_list<Widget*>{
-                 tbOutDir_, btnOutBrowse_, btnExtractOpen_,
                  chkFlat_, chkDry_, chkSkip_, chkSource_, chkKeepTemp_, chkVerbose_,
                  tbTransforms_, btnTransBrowse_, tbBaseMsi_, btnBaseBrowse_})
             w->setTab(1);
@@ -1075,7 +1097,7 @@ public:
         Theme& t = theme();
         const int gap = S(8);
         const int cmdH = S(46);
-        const int optH = extractAdv_ ? S(124) : 0;
+        const int optH = extractAdv_ ? S(96) : 0;
         const int logH = extractLog_ ? S(150) : 0;
         const int statusH = S(26);
 
@@ -1108,14 +1130,35 @@ public:
         int crumbW = rightX - searchW - S(8) - bx;
         crumb_->setRect(R(bx, by, std::max(S(120), crumbW), S(32)));
 
-        // 2) Collapsible options panel.
-        int y = cmd.bottom + (optH ? gap : 0);
+        // 2) Always-visible destination bar ("解包到").
+        const int locH = S(38);
+        int locTop = cmd.bottom + gap;
+        RECT loc = R(body.left, locTop, W(body), locH);
+        addCard(loc, L"", L"");
+        int ly = loc.top + (locH - S(28)) / 2;
+        int lx = loc.left + S(12);
+        addLabel(R(lx, ly, S(58), S(28)), L"解包到", t.fSmall, t.subText,
+                 DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        lx += S(62);
+        int rightL = loc.right - S(12);
+        auto locBtn = [&](Button* b, int w) {
+            rightL -= w;
+            b->setRect(R(rightL, ly, w, S(28)));
+            rightL -= S(6);
+        };
+        locBtn(btnExtractOpen_, S(72));
+        locBtn(btnRecentDirs_, S(72));
+        locBtn(btnOutBrowse_, S(84));
+        tbOutDir_->setRect(R(lx, ly, std::max(S(120), rightL - lx), S(28)));
+
+        // 3) Collapsible advanced options (switches / transforms only).
+        int y = locTop + locH + gap;
         if (optH) {
             RECT opt = R(body.left, y, W(body), optH);
             addCard(opt, L"", L"");
-            int ox = opt.left + S(12), oy = opt.top + S(8);
+            int ox = opt.left + S(12), oy = opt.top + S(10);
             int colW = (W(opt) - S(24) - S(16)) / 2;
-            int fieldW = colW - S(166);
+            int fieldW = colW - S(80);
             auto fieldAt = [&](int row, TextBox* tb, Button* browse,
                                const wchar_t* label) {
                 int yy = oy + row * S(40);
@@ -1123,10 +1166,8 @@ public:
                 tb->setRect(R(ox, yy + S(17), fieldW, S(26)));
                 browse->setRect(R(ox + fieldW + S(6), yy + S(17), S(72), S(26)));
             };
-            fieldAt(0, tbOutDir_, btnOutBrowse_, L"输出目录");
-            btnExtractOpen_->setRect(R(ox + fieldW + S(84), oy + S(17), S(78), S(26)));
-            fieldAt(1, tbTransforms_, btnTransBrowse_, L"MST 转换");
-            fieldAt(2, tbBaseMsi_, btnBaseBrowse_, L"基准 MSI");
+            fieldAt(0, tbTransforms_, btnTransBrowse_, L"MST 转换");
+            fieldAt(1, tbBaseMsi_, btnBaseBrowse_, L"基准 MSI");
             int rx = ox + colW + S(16);
             Check* checks[] = {chkFlat_, chkDry_, chkSkip_, chkSource_,
                                chkKeepTemp_, chkVerbose_};
@@ -2009,6 +2050,85 @@ public:
         }
     }
 
+    // ---- destination folder selection ----------------------------------
+    void loadRecentOutDirs() {
+        recentOutDirs_.clear();
+        std::wstring all = loadSetting(L"RecentOutDirs");
+        size_t start = 0;
+        while (start < all.size()) {
+            size_t end = all.find(L'\n', start);
+            std::wstring part = all.substr(
+                start, end == std::wstring::npos ? end : end - start);
+            part = util::trim(part);
+            if (!part.empty() &&
+                std::find(recentOutDirs_.begin(), recentOutDirs_.end(), part) ==
+                    recentOutDirs_.end())
+                recentOutDirs_.push_back(part);
+            if (end == std::wstring::npos) break;
+            start = end + 1;
+        }
+        if (recentOutDirs_.size() > 6) recentOutDirs_.resize(6);
+    }
+
+    void saveRecentOutDirs() const {
+        std::wstring all;
+        for (const auto& d : recentOutDirs_) {
+            if (!all.empty()) all += L"\n";
+            all += d;
+        }
+        saveSetting(L"RecentOutDirs", all);
+    }
+
+    void addRecentOutDir(const std::wstring& dir) {
+        std::wstring full = util::path::full(dir);
+        if (full.empty()) return;
+        auto it = std::find(recentOutDirs_.begin(), recentOutDirs_.end(), full);
+        if (it != recentOutDirs_.end()) recentOutDirs_.erase(it);
+        recentOutDirs_.insert(recentOutDirs_.begin(), full);
+        if (recentOutDirs_.size() > 6) recentOutDirs_.resize(6);
+        saveRecentOutDirs();
+    }
+
+    void chooseExtractOutDir() {
+        std::wstring current = util::trim(tbOutDir_->value());
+        std::wstring start = current.empty()
+            ? util::path::dirName(package_) : util::path::full(current);
+        std::wstring dir;
+        if (pickPath(hwnd_, Pick::Folder, L"选择解包文件的存放目录", nullptr, 0,
+                     nullptr, dir, start)) {
+            tbOutDir_->setValue(dir);
+            lastOutputDir_ = util::path::full(dir);
+            addRecentOutDir(dir);
+            refreshBrowseList();
+            toast(L"解包目录：" + dir, 0);
+        }
+    }
+
+    void showRecentOutDirs() {
+        std::vector<Menu::Item> items;
+        for (const auto& d : recentOutDirs_)
+            items.push_back({d, Ic::Folder, true, false});
+        if (items.empty())
+            items.push_back({L"（暂无最近目录，点「浏览…」选择）", Ic::InfoCircle,
+                             false, false});
+        items.push_back({L"", Ic::None, true, true});
+        int browseIndex = static_cast<int>(items.size());
+        items.push_back({L"浏览其它目录…", Ic::Folder, true, false});
+        RECT br{};
+        GetWindowRect(btnRecentDirs_->hwnd(), &br);
+        POINT anchor{br.left, br.bottom};
+        showMenu(anchor, std::move(items), [this, browseIndex](int cmd) {
+            if (cmd >= 0 && cmd < static_cast<int>(recentOutDirs_.size())) {
+                tbOutDir_->setValue(recentOutDirs_[cmd]);
+                lastOutputDir_ = util::path::full(recentOutDirs_[cmd]);
+                refreshBrowseList();
+                toast(L"解包目录：" + recentOutDirs_[cmd], 0);
+            } else if (cmd == browseIndex) {
+                chooseExtractOutDir();
+            }
+        });
+    }
+
     bool ensureOutputDir() {
         if (util::trim(tbOutDir_->value()).empty()) {
             autoOutDir_ = defaultExtractDir();
@@ -2059,6 +2179,7 @@ public:
         extract::Options o = extractOptions(std::move(keys));
         lastOutputDir_ = util::path::full(o.outDir);
         saveSetting(L"LastOutDir", lastOutputDir_);
+        addRecentOutDir(o.outDir);
         std::wstring path = package_;
         bool patch = db_ && db_->isPatch();
         startTask([path, patch, o] {
@@ -2481,9 +2602,12 @@ public:
             switch (cmd) {
             case 0: startExtractKeys({f.key}, L"正在解包 " + f.name); break;
             case 1: {
+                std::wstring current = util::trim(tbOutDir_->value());
+                std::wstring start = current.empty()
+                    ? util::path::dirName(package_) : util::path::full(current);
                 std::wstring dir;
                 if (pickPath(hwnd_, Pick::Folder, L"选择解包目录", nullptr, 0,
-                             nullptr, dir)) {
+                             nullptr, dir, start)) {
                     tbOutDir_->setValue(dir);
                     startExtractKeys({f.key}, L"正在解包 " + f.name);
                 }
