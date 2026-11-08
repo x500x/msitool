@@ -156,6 +156,14 @@ void saveIntSetting(const wchar_t* name, int value) {
     RegCloseKey(key);
 }
 
+void deleteSetting(const wchar_t* name) {
+    HKEY key = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, kSettingsKey, 0, KEY_SET_VALUE,
+                      &key) != ERROR_SUCCESS) return;
+    RegDeleteValueW(key, name);
+    RegCloseKey(key);
+}
+
 // ---- modern IFileDialog based pickers --------------------------------------
 enum class Pick { Open, Folder, Save };
 
@@ -272,6 +280,25 @@ void setDwmAttribute(HWND hwnd, int attribute, int value) {
 constexpr UINT kTimer = 1;
 constexpr int kIdOpen = 40001;
 constexpr int kIdRefresh = 40002;
+constexpr int kIdSettings = 40003;
+constexpr int kIdTheme = 40004;
+
+// Configurable shortcuts. `setting` is the registry value name under
+// HKCU\Software\msitool; `fallback` is the stock combination.
+struct ShortcutDef {
+    const wchar_t* setting;
+    const wchar_t* label;
+    const wchar_t* hint;
+    int            command;
+    const wchar_t* fallback;
+};
+constexpr ShortcutDef kShortcuts[] = {
+    {L"KeyOpen",     L"打开包文件",   L"打开 .msi / .msp 文件选择框", kIdOpen,     L"Ctrl+O"},
+    {L"KeyReload",   L"重新载入",     L"重新读取当前包的结构与数据",   kIdRefresh,  L"F5"},
+    {L"KeySettings", L"打开设置",     L"直接跳转到设置页",             kIdSettings, L"Ctrl+,"},
+    {L"KeyTheme",    L"切换明暗主题", L"在浅色 / 深色之间切换",        kIdTheme,    L"Ctrl+Shift+T"},
+};
+constexpr int kShortcutCount = static_cast<int>(sizeof(kShortcuts) / sizeof(kShortcuts[0]));
 
 enum Page {
     PgHome = 0, PgInfo, PgTables, PgQuery, PgExtract,
@@ -291,7 +318,7 @@ const wchar_t* kPageSubtitle[PgCount] = {
     L"导出 CAB、表、流和二进制资源",
     L"把一个目录打包成自包含的 MSI",
     L"检查文件是否为合法的安装包",
-    L"外观、关于与快捷键"
+    L"外观、快捷键与关于"
 };
 const Ic kPageIcon[PgCount] = {
     Ic::Home, Ic::Info, Ic::Table, Ic::Query, Ic::Extract,
@@ -434,6 +461,7 @@ public:
     HWND hwnd_ = nullptr;
     HINSTANCE hinst_ = nullptr;
     HACCEL accel_ = nullptr;
+    std::wstring shortcut_[kShortcutCount];   // canonical combos, "" = unbound
     std::vector<std::unique_ptr<Widget>> widgets_;
     int nextId_ = 1000;
     int page_ = PgHome;
@@ -619,6 +647,8 @@ public:
     Button* btnLight_ = nullptr;
     Button* btnDark_ = nullptr;
     Button* btnSystem_ = nullptr;
+    Button* btnShortcutReset_ = nullptr;
+    HotkeyField* hkFields_[kShortcutCount] = {};
     Link*   linkHome_ = nullptr;
     // A separate always-on-top popup window (like the context menu), so no
     // sibling widget, card or layout repaint can ever cover the notification.
@@ -666,13 +696,10 @@ public:
 
     void onCreate() {
         themeMode_ = loadIntSetting(L"ThemeMode", 2);
+        loadShortcuts();
         applyTheme();
         buildWidgets();
-        ACCEL acc[] = {
-            {FCONTROL | FVIRTKEY, L'O', kIdOpen},
-            {FVIRTKEY, VK_F5, kIdRefresh},
-        };
-        accel_ = CreateAcceleratorTableW(acc, 2);
+        rebuildAccelerator();
         SetTimer(hwnd_, kTimer, 40, nullptr);
         DragAcceptFiles(hwnd_, TRUE);
         installDropTarget();
@@ -723,6 +750,94 @@ public:
         saveIntSetting(L"ThemeMode", mode);
         applyTheme();
         layout();
+    }
+
+    // ---- shortcuts -------------------------------------------------------
+    void loadShortcuts() {
+        for (int i = 0; i < kShortcutCount; ++i) {
+            std::wstring saved = loadSetting(kShortcuts[i].setting);
+            if (util::iequals(saved, L"none")) {   // explicitly unbound
+                shortcut_[i].clear();
+                continue;
+            }
+            Hotkey hk = Hotkey::parse(saved);
+            if (!hk.usable()) hk = Hotkey::parse(kShortcuts[i].fallback);
+            shortcut_[i] = hk.storage();
+        }
+    }
+
+    // Keep accelerators away from sequences the app already uses locally
+    // (text editing, run-query) so a custom binding can never break typing.
+    bool shortcutReserved(const std::wstring& combo) const {
+        Hotkey hk = Hotkey::parse(combo);
+        if (!hk.usable()) return true;
+        if (hk.ctrl && !hk.alt && !hk.shift) {
+            switch (hk.vk) {
+            case L'C': case L'V': case L'X': case L'A': case L'Z': case L'Y':
+                return true;
+            }
+        }
+        return false;
+    }
+
+    bool shortcutTaken(int index, const std::wstring& combo) const {
+        for (int i = 0; i < kShortcutCount; ++i)
+            if (i != index && !shortcut_[i].empty() &&
+                util::iequals(shortcut_[i], combo))
+                return true;
+        return false;
+    }
+
+    void rebuildAccelerator() {
+        if (accel_) { DestroyAcceleratorTable(accel_); accel_ = nullptr; }
+        ACCEL acc[kShortcutCount]{};
+        int n = 0;
+        for (int i = 0; i < kShortcutCount; ++i) {
+            Hotkey hk = Hotkey::parse(shortcut_[i]);
+            if (!hk.usable()) continue;
+            BYTE f = FVIRTKEY;
+            if (hk.ctrl) f |= FCONTROL;
+            if (hk.alt) f |= FALT;
+            if (hk.shift) f |= FSHIFT;
+            bool duplicate = false;
+            for (int j = 0; j < n; ++j)
+                if (acc[j].key == hk.vk && acc[j].fVirt == f) duplicate = true;
+            if (duplicate) continue;
+            acc[n].fVirt = f;
+            acc[n].key = static_cast<WORD>(hk.vk);
+            acc[n].cmd = static_cast<WORD>(kShortcuts[i].command);
+            ++n;
+        }
+        if (n) accel_ = CreateAcceleratorTableW(acc, n);
+    }
+
+    void onShortcutChanged(int index, const std::wstring& combo) {
+        shortcut_[index] = combo;
+        // "none" keeps an empty binding distinct from "never configured",
+        // otherwise clearing a shortcut would fall back to its default on the
+        // next start.
+        saveSetting(kShortcuts[index].setting,
+                    combo.empty() ? std::wstring(L"none") : combo);
+        rebuildAccelerator();
+    }
+
+    void resetShortcuts() {
+        for (int i = 0; i < kShortcutCount; ++i) {
+            shortcut_[i] = kShortcuts[i].fallback;
+            deleteSetting(kShortcuts[i].setting);
+            if (hkFields_[i]) {
+                hkFields_[i]->value = shortcut_[i];
+                hkFields_[i]->invalidate();
+            }
+        }
+        rebuildAccelerator();
+        toast(L"快捷键已恢复默认", 3);
+    }
+
+    bool hotkeyCaptureActive() const {
+        for (int i = 0; i < kShortcutCount; ++i)
+            if (hkFields_[i] && hkFields_[i]->capturing()) return true;
+        return false;
     }
 
     // ---- widget construction ---------------------------------------------
@@ -1064,6 +1179,20 @@ public:
                               [this] { setThemeMode(1); });
         btnSystem_ = makeButton(PgSettings, L"跟随系统", Ic::Sparkle, false,
                                 [this] { setThemeMode(2); });
+        btnShortcutReset_ = makeButton(PgSettings, L"恢复默认", Ic::Refresh, false,
+                                       [this] { resetShortcuts(); });
+        btnShortcutReset_->subtle = true;
+        for (int i = 0; i < kShortcutCount; ++i) {
+            HotkeyField* f = add<HotkeyField>(PgSettings);
+            f->value = shortcut_[i];
+            f->accept = [this, i](const std::wstring& combo) {
+                return !shortcutReserved(combo) && !shortcutTaken(i, combo);
+            };
+            f->changed = [this, i](const std::wstring& combo) {
+                onShortcutChanged(i, combo);
+            };
+            hkFields_[i] = f;
+        }
         linkHome_ = add<Link>(PgSettings);
         linkHome_->text = kAppHome;
         linkHome_->url = kAppHome;
@@ -1589,7 +1718,7 @@ public:
 
     void layoutSettings(const RECT& body) {
         Theme& t = theme();
-        RECT c1 = R(body.left, body.top, W(body), S(150));
+        RECT c1 = R(body.left, body.top, W(body), S(144));
         addCard(c1, L"外观", L"Fluent 设计 · 支持系统主题跟随与高 DPI", Ic::Sun);
         int x = c1.left + S(16);
         btnLight_->setRect(R(x, c1.top + S(52), S(150), S(36)));
@@ -1600,56 +1729,72 @@ public:
                            theme().dark ? L"深色" : L"浅色", theme().dpi * 100 / 96),
                  t.fSmall, t.muted);
 
-        RECT c2 = R(body.left, c1.bottom + S(16), W(body), S(190));
-        addCard(c2, L"关于 msitool",
+        // Shortcuts: one row per command, recorded in place. The card is
+        // fixed-height (4 rows) so the About card below gets all the rest.
+        RECT c2 = R(body.left, c1.bottom + S(16), W(body), S(196));
+        addCard(c2, L"快捷键",
+                L"点击右侧按键框重新录制 · Backspace 清除 · Esc 取消",
+                Ic::Terminal);
+        btnShortcutReset_->setRect(R(c2.right - S(16) - S(104), c2.top + S(9),
+                                    S(104), S(30)));
+        const int fieldW = S(190), rowH = S(33), rowTop = c2.top + S(44);
+        int fieldX = c2.right - S(16) - fieldW;
+        int labelX = c2.left + S(16);
+        for (int i = 0; i < kShortcutCount; ++i) {
+            int y = rowTop + i * rowH;
+            int ly = y + S(2);
+            addLabel(R(labelX, ly, S(120), S(30)), kShortcuts[i].label,
+                     t.fStrong, t.text,
+                     DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+            addLabel(R(labelX + S(126), ly, std::max(S(80), fieldX - labelX - S(138)),
+                       S(30)), kShortcuts[i].hint, t.fSmall, t.muted,
+                     DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+            if (hkFields_[i]) hkFields_[i]->setRect(R(fieldX, ly, fieldW, S(30)));
+        }
+        addLabel(R(c2.left + S(16), rowTop + kShortcutCount * rowH + S(2),
+                   W(c2) - S(32), S(20)),
+                 L"固定快捷键：Ctrl+C 复制 · Ctrl+Enter 运行查询 · Tab / Shift+Tab 切换焦点 · Esc 关闭下拉菜单",
+                 t.fSmall, t.muted,
+                 DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+        RECT c3 = R(body.left, c2.bottom + S(16), W(body),
+                    std::max(S(190), static_cast<int>(body.bottom - c2.bottom - S(16))));
+        addCard(c3, L"关于 msitool",
                 util::fmt(L"版本 %s · %s · 项目主页与构建信息",
                           kAppVersion, kAppLicense),
                 Ic::Info);
-        int c2pad = S(16);
-        int leftW = W(c2) * 56 / 100 - c2pad * 2;
-        addLabel(R(c2.left + c2pad, c2.top + S(50), leftW, S(170)),
-                 L"用 MSVC + C++17 + Windows Installer (Msi) API 与 cabinet.dll\n"
-                 L"(FDI/FCI) 编写的 MSI / MSP 查看、解包与打包工具。\n\n"
+        int c3pad = S(16);
+        int leftW = W(c3) * 56 / 100 - c3pad * 2;
+        addLabel(R(c3.left + c3pad, c3.top + S(50), leftW, S(150)),
+                 L"MSVC + C++17 · Windows Installer (Msi) API + cabinet.dll (FDI/FCI)\n"
+                 L"打造的 MSI / MSP 查看、解包与打包工具，命令行模式完全保留。\n\n"
                  L"UI 层为纯 Win32 API（user32 / gdi32 / shell32 / ole32）自绘：\n"
-                 L"Fluent 亮暗主题、圆角卡片、导航、数据网格、进度与日志。\n"
-                 L"命令行模式完全保留：在终端带参数运行即可使用全部命令。",
+                 L"Fluent 亮暗主题、圆角卡片、导航、数据网格、进度与日志。",
                  t.fBody, t.subText, DT_LEFT | DT_TOP | DT_WORDBREAK);
 
-        int infoX = c2.left + c2pad + leftW + c2pad;
+        int infoX = c3.left + c3pad + leftW + c3pad;
         int infoKeyW = S(76);
-        int infoValW = c2.right - c2pad - (infoX + infoKeyW);
-        int rowH = S(23);
-        int rowY = c2.top + S(46);
+        int infoValW = c3.right - c3pad - (infoX + infoKeyW);
+        int infoRowH = S(23);
+        int rowY = c3.top + S(46);
         auto infoRow = [&](const wchar_t* key, const std::wstring& val) {
-            addLabel(R(infoX, rowY, infoKeyW, rowH), key, t.fMono, t.muted,
+            addLabel(R(infoX, rowY, infoKeyW, infoRowH), key, t.fMono, t.muted,
                      DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-            addLabel(R(infoX + infoKeyW, rowY, infoValW, rowH), val,
+            addLabel(R(infoX + infoKeyW, rowY, infoValW, infoRowH), val,
                      t.fMono, t.subText,
                      DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-            rowY += rowH;
+            rowY += infoRowH;
         };
         infoRow(L"版本", std::wstring(L"v") + kAppVersion);
         infoRow(L"协议", kAppLicense);
-        addLabel(R(infoX, rowY, infoKeyW, rowH), L"项目主页", t.fMono, t.muted,
+        addLabel(R(infoX, rowY, infoKeyW, infoRowH), L"项目主页", t.fMono, t.muted,
                  DT_LEFT | DT_VCENTER | DT_SINGLELINE);
         if (linkHome_)
-            linkHome_->setRect(R(infoX + infoKeyW, rowY, infoValW, rowH));
-        rowY += rowH;
+            linkHome_->setRect(R(infoX + infoKeyW, rowY, infoValW, infoRowH));
+        rowY += infoRowH;
         infoRow(L"构建", buildStamp());
         infoRow(L"命令行", L"msitool.exe --help");
         infoRow(L"依赖", L"msi.dll · cabinet.dll（Windows 自带）");
-
-        RECT c3 = R(body.left, c2.bottom + S(16), W(body),
-                    std::max(S(120), static_cast<int>(body.bottom - c2.bottom - S(16))));
-        addCard(c3, L"快捷键", L"", Ic::Terminal);
-        addLabel(R(c3.left + S(16), c3.top + S(50), W(c3) - S(32), S(120)),
-                 L"Ctrl + O     打开文件\n"
-                 L"F5               重新载入当前包\n"
-                 L"Ctrl + C     复制数据网格 / 日志内容\n"
-                 L"Ctrl + Enter  在 SQL 编辑器中运行查询\n"
-                 L"Tab / Shift+Tab  在输入框之间切换焦点\n"
-                 L"Esc              关闭下拉菜单 / 取消焦点",
-                 t.fMono, t.subText, DT_LEFT | DT_TOP | DT_WORDBREAK);
     }
 
     void switchPage(int p) {
@@ -3625,6 +3770,11 @@ public:
                 if (!package_.empty()) loadPackage(package_);
                 return 0;
             }
+            if (LOWORD(wp) == kIdSettings) { switchPage(PgSettings); return 0; }
+            if (LOWORD(wp) == kIdTheme) {
+                setThemeMode(theme().dark ? 0 : 1);
+                return 0;
+            }
             break;
         case WM_APP_LOG: {
             std::unique_ptr<std::wstring> line(reinterpret_cast<std::wstring*>(lp));
@@ -3770,7 +3920,10 @@ int run(HINSTANCE instance, const std::wstring& initialFile) {
 
     MSG msg{};
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
-        if (!app.accel_ || !TranslateAcceleratorW(app.hwnd_, app.accel_, &msg)) {
+        // While a shortcut field is recording, key presses belong to it: an
+        // accelerator would otherwise swallow the very combo being entered.
+        if (app.hotkeyCaptureActive() || !app.accel_ ||
+            !TranslateAcceleratorW(app.hwnd_, app.accel_, &msg)) {
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }

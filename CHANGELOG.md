@@ -8,6 +8,8 @@
 
 ### Added
 
+- **设置 · 自定义快捷键**：新增「快捷键」卡片，点击右侧按键框即可重新录制组合键（如把「打开包文件」改成 `Ctrl+P`），Backspace 清除、Esc 取消，冲突与系统保留组合（`Alt+F4`、`Alt+Tab`、`Ctrl+C` 等）就地提示并拒绝，右上角「恢复默认」一键还原。前四项（打开包文件 / 重新载入 / 打开设置 / 切换明暗主题）可在 `HKCU\Software\msitool\Key*` 中持久化，启动与修改后重建加速键表；录制期间临时绕过加速键，保证正在输入的组合不会被已有快捷键抢走。
+
 - **查看**：`verify`（包预检报告 + `MsiVerifyPackageW`）、`info`、`tables`、`schema`、`query`、`list`、`cabs`、`export`。
 - **解包**：`extract`，支持内嵌 CAB（`_Streams`）、外部 CAB、未压缩 administrative layout；`--flat`、`--dry-run`、`--skip-existing`、`--source-layout`、`--keep-temp`。
 - **解包 · 跨 CAB 连续文件**：用 `FDIIsCabinet` 把 `hasnext/hasprev` + `setID` + `iCabinet` 连成一套的 CAB 分为分卷集，一组只跑一次 `FDICopy`；`fdintNEXT_CABINET` 回调把下一个 CAB 交回 FDI，跨 CAB 的文件写成一个完整文件。

@@ -199,6 +199,22 @@ protected:
 };
 
 // ---------------------------------------------------------------------------
+// Keyboard shortcut combo: canonical text ("Ctrl+O") <-> accelerator parts.
+// Only combos that are safe as a window accelerator are `usable()`: a letter /
+// digit / OEM key needs Ctrl or Alt, function keys work on their own, and the
+// system's own Alt+F4 / Alt+Tab are left alone.
+// ---------------------------------------------------------------------------
+struct Hotkey {
+    bool ctrl = false, alt = false, shift = false;
+    int  vk = 0;                       // 0 = not set
+    bool valid() const noexcept { return vk != 0; }
+    bool usable() const noexcept;
+    std::wstring text() const;         // "Ctrl + Shift + K"
+    std::wstring storage() const;      // "Ctrl+Shift+K"
+    static Hotkey parse(const std::wstring& s);
+};
+
+// ---------------------------------------------------------------------------
 // Controls
 // ---------------------------------------------------------------------------
 class Button : public Widget {
@@ -238,6 +254,24 @@ public:
     void paint(Gfx& g) override;
     void onClick() override;
     void onKey(int vk, bool down) override;
+};
+
+class HotkeyField : public Widget {
+public:
+    std::wstring value;              // canonical "Ctrl+O", empty = unset
+    std::wstring placeholder = L"未设置";
+    std::function<bool(const std::wstring&)> accept;   // false = rejected
+    std::function<void(const std::wstring&)> changed;
+    bool capturing() const noexcept { return capturing_; }
+    void paint(Gfx& g) override;
+    void onClick() override;
+    void onKey(int vk, bool down) override;
+    void onFocus(bool focused) override;
+    LRESULT message(UINT msg, WPARAM wp, LPARAM lp, bool& handled) override;
+
+private:
+    bool capturing_ = false;
+    std::wstring hint_;              // rejection message while recording
 };
 
 class TextBox : public Widget {

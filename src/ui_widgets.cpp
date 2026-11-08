@@ -1,6 +1,7 @@
 #include "ui.h"
 
 #include <cwchar>
+#include <cwctype>
 
 namespace ui {
 
@@ -37,7 +38,126 @@ RECT inset(const RECT& r, int dx, int dy) {
     return RECT{r.left + dx, r.top + dy, r.right - dx, r.bottom - dy};
 }
 
+// ---- key names ------------------------------------------------------------
+// Canonical, layout-neutral names used both for display and for the value that
+// is persisted in the registry. Only keys that can be typed or reached with a
+// modifier are listed; unknown VK codes map to an empty string and are refused
+// by HotkeyField.
+std::wstring keyName(int vk) {
+    struct Named { int vk; const wchar_t* name; };
+    static const Named named[] = {
+        {VK_SPACE, L"Space"}, {VK_RETURN, L"Enter"}, {VK_TAB, L"Tab"},
+        {VK_ESCAPE, L"Esc"}, {VK_BACK, L"Backspace"}, {VK_DELETE, L"Delete"},
+        {VK_INSERT, L"Insert"}, {VK_HOME, L"Home"}, {VK_END, L"End"},
+        {VK_PRIOR, L"PageUp"}, {VK_NEXT, L"PageDown"},
+        {VK_LEFT, L"Left"}, {VK_RIGHT, L"Right"},
+        {VK_UP, L"Up"}, {VK_DOWN, L"Down"},
+        {VK_OEM_COMMA, L","}, {VK_OEM_PERIOD, L"."}, {VK_OEM_1, L";"},
+        {VK_OEM_2, L"/"}, {VK_OEM_3, L"`"}, {VK_OEM_4, L"["},
+        {VK_OEM_5, L"\\"}, {VK_OEM_6, L"]"}, {VK_OEM_7, L"'"},
+        {VK_OEM_MINUS, L"-"}, {VK_OEM_PLUS, L"="}, {VK_OEM_102, L"\\"},
+    };
+    for (const Named& n : named)
+        if (n.vk == vk) return n.name;
+    if (vk >= 'A' && vk <= 'Z')
+        return std::wstring(1, static_cast<wchar_t>(vk));
+    if (vk >= '0' && vk <= '9')
+        return std::wstring(1, static_cast<wchar_t>(vk));
+    if (vk >= VK_NUMPAD0 && vk <= VK_NUMPAD9)
+        return L"Num" + std::wstring(1, static_cast<wchar_t>(L'0' + (vk - VK_NUMPAD0)));
+    if (vk >= VK_F1 && vk <= VK_F24)
+        return L"F" + std::to_wstring(vk - VK_F1 + 1);
+    return L"";
+}
+
+int keyFromName(const std::wstring& raw) {
+    std::wstring s = util::trim(raw);
+    if (s.empty()) return 0;
+    if (s.size() == 1) {
+        wchar_t c = static_cast<wchar_t>(towupper(s[0]));
+        if ((c >= L'A' && c <= L'Z') || (c >= L'0' && c <= L'9')) return c;
+        switch (c) {
+        case L',': return VK_OEM_COMMA;
+        case L'.': return VK_OEM_PERIOD;
+        case L';': return VK_OEM_1;
+        case L'/': return VK_OEM_2;
+        case L'`': return VK_OEM_3;
+        case L'[': return VK_OEM_4;
+        case L'\\': return VK_OEM_5;
+        case L']': return VK_OEM_6;
+        case L'\'': return VK_OEM_7;
+        case L'-': return VK_OEM_MINUS;
+        case L'=': return VK_OEM_PLUS;
+        default: return 0;
+        }
+    }
+    for (int vk = 1; vk < 256; ++vk) {
+        if (util::iequals(keyName(vk), s)) return vk;
+    }
+    return 0;
+}
+
 }  // namespace
+
+// ---------------------------------------------------------------------------
+// Hotkey
+// ---------------------------------------------------------------------------
+bool Hotkey::usable() const noexcept {
+    if (!valid()) return false;
+    // The system owns these two combinations; stealing them would break
+    // closing the window / switching tasks while any control has focus.
+    if (alt && (vk == VK_F4 || vk == VK_TAB || vk == VK_SPACE)) return false;
+    if (vk == VK_ESCAPE || vk == VK_TAB || vk == VK_RETURN) return false;
+    if (vk >= VK_F1 && vk <= VK_F24) return true;
+    return ctrl || alt;
+}
+
+std::wstring Hotkey::text() const {
+    std::wstring out;
+    auto add = [&out](const wchar_t* part) {
+        if (!out.empty()) out += L" + ";
+        out += part;
+    };
+    if (ctrl) add(L"Ctrl");
+    if (alt) add(L"Alt");
+    if (shift) add(L"Shift");
+    std::wstring key = keyName(vk);
+    if (!key.empty()) add(key.c_str());
+    return out;
+}
+
+std::wstring Hotkey::storage() const {
+    std::wstring out;
+    if (ctrl) out += L"Ctrl+";
+    if (alt) out += L"Alt+";
+    if (shift) out += L"Shift+";
+    std::wstring key = keyName(vk);
+    if (!key.empty()) out += key;
+    else out.clear();
+    return out;
+}
+
+Hotkey Hotkey::parse(const std::wstring& raw) {
+    Hotkey h;
+    std::wstring part;
+    auto take = [&h](const std::wstring& p) {
+        std::wstring t = util::trim(p);
+        if (t.empty()) return;
+        if (util::iequals(t, L"Ctrl") || util::iequals(t, L"Control")) h.ctrl = true;
+        else if (util::iequals(t, L"Alt")) h.alt = true;
+        else if (util::iequals(t, L"Shift")) h.shift = true;
+        else {
+            int vk = keyFromName(t);
+            if (vk) h.vk = vk;
+        }
+    };
+    for (wchar_t c : raw) {
+        if (c == L'+') { take(part); part.clear(); }
+        else part += c;
+    }
+    take(part);
+    return h;
+}
 
 // ---------------------------------------------------------------------------
 // Widget
@@ -237,7 +357,13 @@ void Button::paint(Gfx& g) {
     }
     int radius = S(6);
     g.round(r, radius, fill, stroke, 1);
-    if (focused()) g.round(inset(r, -S(2), -S(2)), radius + S(2), kNone, t.accent, S(2));
+    // The ring has to live inside the client area: a widget paints into its
+    // own bitmap, so an outward ring would only leave four clipped corners.
+    if (focused()) {
+        COLORREF ring = accent ? t.accentText : t.accent;
+        g.round(inset(r, S(2), S(2)), std::max(S(2), radius - S(2)), kNone,
+                ring, S(2));
+    }
 
     int iconW = icon == Ic::None ? 0 : S(glyphSize);
     int gap = iconW ? S(8) : 0;
@@ -352,6 +478,113 @@ void Check::onClick() {
 
 void Check::onKey(int vk, bool down) {
     if (down && vk == VK_SPACE) onClick();
+}
+
+// ---------------------------------------------------------------------------
+// HotkeyField (click to record)
+// ---------------------------------------------------------------------------
+void HotkeyField::paint(Gfx& g) {
+    Theme& t = theme();
+    int w = width(), h = height();
+    RECT r{0, 0, w, h};
+    COLORREF face = enabled() ? t.control : t.cardAlt;
+    COLORREF edge = capturing_ ? t.accent
+                  : hovered() ? t.borderStrong : t.border;
+    g.round(r, S(6), face, edge, capturing_ ? S(2) : 1);
+
+    std::wstring shown;
+    COLORREF fg = t.text;
+    if (capturing_) {
+        shown = hint_.empty() ? L"请按下新的组合键…" : hint_;
+        fg = hint_.empty() ? t.accent : t.danger;
+    } else if (value.empty()) {
+        shown = placeholder;
+        fg = t.muted;
+    } else {
+        shown = Hotkey::parse(value).text();
+        if (!enabled()) fg = t.disabled;
+    }
+    g.text(inset(r, S(10), 0), shown, fg, t.fMono,
+           DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+    // Same focus cue as TextBox: a 2px accent underline, never a full ring.
+    if (focused() && !capturing_)
+        g.fill(RECT{r.left + S(8), r.bottom - S(3), r.right - S(8), r.bottom - S(1)},
+               t.accent);
+}
+
+void HotkeyField::onClick() {
+    if (!enabled_) return;
+    capturing_ = true;
+    hint_.clear();
+    invalidate();
+}
+
+void HotkeyField::onFocus(bool focused) {
+    if (!focused && capturing_) {
+        capturing_ = false;
+        hint_.clear();
+        invalidate();
+    }
+}
+
+void HotkeyField::onKey(int vk, bool down) {
+    if (!down || !enabled()) return;
+    if (!capturing_) {
+        if (vk == VK_RETURN || vk == VK_SPACE) onClick();
+        return;
+    }
+    if (vk == VK_ESCAPE) {
+        capturing_ = false;
+        hint_.clear();
+        invalidate();
+        return;
+    }
+    if (vk == VK_BACK || vk == VK_DELETE) {
+        value.clear();
+        capturing_ = false;
+        hint_.clear();
+        invalidate();
+        if (changed) changed(value);
+        return;
+    }
+    // A modifier alone is not a combo: wait for the actual key.
+    if (vk == VK_CONTROL || vk == VK_SHIFT || vk == VK_MENU ||
+        vk == VK_LWIN || vk == VK_RWIN)
+        return;
+
+    Hotkey hk;
+    hk.ctrl = GetKeyState(VK_CONTROL) < 0;
+    hk.alt = GetKeyState(VK_MENU) < 0;
+    hk.shift = GetKeyState(VK_SHIFT) < 0;
+    hk.vk = vk;
+    std::wstring combo = hk.storage();
+    if (combo.empty() || !hk.usable()) {
+        hint_ = L"需要 Ctrl / Alt 或功能键";
+        invalidate();
+        return;
+    }
+    if (accept && !accept(combo)) {
+        hint_ = L"该组合键已被占用";
+        invalidate();
+        return;
+    }
+    value = combo;
+    capturing_ = false;
+    hint_.clear();
+    invalidate();
+    if (changed) changed(value);
+}
+
+LRESULT HotkeyField::message(UINT msg, WPARAM wp, LPARAM /*lp*/, bool& handled) {
+    // Alt combinations arrive as WM_SYSKEYDOWN, not WM_KEYDOWN. Only steal
+    // them while recording, so Alt+F4 / Alt+Tab keep working everywhere else.
+    if (capturing_ && (msg == WM_SYSKEYDOWN || msg == WM_SYSKEYUP)) {
+        onKey(static_cast<int>(wp), msg == WM_SYSKEYDOWN);
+        handled = true;
+        return 0;
+    }
+    return 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -480,10 +713,6 @@ LRESULT CALLBACK TextBox::editProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 PostMessageW(GetAncestor(h, GA_ROOT), WM_APP_FOCUS_NEXT,
                              reinterpret_cast<WPARAM>(h),
                              (GetKeyState(VK_SHIFT) < 0) ? 1 : 0);
-                return 0;
-            }
-            if ((GetKeyState(VK_CONTROL) < 0) && (wp == L'O')) {
-                PostMessageW(GetAncestor(h, GA_ROOT), WM_APP_OPEN, 0, 0);
                 return 0;
             }
             break;
