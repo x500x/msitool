@@ -665,6 +665,103 @@ void walk(const std::wstring& dir, const std::wstring& rel,
     FindClose(h);
 }
 
+// ---------------------------------------------------------------------------
+// Explicit selection (CLI --files, GUI "only these files")
+// ---------------------------------------------------------------------------
+
+bool absolutePath(const std::wstring& p) {
+    if (p.size() >= 3 && p[1] == L':' && (p[2] == L'\\' || p[2] == L'/')) return true;
+    return !p.empty() && (p.front() == L'\\' || p.front() == L'/');
+}
+
+unsigned long long statSize(const std::wstring& p) {
+    WIN32_FIND_DATAW fd{};
+    HANDLE h = FindFirstFileW(p.c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    FindClose(h);
+    return (static_cast<unsigned long long>(fd.nFileSizeHigh) << 32) | fd.nFileSizeLow;
+}
+
+// Resolve one selection entry: absolute paths are used as they are, relative
+// ones are looked up below the package root (like the paths in a manifest).
+std::wstring absOf(const std::wstring& inDir, const std::wstring& spec) {
+    return util::path::full(absolutePath(spec) ? spec
+                                               : util::path::join(inDir, spec));
+}
+
+// Path of `full` relative to the package root. A selection must live inside
+// inputDir: the Directory keys, the Feature tree and the companion layout are
+// all derived from that root, so an outside file has nowhere to install to.
+std::wstring relToRoot(const std::wstring& rootIn, const std::wstring& full) {
+    std::wstring root = rootIn;
+    if (!root.empty() && root.back() != L'\\' && root.back() != L'/') root += L'\\';
+    if (root.empty() || full.size() <= root.size() ||
+        !util::iequals(full.substr(0, root.size()), root))
+        util::fail(L"selected entry is outside the source directory: " + full);
+    std::wstring rel = normRel(full.substr(root.size()));
+    if (rel.empty()) util::fail(L"selected entry is empty: " + full);
+    return rel;
+}
+
+// Parent of a relative directory path; "" is the package root itself.
+std::wstring parentRel(const std::wstring& rel) {
+    std::wstring r = normRel(rel);
+    size_t pos = r.find_last_of(L"\\/");
+    return pos == std::wstring::npos ? L"" : normRel(r.substr(0, pos));
+}
+
+// Collect exactly the selected entries. Files keep the path they have relative
+// to the root (so a subset still installs into the same directory tree), and a
+// directory entry brings its whole subtree by delegating to walk().
+void selectFiles(const std::wstring& inDir, const std::vector<std::wstring>& specs,
+                 std::vector<Entry>& out, std::vector<std::wstring>& dirs,
+                 bool verbose) {
+    std::set<std::wstring> seenFile, seenDir;
+    for (const std::wstring& raw : specs) {
+        std::wstring spec = util::trim(raw);
+        if (spec.empty()) continue;
+        std::wstring full = absOf(inDir, spec);
+        if (!util::path::exists(full))
+            util::fail(L"selected entry does not exist: " + full);
+        if (util::path::isDirectory(full)) {
+            std::wstring rel = util::iequals(normRel(full), normRel(inDir))
+                                   ? L""
+                                   : normRel(relToRoot(inDir, full));
+            util::verboseLine(verbose, L"select " +
+                                           (rel.empty() ? L"." : rel) +
+                                           L"\\ (whole subtree)");
+            walk(full, rel, out, dirs, verbose);
+            continue;
+        }
+        if (!seenFile.insert(util::toLower(full)).second) {
+            util::verboseLine(verbose, L"skip duplicate selection " + full);
+            continue;
+        }
+        Entry e;
+        std::wstring rel = relToRoot(inDir, full);
+        e.relDir = parentRel(rel);
+        e.fileName = util::path::fileName(rel);
+        e.fullPath = full;
+        e.size = statSize(full);
+        out.push_back(e);
+        util::verboseLine(verbose, L"select " +
+                                       (e.relDir.empty() ? L"" : e.relDir + L"\\") +
+                                       e.fileName + L" (" +
+                                       std::to_wstring(e.size) + L" B)");
+        // Every ancestor of a selected file has to exist in the tree, even
+        // when nothing else was picked from it.
+        for (std::wstring d = e.relDir; !d.empty(); d = parentRel(d))
+            if (seenDir.insert(util::toLower(d)).second) dirs.push_back(d);
+    }
+    // A directory entry and a file listed inside it must not be packed twice.
+    std::set<std::wstring> unique;
+    out.erase(std::remove_if(out.begin(), out.end(),
+                             [&unique](const Entry& e) {
+                                 return !unique.insert(util::toLower(e.fullPath)).second;
+                             }),
+              out.end());
+}
+
 struct DirInfo {
     std::wstring key;
     std::wstring parentKey;
@@ -1034,9 +1131,20 @@ Stats pack(const Options& opt) {
 
     std::vector<Entry> files;
     std::vector<std::wstring> allDirs;
-    walk(inDir, L"", files, allDirs, o.verbose);
+    const bool selecting = !o.inputFiles.empty();
+    if (selecting) {
+        allDirs.push_back(L"");        // the root, exactly like walk() does
+        selectFiles(inDir, o.inputFiles, files, allDirs, o.verbose);
+        util::outLine(L"selected " + std::to_wstring(files.size()) +
+                      L" file(s) from " + std::to_wstring(o.inputFiles.size()) +
+                      L" entr" + (o.inputFiles.size() == 1 ? L"y" : L"ies") +
+                      L" of " + inDir);
+    } else {
+        walk(inDir, L"", files, allDirs, o.verbose);
+    }
     if (files.empty() && !o.keepEmptyDirs)
-        util::fail(L"Input directory contains no files: " + inDir);
+        util::fail(selecting ? L"Selection contains no files: " + inDir
+                             : L"Input directory contains no files: " + inDir);
     std::sort(files.begin(), files.end(), [](const Entry& a, const Entry& b) {
         if (a.relDir != b.relDir) return a.relDir < b.relDir;
         return a.fileName < b.fileName;

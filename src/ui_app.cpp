@@ -197,6 +197,52 @@ bool pickPath(HWND owner, Pick kind, const wchar_t* title,
     return ok;
 }
 
+// Multi-select variant of Pick::Open: used by 打包 "only these files".
+bool pickPaths(HWND owner, const wchar_t* title, const COMDLG_FILTERSPEC* filters,
+               UINT count, std::vector<std::wstring>& outs,
+               const std::wstring& startDir = L"") {
+    IFileOpenDialog* dlg = nullptr;
+    if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER,
+                               IID_PPV_ARGS(&dlg))))
+        return false;
+    DWORD opts = 0;
+    dlg->GetOptions(&opts);
+    dlg->SetOptions(opts | FOS_FORCEFILESYSTEM | FOS_FILEMUSTEXIST |
+                    FOS_NOCHANGEDIR | FOS_ALLOWMULTISELECT);
+    if (title) dlg->SetTitle(title);
+    if (filters && count) dlg->SetFileTypes(count, filters);
+    if (!startDir.empty()) {
+        IShellItem* folder = nullptr;
+        if (SUCCEEDED(SHCreateItemFromParsingName(startDir.c_str(), nullptr,
+                                                 IID_PPV_ARGS(&folder)))) {
+            dlg->SetFolder(folder);
+            folder->Release();
+        }
+    }
+    bool ok = false;
+    if (SUCCEEDED(dlg->Show(owner))) {
+        IShellItemArray* items = nullptr;
+        if (SUCCEEDED(dlg->GetResults(&items))) {
+            DWORD n = 0;
+            items->GetCount(&n);
+            for (DWORD i = 0; i < n; ++i) {
+                IShellItem* item = nullptr;
+                if (FAILED(items->GetItemAt(i, &item))) continue;
+                wchar_t* path = nullptr;
+                if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &path)) && path) {
+                    outs.emplace_back(path);
+                    CoTaskMemFree(path);
+                    ok = true;
+                }
+                item->Release();
+            }
+            items->Release();
+        }
+    }
+    dlg->Release();
+    return ok;
+}
+
 // ---- DWM (loaded dynamically: no extra import library required) -----------
 void setDwmAttribute(HWND hwnd, int attribute, int value) {
     HMODULE dwm = LoadLibraryW(L"dwmapi.dll");

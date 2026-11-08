@@ -6,6 +6,13 @@ namespace pack {
 
 struct Options {
     std::wstring inputDir;
+
+    // Selection mode: pack only these entries instead of the whole tree below
+    // inputDir. Paths may be absolute or relative to inputDir; a directory
+    // entry adds its complete subtree. inputDir stays the package root, so
+    // Directory keys, the CAB layout and the companion layout are unchanged.
+    std::vector<std::wstring> inputFiles;
+
     std::wstring outputMsi;
     std::wstring productName;      // empty => directory name
     std::wstring version = L"1.0.0";

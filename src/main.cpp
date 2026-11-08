@@ -44,6 +44,7 @@ struct Cli {
     bool                      signCertSet = false;
     std::wstring              baseMsi;                    // extract .msp with a target MSI
     std::vector<std::wstring> transforms;               // --transform (repeatable)
+    std::vector<std::wstring> files;                    // --files (repeatable)
     std::wstring              command;
     std::vector<std::wstring> args;   // positional arguments after the command
 };
@@ -102,6 +103,11 @@ Options:
   --ui <none|basic|minimal> pack: none (default), basic or minimal wizard UI
   --config <file>          pack: INI manifest (features, shortcuts, registry,
                            services, environment, signing, [pack] overrides)
+  --files <path[;path...]> pack: install only these entries (repeatable, ; or
+                           , separated). Relative paths resolve against the
+                           source directory; a directory adds its whole
+                           subtree; each entry keeps its path relative to the
+                           source directory in the installed layout
   --sign-cert <pfx>        pack: Authenticode-sign with signtool.exe
   --sign-password <text>   pack: PFX password
   --sign-timestamp <url>   pack: RFC 3161 timestamp URL
@@ -124,6 +130,8 @@ Examples:
   msitool pack C:\payload C:\out\app.msi --name "My App" --version 1.2.3
   msitool pack C:\payload C:\out\app.msi --config examples\pack.ini
   msitool pack C:\payload C:\out\app.msi --cab-size 16 --ui minimal
+  msitool pack C:\payload C:\out\app.msi --files "app.exe;cfg\app.ini"
+  msitool pack C:\payload C:\out\app.msi --files "app.exe" --files tools
 
 Notes:
   * Every command preflights the package first (OLE compound-file signature,
@@ -138,6 +146,9 @@ Notes:
     Use --base-msi <target.msi> to lay the patch payload out with real names.
   * --transform <file.mst> applies a transform as a temporary read-only view;
     it never modifies the package on disk. Repeatable.
+  * --files narrows down what 'pack' installs: the source directory stays the
+    package root, so a selection of files under subdir\ still installs into
+    <root>\subdir. Without --files the complete tree is packed.
 )";
 
 // "16", "16M", "512K", "1G" (1024 based) -> bytes.
@@ -176,10 +187,11 @@ Cli parseCommandLine(int argc, wchar_t** argv) {
         if (a == L"--keep-temp") { cli.keepTemp = true; continue; }
         if (a == L"--force") { cli.force = true; continue; }
         if (a == L"--no-empty-dirs") { cli.keepEmptyDirs = false; continue; }
-        if (a == L"--transform" || a == L"--base-msi") {
+        if (a == L"--transform" || a == L"--base-msi" || a == L"--files") {
             if (i + 1 >= argc) util::fail(L"Option " + a + L" requires a value");
             std::wstring v = argv[++i] ? argv[i] : L"";
             if (a == L"--transform") cli.transforms.push_back(v);
+            else if (a == L"--files") cli.files.push_back(v);
             else cli.baseMsi = v;
             continue;
         }
@@ -512,6 +524,7 @@ bool cmdVerify(const Cli& cli) {
 void cmdPack(const Cli& cli) {
     pack::Options opt;
     opt.inputDir = requireArg(cli, 0, L"input directory");
+    opt.inputFiles = cli.files;
     opt.outputMsi = requireArg(cli, 1, L"output .msi path");
     opt.productName = cli.productName;
     opt.version = cli.version;
