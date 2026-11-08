@@ -679,8 +679,12 @@ void DropDown::openPopup() {
 // ---------------------------------------------------------------------------
 // DataGrid
 // ---------------------------------------------------------------------------
-int DataGrid::headHeight() const { return headerVisible ? S(36) : 0; }
-int DataGrid::rowHeight() const { return S(32); }
+int DataGrid::headHeight() const {
+    return headerVisible ? (headHeightPx ? headHeightPx : S(36)) : 0;
+}
+int DataGrid::rowHeight() const {
+    return rowHeightPx ? rowHeightPx : S(32);
+}
 
 int DataGrid::totalWidth() const {
     int w = 0;

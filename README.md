@@ -120,7 +120,7 @@ build\msitool_x64.exe gui setup.msi         :: 启动 GUI 并直接打开一个�
 | 页面 | 功能 |
 | --- | --- |
 | 概览 | 包摘要、快捷操作、渐变 Hero |
-| 包信息 | SummaryInformation、关键 Property、Media / CAB 列表 |
+| 包信息 | 概览头部（产品名 / 版本 / 大小 / 表数 / CAB / 流）+「摘要 / 属性 / 媒体」分区，全宽表格、关键字筛选、选中行详情与 TSV 复制；属性区展示 Property 表全部键值 |
 | 数据表 | 表筛选 + 任意表的数据网格（虚拟滚动、选中、Ctrl+C 复制 TSV） |
 | SQL 查询 | MSI SQL 编辑器、示例查询、结果网格与耗时 |
 | 解包 | 输出目录、六个开关、MST transform、基准 MSI、运行日志 |

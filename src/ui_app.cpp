@@ -267,9 +267,20 @@ public:
     Button* btnHomeExtract_ = nullptr;
     Button* btnHomeExport_ = nullptr;
     // info -----------------------------------------------------------------
-    DataGrid* gridSummary_ = nullptr;
-    DataGrid* gridProps_ = nullptr;
-    DataGrid* gridMedia_ = nullptr;
+    int      infoTab_ = 0;             // 0 summary, 1 properties, 2 media
+    Button*  btnInfoSummary_ = nullptr;
+    Button*  btnInfoProps_ = nullptr;
+    Button*  btnInfoMedia_ = nullptr;
+    TextBox* tbInfoSearch_ = nullptr;
+    Button*  btnInfoCopy_ = nullptr;
+    DataGrid* gridInfo_ = nullptr;
+    RECT     infoDetailRect_{};
+    std::wstring infoTitle_, infoSubtitle_, infoCount_, infoDetail_;
+    std::wstring infoStats_[4];
+    std::vector<std::wstring>              infoHeaders_[3];
+    std::vector<std::vector<std::wstring>> infoRows_[3];
+    std::vector<std::wstring>              infoDetails_[3];
+    std::vector<std::wstring>              infoShownDetails_;
     // tables ---------------------------------------------------------------
     TextBox* tbTableSearch_ = nullptr;
     DataGrid* gridTables_ = nullptr;
@@ -526,9 +537,25 @@ public:
                                     [this] { switchPage(PgExport); });
 
         // ---- Info ---------------------------------------------------------
-        gridSummary_ = add<DataGrid>(PgInfo);
-        gridProps_ = add<DataGrid>(PgInfo);
-        gridMedia_ = add<DataGrid>(PgInfo);
+        // One full-width grid behind a tab strip + search, instead of three
+        // cramped tables: all the data stays readable at any window size.
+        btnInfoSummary_ = makeButton(PgInfo, L"摘要", Ic::Info, false,
+                                     [this] { setInfoTab(0); });
+        btnInfoProps_ = makeButton(PgInfo, L"属性", Ic::Table, false,
+                                   [this] { setInfoTab(1); });
+        btnInfoMedia_ = makeButton(PgInfo, L"媒体 / CAB", Ic::Database, false,
+                                   [this] { setInfoTab(2); });
+        btnInfoSummary_->accent = true;
+        tbInfoSearch_ = makeText(PgInfo, L"筛选当前表格…");
+        tbInfoSearch_->changed = [this] { applyInfoFilter(); };
+        btnInfoCopy_ = makeButton(PgInfo, L"复制", Ic::Copy, false, [this] {
+            gridInfo_->copyAll();
+            toast(L"已复制当前表格为 TSV", 3);
+        });
+        gridInfo_ = add<DataGrid>(PgInfo);
+        gridInfo_->rowHeightPx = S(28);   // denser: more rows visible at once
+        gridInfo_->headHeightPx = S(32);
+        gridInfo_->selectionChanged = [this](int row) { updateInfoDetail(row); };
 
         // ---- Tables -------------------------------------------------------
         tbTableSearch_ = makeText(PgTables, L"筛选表名…");
@@ -822,23 +849,51 @@ public:
     }
 
     void layoutInfo(const RECT& body) {
-        int h1 = std::min(S(210), H(body) * 38 / 100);
-        h1 = std::max(S(150), h1);
-        RECT sum = R(body.left, body.top, W(body), h1);
-        addCard(sum, L"SummaryInformation", L"OLE 复合文档属性流", Ic::Info);
-        gridSummary_->setRect(R(sum.left + S(12), sum.top + S(48),
-                                W(sum) - S(24), H(sum) - S(60)));
-        int h2 = H(body) - h1 - S(16);
-        int half = (W(body) - S(16)) / 2;
-        RECT props = R(body.left, sum.bottom + S(16), half, h2);
-        RECT media = R(props.right + S(16), sum.bottom + S(16),
-                       W(body) - half - S(16), h2);
-        addCard(props, L"关键属性", L"Property 表中的常用项", Ic::Table);
-        addCard(media, L"媒体 / CAB", L"Media 表与实际文件", Ic::Database);
-        gridProps_->setRect(R(props.left + S(12), props.top + S(48),
-                              W(props) - S(24), H(props) - S(60)));
-        gridMedia_->setRect(R(media.left + S(12), media.top + S(48),
-                              W(media) - S(24), H(media) - S(60)));
+        Theme& t = theme();
+        const int gap = S(16);
+
+        // 1) Header: the handful of facts you actually want at a glance.
+        RECT hero = R(body.left, body.top, W(body), S(124));
+        addCard(hero, infoTitle_, infoSubtitle_, Ic::Database, true);
+        int segW = (W(hero) - S(56)) / 4;
+        for (int i = 0; i < 4; ++i) {
+            addLabel(R(hero.left + S(28) + i * segW, hero.top + S(100),
+                       segW - S(10), S(22)),
+                     infoStats_[i], t.fSmall, RGB(232, 244, 255),
+                     DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        }
+
+        // 2) Tab strip + filter + copy.
+        RECT tabBar = R(body.left, hero.bottom + gap, W(body), S(46));
+        addCard(tabBar, L"", L"");
+        int tw = S(120), th = S(46) - S(10);
+        int tx = tabBar.left + S(10), ty = tabBar.top + S(5);
+        btnInfoSummary_->setRect(R(tx, ty, tw, th));
+        btnInfoProps_->setRect(R(tx + tw + S(8), ty, tw, th));
+        btnInfoMedia_->setRect(R(tx + (tw + S(8)) * 2, ty, tw, th));
+        btnInfoCopy_->setRect(R(tabBar.right - S(10) - S(100), ty, S(100), th));
+        tbInfoSearch_->setRect(R(tabBar.right - S(10) - S(100) - S(8) - S(260),
+                                 ty, S(260), th));
+
+        // 3) One full-width table + a detail strip for the selected row.
+        RECT content = R(body.left, tabBar.bottom + gap, W(body),
+                         body.bottom - tabBar.bottom - gap);
+        static const wchar_t* kTitle[3] = {
+            L"SummaryInformation", L"Property 属性", L"媒体 / CAB"};
+        static const Ic kIcon[3] = {Ic::Info, Ic::Table, Ic::Database};
+        addCard(content, kTitle[infoTab_], infoCount_, kIcon[infoTab_]);
+        // The detail strip only appears after a row is selected; otherwise
+        // the table gets the full remaining height.
+        bool detail = !infoDetail_.empty();
+        int detailH = detail ? S(34) : 0;
+        int gridH = std::max(S(80), H(content) - S(48) - S(12) -
+                                       (detail ? detailH + S(10) : 0));
+        gridInfo_->setRect(R(content.left + S(12), content.top + S(48),
+                             W(content) - S(24), gridH));
+        infoDetailRect_ = detail
+            ? R(content.left + S(12), content.bottom - detailH - S(12),
+                W(content) - S(24), detailH)
+            : RECT{0, 0, 0, 0};
     }
 
     void layoutTables(const RECT& body) {
@@ -1180,7 +1235,8 @@ public:
                        c.subtitle, RGB(232, 244, 255), t.fBody,
                        DT_LEFT | DT_VCENTER | DT_SINGLELINE);
                 RECT ic{c.r.right - S(96), c.r.top + S(30), c.r.right - S(32), c.r.top + S(94)};
-                g.icon(Ic::Sparkle, ic, RGB(255, 255, 255), 2);
+                if (c.icon != Ic::None)
+                    g.icon(c.icon, ic, RGB(255, 255, 255), 2);
                 RestoreDC(g.dc(), -1);
             } else {
                 g.round(c.r, S(10), t.card, t.border, 1);
@@ -1218,6 +1274,15 @@ public:
 
         for (const Label& l : labels_)
             g.text(l.r, l.text, l.color, l.font, l.fmt);
+
+        // Info page: detail strip for the selected table row (or a hint).
+        if (page_ == PgInfo && !infoDetail_.empty() &&
+            infoDetailRect_.right > infoDetailRect_.left) {
+            g.round(infoDetailRect_, S(6), t.cardAlt, t.border, 1);
+            g.text(shrink(infoDetailRect_, S(12), 0), infoDetail_, t.subText,
+                   t.fSmall,
+                   DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        }
 
         // Status bar.
         g.fill(R(0, rc.bottom - statusH, rc.right, statusH), t.navBg);
@@ -1284,9 +1349,16 @@ public:
         gridHome_->setData({L"属性", L"值"}, {{L"状态", L"尚未打开包"},
             {L"提示", L"点击「浏览」或直接把 .msi / .msp 拖进窗口"},
             {L"命令行", L"在终端带参数运行即可使用全部 CLI 命令"}});
-        gridSummary_->clear();
-        gridProps_->clear();
-        gridMedia_->clear();
+        for (int i = 0; i < 3; ++i) {
+            infoHeaders_[i].clear();
+            infoRows_[i].clear();
+            infoDetails_[i].clear();
+        }
+        infoShownDetails_.clear();
+        infoTitle_ = L"尚未打开包";
+        infoSubtitle_ = L"打开一个 .msi / .msp 文件以查看摘要、属性与媒体信息";
+        for (int i = 0; i < 4; ++i) infoStats_[i].clear();
+        applyInfoFilter();
         gridTables_->clear();
         gridTableData_->clear();
         gridVerify_->clear();
@@ -1352,41 +1424,114 @@ public:
             {L"路径", package_},
         }, {S(150), S(420)});
 
-        // summary ----------------------------------------------------------
-        std::vector<std::vector<std::wstring>> srows;
-        for (const auto& x : db_->summary()) srows.push_back({x.name, x.value});
-        gridSummary_->setData({L"属性", L"值"}, srows, {S(170), S(420)});
+        // info page: header facts + three tabbed data sets -----------------
+        infoTitle_ = prop(L"ProductName").empty()
+            ? util::path::fileName(package_) : prop(L"ProductName");
+        infoSubtitle_ = L"版本 " + prop(L"ProductVersion") + L"  ·  " +
+                        prop(L"Manufacturer") + L"  ·  " +
+                        (db_->isPatch() ? L"MSP 修补包" : L"MSI 安装数据库");
+        infoStats_[0] = L"文件大小   " + humanSize(size);
+        infoStats_[1] = L"数据表   " + std::to_wstring(tableNames_.size()) + L" 张";
+        infoStats_[2] = L"CAB   " + std::to_wstring(cabs) + L" 个";
+        infoStats_[3] = L"流   " +
+                        std::to_wstring(db_->streamNames().size()) + L" 个";
 
-        // key properties ---------------------------------------------------
-        static const wchar_t* keys[] = {
-            L"ProductName", L"ProductVersion", L"ProductCode", L"UpgradeCode",
-            L"Manufacturer", L"ProductLanguage", L"ALLUSERS", L"INSTALLLEVEL",
-            L"Platform", L"WindowsBuild", L"DefaultUIFont"};
-        std::vector<std::vector<std::wstring>> prows;
-        for (const wchar_t* k : keys) {
-            std::wstring v = db_->property(k);
-            if (!v.empty()) prows.push_back({k, v});
+        infoHeaders_[0] = {L"属性", L"值"};
+        infoRows_[0].clear();
+        infoDetails_[0].clear();
+        for (const auto& x : db_->summary()) {
+            infoRows_[0].push_back({x.name, x.value});
+            infoDetails_[0].push_back(x.name + L" = " + x.value);
         }
-        gridProps_->setData({L"属性", L"值"}, prows);
 
-        // media ------------------------------------------------------------
-        std::vector<std::vector<std::wstring>> mrows;
+        msi::QueryResult pr = db_->query(L"SELECT * FROM `Property`");
+        infoHeaders_[1] = pr.columns.empty()
+            ? std::vector<std::wstring>{L"属性", L"值"} : pr.columns;
+        infoRows_[1] = pr.rows;
+        infoDetails_[1].clear();
+        for (const auto& row : pr.rows) {
+            std::wstring d = row.empty() ? L"" : row[0];
+            if (row.size() > 1) d += L" = " + row[1];
+            infoDetails_[1].push_back(d);
+        }
+
+        infoHeaders_[2] = {L"DiskId", L"LastSequence", L"Cabinet",
+                           L"类型", L"大小", L"状态"};
+        infoRows_[2].clear();
+        infoDetails_[2].clear();
         for (const auto& x : media) {
             std::wstring type = x.cabinet.empty() ? L"未压缩布局"
                               : x.embedded ? L"内嵌 (#stream)" : L"外部 CAB";
             std::wstring state = x.cabinet.empty() ? L"layout 文件"
                                 : x.available ? L"可用" : L"缺失";
-            mrows.push_back({std::to_wstring(x.diskId),
-                             std::to_wstring(x.lastSequence),
-                             x.cabinet.empty() ? L"(none)" : x.cabinet,
-                             type, humanSize(x.size), state});
+            infoRows_[2].push_back({std::to_wstring(x.diskId),
+                                    std::to_wstring(x.lastSequence),
+                                    x.cabinet.empty() ? L"(none)" : x.cabinet,
+                                    type, humanSize(x.size), state});
+            std::wstring src = x.embedded ? (L"内嵌流 " + x.streamName)
+                             : x.sourcePath.empty() ? L"(无)" : x.sourcePath;
+            infoDetails_[2].push_back(
+                L"DiskId " + std::to_wstring(x.diskId) + L"  ·  来源：" + src +
+                L"  ·  大小 " + humanSize(x.size) +
+                L"  ·  " + (x.available ? L"文件可用" : L"文件缺失"));
         }
-        gridMedia_->setData({L"DiskId", L"LastSequence", L"Cabinet", L"类型",
-                             L"大小", L"状态"}, mrows);
+        applyInfoFilter();
 
         statusRight_ = util::fmt(L"%llu 张表 · %llu 个 CAB",
                                  static_cast<unsigned long long>(tableNames_.size()),
                                  static_cast<unsigned long long>(cabs));
+    }
+
+    void setInfoTab(int tab) {
+        infoTab_ = tab;
+        btnInfoSummary_->accent = (tab == 0);
+        btnInfoProps_->accent = (tab == 1);
+        btnInfoMedia_->accent = (tab == 2);
+        btnInfoSummary_->invalidate();
+        btnInfoProps_->invalidate();
+        btnInfoMedia_->invalidate();
+        applyInfoFilter();
+    }
+
+    // Filter the active data set and feed the single full-width grid. The
+    // detail strings stay aligned with the filtered rows so selecting a row
+    // always shows the correct source even while a filter is active.
+    void applyInfoFilter() {
+        int tab = infoTab_;
+        const auto& headers = infoHeaders_[tab];
+        const auto& rows = infoRows_[tab];
+        const auto& details = infoDetails_[tab];
+        std::wstring filter = util::toLower(util::trim(tbInfoSearch_->value()));
+        std::vector<std::vector<std::wstring>> shown;
+        infoShownDetails_.clear();
+        for (size_t i = 0; i < rows.size(); ++i) {
+            bool hit = filter.empty();
+            if (!hit) {
+                for (const auto& cell : rows[i]) {
+                    if (util::toLower(cell).find(filter) != std::wstring::npos) {
+                        hit = true;
+                        break;
+                    }
+                }
+            }
+            if (hit) {
+                shown.push_back(rows[i]);
+                infoShownDetails_.push_back(i < details.size() ? details[i] : L"");
+            }
+        }
+        gridInfo_->setData(headers, shown);
+        infoCount_ = util::fmt(L"共 %llu 项 · 显示 %llu 项 · 选中行查看完整内容",
+                               static_cast<unsigned long long>(rows.size()),
+                               static_cast<unsigned long long>(shown.size()));
+        infoDetail_.clear();
+        layout();
+    }
+
+    void updateInfoDetail(int row) {
+        if (row < 0 || row >= static_cast<int>(infoShownDetails_.size())) return;
+        if (infoShownDetails_[row].empty()) return;
+        infoDetail_ = infoShownDetails_[row];
+        layout();   // the detail strip appears and the table shrinks a little
     }
 
     void filterTables() {

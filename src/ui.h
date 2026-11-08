@@ -291,6 +291,8 @@ public:
     bool headerVisible = true;
     bool zebra = true;
     bool rounded = true;
+    int  rowHeightPx = 0;            // 0 = default S(32)
+    int  headHeightPx = 0;           // 0 = default S(36)
     std::function<void(int)> selectionChanged;
     std::function<void(int)> rowActivated;
 
