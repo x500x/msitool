@@ -12,6 +12,7 @@
 
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cwctype>
 #include <thread>
@@ -486,6 +487,7 @@ public:
 
     struct Card {
         RECT r; std::wstring title, subtitle; Ic icon; bool hero;
+        COLORREF subColor = CLR_INVALID;   // CLR_INVALID = theme muted
     };
     struct Label {
         RECT r; std::wstring text; HFONT font; COLORREF color; UINT fmt;
@@ -670,6 +672,12 @@ public:
     Button*   btnCaClear_ = nullptr;
     Button*   btnCaCopyXml_ = nullptr;
     Button*   btnCaSaveXml_ = nullptr;
+    // Right pane switch: the property form and the sequence timeline take
+    // turns using the full body height instead of being stacked (stacking
+    // forced 20 px controls on short or high-DPI displays).
+    Button*   btnCaPaneProps_ = nullptr;
+    Button*   btnCaPaneSeq_ = nullptr;
+    int       caPane_ = 0;          // 0 = property form, 1 = sequence timeline
     TextBox*  tbCaId_ = nullptr;
     TextBox*  tbCaBinary_ = nullptr;   Button* btnCaBinaryBrowse_ = nullptr;
     TextBox*  tbCaEntry_ = nullptr;
@@ -775,6 +783,7 @@ public:
             refreshEmptyState();
         }
         switchPage(PgHome);
+        runLayoutDumpHook();
         // Don't let the first EDIT grab the initial focus: the cue banner
         // should be visible and no control should look "active" on launch.
         SetFocus(hwnd_);
@@ -1284,6 +1293,14 @@ public:
         btnCaClear_  = caBtn(L"清空",   Ic::Cross,      [this] { caClear(); });
         btnCaCopyXml_ = caBtn(L"复制片段", Ic::Copy,    [this] { caCopyXml(); });
         btnCaSaveXml_ = caBtn(L"导出清单", Ic::Save,    [this] { caSaveXml(); });
+        btnCaPaneProps_ = caBtn(L"属性表单", Ic::Settings, [this] { caSetPane(0); });
+        btnCaPaneSeq_   = caBtn(L"执行序列", Ic::Bolt,     [this] { caSetPane(1); });
+        // The pane switch and the manifest tools read as bordered buttons
+        // (like the pack tab strip); the list tools stay borderless so the
+        // toolbar reads as two groups: list editing vs. manifest I/O.
+        for (Button* b : {btnCaPaneProps_, btnCaPaneSeq_,
+                          btnCaImport_, btnCaCopyXml_, btnCaSaveXml_})
+            b->subtle = false;
 
         auto edit = [this] { caOnEdit(); };
         auto text = [this, &edit](const wchar_t* cue) {
@@ -1345,6 +1362,7 @@ public:
         tag(4, {gridCaList_, gridCaTimeline_,
                 btnCaAdd_, btnCaDup_, btnCaDel_, btnCaUp_, btnCaDown_,
                 btnCaImport_, btnCaClear_, btnCaCopyXml_, btnCaSaveXml_,
+                btnCaPaneProps_, btnCaPaneSeq_,
                 tbCaId_, tbCaBinary_, btnCaBinaryBrowse_, tbCaEntry_,
                 tbCaFile_, tbCaDirectory_, tbCaProperty_, tbCaValue_,
                 tbCaTarget_, tbCaSeq_, tbCaCondition_,
@@ -1399,8 +1417,10 @@ public:
 
     // ---- layout ----------------------------------------------------------
     void addCard(RECT r, std::wstring title, std::wstring sub = L"",
-                 Ic icon = Ic::None, bool hero = false) {
-        cards_.push_back({r, std::move(title), std::move(sub), icon, hero});
+                 Ic icon = Ic::None, bool hero = false,
+                 COLORREF subColor = CLR_INVALID) {
+        cards_.push_back({r, std::move(title), std::move(sub), icon, hero,
+                          subColor});
     }
     void addLabel(RECT r, const std::wstring& text, HFONT font, COLORREF color,
                   UINT fmt = DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS) {
@@ -1509,6 +1529,94 @@ public:
         }
         for (auto& w : widgets_) w->invalidate();
         InvalidateRect(hwnd_, nullptr, TRUE);
+    }
+
+    // ---- layout QA hook --------------------------------------------------
+    // MSITOOL_LAYOUT_DUMP=<prefix> renders the custom action editor at a
+    // matrix of logical sizes / DPI scales and writes the computed geometry
+    // to <prefix>_<dpi>_<w>x<h>.<pane>.txt. tools/layout_check.py reads those
+    // files and fails on overlapping or out-of-card controls, which is how
+    // the two-pane layout regression (property rows overlapping the timeline
+    // label at 150% DPI) is caught without screenshot comparisons.
+    void runLayoutDumpHook() {
+        wchar_t base[MAX_PATH]{};
+        if (GetEnvironmentVariableW(L"MSITOOL_LAYOUT_DUMP", base, MAX_PATH) <= 0)
+            return;
+        struct Case { int dpi, w, h; };
+        static const Case cases[] = {
+            { 96, 1160, 620}, { 96, 1160, 860}, { 96, 1360, 736},
+            { 96, 1920, 1040}, {144, 1160, 620}, {144, 1160, 860},
+            {144, 1360, 736}, {144, 1920, 1040},
+        };
+        // Pack page, custom action tab, one action of every field layout:
+        // dll = three source fields (the tallest property sheet).
+        RECT keep{};
+        GetClientRect(hwnd_, &keep);
+        switchPage(PgPack);
+        setPackTab(4);
+        caAdd();
+        caAdd();
+        caAdd();
+        pack::CustomActionSpec& a0 = caSpecs_[0];
+        a0.type = L"dll"; a0.binary = L"CustomActions.dll";
+        a0.entry = L"DoStuff"; a0.target = L"[INSTALLFOLDER]";
+        caSpecs_[1].type = L"setproperty";
+        caSpecs_[2].type = L"exedir";
+        caSel_ = 0;
+        caRefresh();
+        for (const Case& c : cases) {
+            applyTheme(c.dpi);
+            // SWP_NOSENDCHANGING bypasses the WM_GETMINMAXINFO min track
+            // size, which would otherwise clamp the short test cases.
+            SetWindowPos(hwnd_, nullptr, 0, 0,
+                         MulDiv(c.w, c.dpi, 96), MulDiv(c.h, c.dpi, 96),
+                         SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE |
+                         SWP_NOSENDCHANGING);
+            for (int pane = 0; pane < 2; ++pane) {
+                caPane_ = pane;
+                layout();
+                writeLayoutDump(
+                    util::fmt(L"%s_%d_%dx%d.%s.txt", base, c.dpi, c.w, c.h,
+                              pane == 0 ? L"props" : L"seq"));
+            }
+        }
+        caPane_ = 0;
+        caSpecs_.clear();
+        caSel_ = -1;
+        caEdited_ = false;
+        caRefresh();
+        applyTheme();
+        // Leave the window exactly as the user (or the OS) had it before the
+        // dump, then go back to the overview page.
+        SetWindowPos(hwnd_, nullptr, 0, 0, keep.right, keep.bottom,
+                     SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE |
+                     SWP_NOSENDCHANGING);
+        switchPage(PgHome);
+    }
+
+    void writeLayoutDump(const std::wstring& path) {
+        FILE* f = _wfopen(path.c_str(), L"wb");
+        if (!f) return;
+        RECT rc{};
+        GetClientRect(hwnd_, &rc);
+        const int nl = 10;   // newline: kept out of the format strings
+        fwprintf(f, L"# client %d %d dpi %d page %d tab %d pane %d%c",
+                 rc.right, rc.bottom, theme().dpi, page_, packTab_, caPane_, nl);
+        for (const auto& wp : widgets_) {
+            const Widget* w = wp.get();
+            if (!w->visible()) continue;
+            const RECT& r = w->rect();
+            fwprintf(f, L"W %d %d %d %d%c", r.left, r.top, r.right, r.bottom, nl);
+        }
+        for (const Card& c : cards_) {
+            fwprintf(f, L"C %ld %ld %ld %ld %s%c", c.r.left, c.r.top,
+                     c.r.right, c.r.bottom, c.title.c_str(), nl);
+        }
+        for (const Label& l : labels_) {
+            fwprintf(f, L"L %ld %ld %ld %ld %s%c", l.r.left, l.r.top,
+                     l.r.right, l.r.bottom, l.text.c_str(), nl);
+        }
+        fclose(f);
     }
 
     void layoutHome(const RECT& body) {
@@ -1820,7 +1928,18 @@ public:
         static const Ic kIcon[5] = {Ic::Pack, Ic::Settings, Ic::Shield,
                                      Ic::Bolt, Ic::Terminal};
         addCard(tabBar, L"", L"");
-        addCard(form, kTitle[packTab_], kSub[packTab_], kIcon[packTab_]);
+        // On the custom action tab the subtitle doubles as the lint status
+        // line, so the result of the last edit is visible right next to the
+        // page title instead of stealing a row from the property form.
+        std::wstring formSub = kSub[packTab_];
+        COLORREF formSubColor = CLR_INVALID;
+        if (caTab && !caStatus_.empty()) {
+            formSub = caStatus_;
+            formSubColor = caStatusKind_ == 2 ? t.danger
+                          : caStatusKind_ == 1 ? t.warning : t.success;
+        }
+        addCard(form, kTitle[packTab_], formSub, kIcon[packTab_], false,
+                formSubColor);
         if (!caTab)
             addCard(logCard, L"运行日志", L"FCI 压缩与 Msi 建库过程", Ic::Terminal);
 
@@ -1944,48 +2063,76 @@ public:
             btnShortcutDel_->setRect(R(leftX + S(118), form.bottom - S(36), S(110), S(28)));
         } else if (packTab_ == 4) {
             // ---- Visual custom action editor ---------------------------
-            // Two full-height columns: the left one is the action list with
-            // its row tools, the right one stacks the property sheet above
-            // the sequence timeline. No full-width bottom strip and no log
-            // card any more, so both columns use the whole form.
-            const int caPadX = S(18), caColGap = S(18);
-            int caInnerW = W(form) - caPadX * 2;
-            int caLeftX = form.left + caPadX;
-            int top = form.top + S(52);       // leave room for title + subtitle
-            int bottom = form.bottom - S(10);
-            int caMainH = std::max(S(200), bottom - top);
-            int listW = std::max(S(300),
-                                 (caInnerW - caColGap) * 40 / 100);
-            int propX = caLeftX + listW + caColGap;
-            int propW = form.right - caPadX - propX;
-            int timelineH = std::min(S(190),
-                                     std::max(S(110), caMainH * 30 / 100));
-            // Snap the timeline to whole rows (label + header + N rows), so
-            // neither the first nor the last visible row is cut in half.
-            int tlRows = std::max(3, (timelineH - S(24) - S(28)) / S(23));
-            timelineH = S(24) + S(28) + tlRows * S(23);
-            int propBottom = bottom - timelineH;
-            int propH = std::max(S(180), propBottom - top);
+            // One toolbar row, then a master / detail body: the action list
+            // on the left, and a single right pane that switches between the
+            // property form and the sequence timeline. Stacking both panes in
+            // one column used to squeeze the property rows down to ~20 px on
+            // short or high-DPI displays (and could even overlap the
+            // timeline), so the two panes now take turns using the full body
+            // height.
+            const int caPadX = S(18), caColGap = S(20);
+            const int caLeftX = form.left + caPadX;
+            const int caInnerW = W(form) - caPadX * 2;
+            const int top = form.top + S(46);        // below title + subtitle
+            const int bottom = form.bottom - S(12);
+            const int listW = std::min(S(430),
+                                       std::max(S(320), caInnerW * 36 / 100));
+            const int paneX = caLeftX + listW + caColGap;
+            const int paneW = std::max(S(320),
+                static_cast<int>(form.right - caPadX - paneX));
             const bool hasSel = caSel_ >= 0 &&
                                 caSel_ < static_cast<int>(caSpecs_.size());
 
-            addLabel(R(caLeftX, top, listW, S(18)),
+            // --- toolbar: list tools left, manifest tools right ----------
+            const int barH = S(32), opW = S(72), opGap = S(6);
+            Button* listOps[6] = {btnCaAdd_, btnCaDup_, btnCaDel_,
+                                  btnCaUp_, btnCaDown_, btnCaClear_};
+            for (int i = 0; i < 6; ++i)
+                listOps[i]->setRect(R(caLeftX + i * (opW + opGap), top,
+                                      opW, barH));
+            const int fileW = S(108), fileGap = S(8);
+            const int fileGroupW = fileW * 3 + fileGap * 2;
+            const int fileX = form.right - caPadX - fileGroupW;
+            Button* fileOps[3] = {btnCaImport_, btnCaCopyXml_, btnCaSaveXml_};
+            for (int i = 0; i < 3; ++i)
+                fileOps[i]->setRect(R(fileX + i * (fileW + fileGap), top,
+                                      fileW, barH));
+            const bool anyAction = !caSpecs_.empty();
+            btnCaAdd_->setEnabled(true);
+            btnCaDup_->setEnabled(hasSel);
+            btnCaDel_->setEnabled(hasSel);
+            btnCaUp_->setEnabled(hasSel && caSel_ > 0);
+            btnCaDown_->setEnabled(hasSel &&
+                                   caSel_ + 1 < static_cast<int>(caSpecs_.size()));
+            btnCaClear_->setEnabled(anyAction);
+            btnCaImport_->setEnabled(true);
+            btnCaCopyXml_->setEnabled(anyAction);
+            btnCaSaveXml_->setEnabled(true);
+
+            const int contentTop = top + barH + S(12);
+            const int contentH = std::max(S(160), bottom - contentTop);
+
+            // --- left column: the action list -----------------------------
+            addLabel(R(caLeftX, contentTop, listW, S(18)),
                      util::fmt(L"动作列表 · %llu 项",
                                static_cast<unsigned long long>(caSpecs_.size())),
                      t.fSmall, t.subText);
-            gridCaList_->setRect(R(caLeftX, top + S(22), listW,
-                                   std::max(S(80), caMainH - S(22) - S(60))));
+            gridCaList_->setRect(R(caLeftX, contentTop + S(22), listW,
+                                   std::max(S(80), contentH - S(22))));
             gridCaList_->setColumnWidths(caListWidths());
-            int bw = (listW - S(18)) / 4;
-            int by = bottom - S(56);
-            Button* row1[4] = {btnCaAdd_, btnCaDup_, btnCaDel_, btnCaImport_};
-            Button* row2[4] = {btnCaUp_, btnCaDown_, btnCaClear_, nullptr};
-            for (int i = 0; i < 4; ++i) {
-                if (row1[i]) row1[i]->setRect(
-                    R(caLeftX + (bw + S(6)) * i, by, bw, S(26)));
-                if (row2[i]) row2[i]->setRect(
-                    R(caLeftX + (bw + S(6)) * i, by + S(30), bw, S(26)));
-            }
+
+            // --- right column: pane switch --------------------------------
+            const int swH = S(30), swW1 = S(108), swW2 = S(116);
+            btnCaPaneProps_->accent = caPane_ == 0;
+            btnCaPaneSeq_->accent = caPane_ == 1;
+            btnCaPaneProps_->invalidate();
+            btnCaPaneSeq_->invalidate();
+            btnCaPaneProps_->setRect(R(paneX, contentTop, swW1, swH));
+            btnCaPaneSeq_->setRect(R(paneX + swW1 + S(6), contentTop,
+                                     swW2, swH));
+            const bool formPane = caPane_ == 0;
+            const int bodyTop = contentTop + swH + S(12);
+            const int bodyH = std::max(S(120), bottom - bodyTop);
 
             struct Slot {
                 int bit; const wchar_t* label; Widget* ctrl; Button* browse;
@@ -2001,43 +2148,48 @@ public:
             };
             const int mask = hasSel ? pack::caFieldMask(caSpecs_[caSel_].type) : 0;
             int used = 0;
+            const bool showForm = hasSel && formPane;
             for (const Slot& s : slots) {
-                bool show = hasSel && (mask & s.bit) && used < 4;
+                const bool show = showForm && (mask & s.bit) && used < 4;
                 s.ctrl->setVisible(show);
                 if (s.browse) s.browse->setVisible(show);
                 if (show) ++used;
             }
-            // Only allocate rows for the fields the selected type needs, so
-            // the property sheet fills the available height at any type.
-            const int totalRows = 6 + used;
-            int caRowH = std::min(S(52),
-                                  std::max(S(24), (propH - S(12)) / totalRows));
-            int caCtrlH = std::min(S(32), caRowH - S(6));
+            // Rows: id/type, the type-specific fields, phase/seq, condition.
+            // The flag block below gets everything that is left over, in
+            // three rows, so nothing is clipped when the window is short.
+            const int fieldRows = 3 + used;
+            const int caRowH = std::max(S(26), std::min(S(46),
+                                       bodyH / (fieldRows + 2)));
+            const int caCtrlH = std::max(S(20), std::min(S(34), caRowH - S(6)));
             auto pair = [&](int row, const wchar_t* l1, Widget* c1,
                             const wchar_t* l2, Widget* c2) {
-                if (!hasSel) return;   // labels are painted by the frame, so
-                                       // skip them together with hidden fields
-                int y = top + row * caRowH;
-                int half = (propW - S(12)) / 2;
-                addLabel(R(propX, y, S(74), S(18)), l1, t.fSmall, t.subText);
-                c1->setRect(R(propX + S(76), y - S(2), half - S(76), caCtrlH));
-                int x2 = propX + half + S(12);
-                addLabel(R(x2, y, S(74), S(18)), l2, t.fSmall, t.subText);
-                c2->setRect(R(x2 + S(76), y - S(2), half - S(76), caCtrlH));
+                if (!showForm) return;   // labels are painted by the frame, so
+                                         // skip them with their hidden fields
+                const int y = bodyTop + row * caRowH;
+                const int ly = y + (caRowH - S(18)) / 2;
+                const int cy = y + (caRowH - caCtrlH) / 2;
+                const int half = (paneW - S(12)) / 2;
+                addLabel(R(paneX, ly, S(74), S(18)), l1, t.fSmall, t.subText);
+                c1->setRect(R(paneX + S(76), cy, half - S(76), caCtrlH));
+                const int x2 = paneX + half + S(12);
+                addLabel(R(x2, ly, S(74), S(18)), l2, t.fSmall, t.subText);
+                c2->setRect(R(x2 + S(76), cy, half - S(76), caCtrlH));
             };
             auto line = [&](int row, const wchar_t* label, Widget* ctrl,
                             Button* browse) {
-                if (!hasSel) return;
-                int y = top + row * caRowH;
-                const int labelW = S(90);
+                if (!showForm) return;
+                const int y = bodyTop + row * caRowH;
+                const int labelW = S(104);
                 const int bw2 = browse ? S(70) : 0;
-                addLabel(R(propX, y, labelW, S(18)), label, t.fSmall, t.subText);
-                ctrl->setRect(R(propX + labelW + S(6), y - S(2),
-                                propW - labelW - S(6) - bw2 - (bw2 ? S(6) : 0),
+                const int cy = y + (caRowH - caCtrlH) / 2;
+                addLabel(R(paneX, y + (caRowH - S(18)) / 2, labelW, S(18)),
+                         label, t.fSmall, t.subText);
+                ctrl->setRect(R(paneX + labelW + S(6), cy,
+                                paneW - labelW - S(6) - bw2 - (bw2 ? S(6) : 0),
                                 caCtrlH));
                 if (browse)
-                    browse->setRect(R(propX + propW - bw2, y - S(2),
-                                      bw2, caCtrlH));
+                    browse->setRect(R(paneX + paneW - bw2, cy, bw2, caCtrlH));
             };
             pair(0, L"动作 ID", tbCaId_, L"类型", ddCaType_);
             int shown = 0;
@@ -2049,39 +2201,35 @@ public:
             pair(1 + used, L"插入阶段", ddCaPhase_, L"序号", tbCaSeq_);
             line(2 + used, L"执行条件", tbCaCondition_, nullptr);
 
-            int flagsTop = top + (3 + used) * caRowH;
-            int fh = std::max(S(16), (caRowH * 2 - S(6)) / 3);
-            int caColW = (propW - S(16)) / 3;
+            const int flagsTop = bodyTop + fieldRows * caRowH;
+            const int flagsH = std::max(S(48), bottom - flagsTop);
+            const int fh = std::max(S(16), std::min(S(32), flagsH / 3));
+            const int flagW = (paneW - S(16)) / 3;
             for (int i = 0; i < 9; ++i)
-                chkCaFlags_[i]->setRect(R(propX + (i % 3) * (caColW + S(8)),
+                chkCaFlags_[i]->setRect(R(paneX + (i % 3) * (flagW + S(8)),
                                           flagsTop + (i / 3) * fh,
-                                          caColW, fh));
-            int sy = top + (5 + used) * caRowH;
-            const int btnW = S(110);
-            btnCaCopyXml_->setRect(R(propX + propW - btnW * 2 - S(8), sy,
-                                     btnW, caCtrlH));
-            btnCaSaveXml_->setRect(R(propX + propW - btnW, sy, btnW, caCtrlH));
-            COLORREF statusColor = caStatusKind_ == 2 ? t.danger
-                                 : caStatusKind_ == 1 ? t.warning : t.success;
-            addLabel(R(propX, sy, propW - btnW * 2 - S(16), caCtrlH),
-                     caStatus_, t.fSmall, statusColor);
-
+                                          flagW, fh));
             for (Widget* w : std::initializer_list<Widget*>{
-                     tbCaId_, ddCaType_, ddCaPhase_, tbCaSeq_, tbCaCondition_,
-                     btnCaCopyXml_, btnCaSaveXml_})
-                w->setVisible(hasSel);
-            for (int i = 0; i < 9; ++i) chkCaFlags_[i]->setVisible(hasSel);
-            if (!hasSel)
-                addLabel(R(propX, top + propH / 2 - S(30), propW, S(60)),
-                         L"尚未定义自定义动作。\r\n点击「新增」创建，或「导入清单」载入现有 <customactions>。",
+                     tbCaId_, ddCaType_, ddCaPhase_, tbCaSeq_, tbCaCondition_})
+                w->setVisible(showForm);
+            for (int i = 0; i < 9; ++i) chkCaFlags_[i]->setVisible(showForm);
+            if (formPane && !hasSel)
+                addLabel(R(paneX, bodyTop + bodyH / 2 - S(40), paneW, S(80)),
+                         L"尚未定义自定义动作。\r\n点击上方「新增」创建，或「导入」载入现有 <customactions>。",
                          t.fBody, t.muted, DT_LEFT | DT_TOP | DT_WORDBREAK);
 
-            addLabel(R(propX, propBottom + S(2), propW, S(18)),
-                     L"执行序列预览 · 标准动作 + 自定义动作按序号排列（点击自定义行可编辑）",
-                     t.fSmall, t.subText);
-            gridCaTimeline_->setRect(R(propX, propBottom + S(22), propW,
-                                       std::max(S(60), timelineH - S(24))));
-            gridCaTimeline_->setColumnWidths(caTimelineWidths());
+            // --- right column: sequence timeline --------------------------
+            const bool seqPane = caPane_ == 1;
+            gridCaTimeline_->setVisible(seqPane);
+            if (seqPane) {
+                const int hintH = S(20);
+                gridCaTimeline_->setRect(R(paneX, bodyTop, paneW,
+                                           std::max(S(80), bodyH - hintH - S(6))));
+                gridCaTimeline_->setColumnWidths(caTimelineWidths());
+                addLabel(R(paneX, bodyTop + bodyH - hintH, paneW, hintH),
+                         L"点击带 ⚡ 的行选中该动作 · 其余为打包器写入的标准动作",
+                         t.fSmall, t.muted);
+            }
         } else {
             field(0, 0, L"签名证书 (.pfx)", tbSignCert_, btnSignCertBrowse_);
             field(0, 1, L"证书密码", tbSignPassword_, nullptr);
@@ -2308,7 +2456,9 @@ public:
                            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
                     if (!c.subtitle.empty())
                         g.text(R(tx, c.r.top + S(30), W(c.r) - S(60), S(16)),
-                               c.subtitle, t.muted, t.fSmall,
+                               c.subtitle, c.subColor == CLR_INVALID
+                                                 ? t.muted : c.subColor,
+                               t.fSmall,
                                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
                 }
             }
@@ -3598,8 +3748,10 @@ public:
 
     std::vector<int> caListWidths() const {
         int w = std::max(S(320), gridCaList_->width());
-        std::vector<int> v = {w * 30 / 100, w * 28 / 100, w * 26 / 100, 0};
-        v[3] = std::max(S(46), w - v[0] - v[1] - v[2]);
+        // 来源 carries "Binary: xxx.dll" style text, so it gets the widest
+        // column; 序号 only needs room for four digits plus the row icon.
+        std::vector<int> v = {w * 28 / 100, w * 25 / 100, w * 31 / 100, 0};
+        v[3] = std::max(S(50), w - v[0] - v[1] - v[2]);
         return v;
     }
 
@@ -3825,20 +3977,20 @@ public:
                 : L"未编辑 · 清单中的 <customactions> 仍会生效";
             caStatusKind_ = 0;
         } else if (errors) {
-            caStatus_ = util::fmt(L"%d 个错误 · %d 个提醒 · 打包前需修正",
+            caStatus_ = util::fmt(L"✗ %d 个错误 · %d 个提醒 · 打包前需修正",
                                   errors, warns);
             caStatusKind_ = 2;
         } else if (warns) {
-            caStatus_ = util::fmt(L"%d 个提醒 · 可继续打包", warns);
+            caStatus_ = util::fmt(L"⚠ %d 个提醒 · 可继续打包", warns);
             caStatusKind_ = 1;
         } else {
             caStatus_ = util::fmt(
-                L"%llu 个动作 · 检查通过 · 打包时以本页列表为准",
+                L"✓ %llu 个动作 · 检查通过 · 打包时以本页列表为准",
                 static_cast<unsigned long long>(caSpecs_.size()));
             caStatusKind_ = 0;
         }
         // The grid only has room for a ✓/⚠/✗ marker; show the concrete
-        // message of the selected row in the status line.
+        // message of the selected row in the card subtitle.
         for (const auto& i : issues) {
             if (i.row != caSel_) continue;
             caStatus_ = (i.error ? L"✗ " : L"⚠ ") + i.text + L" · " + caStatus_;
@@ -3851,6 +4003,14 @@ public:
         caRefreshForm();
         caRefreshTimeline();
         caRefreshStatus();
+        layout();
+    }
+
+    // Switch the right editor pane (property form / sequence timeline).
+    // The two panes share one column, so a switch only needs a re-layout.
+    void caSetPane(int pane) {
+        if (pane == caPane_) return;
+        caPane_ = pane;
         layout();
     }
 
