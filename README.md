@@ -45,6 +45,7 @@
 | 导出 | 全部表为 `.idt`、全部 `_Streams` 原始流、`Binary` 条目、`summary.txt`、CAB + `manifest.txt` |
 | 解包 | 还原安装目录树；内嵌 CAB（`_Streams`）、外部 CAB、未压缩 layout、跨 CAB 连续文件（FDI 分卷集）、`.msp` 补丁负载都支持；`--transform` 可查看应用 transform 后的视图；GUI 另提供资源管理器式浏览（目录树 + 文件列表、筛选、右键菜单、双击单文件解包、目录递归解包、自动输出目录） |
 | 打包 | 把目录做成自包含 MSI：FCI 生成一个或多个 MSZIP CAB + Msi API 建库/写流/写摘要，可选安装位置（`--install-dir`）、分卷、空目录、快捷方式（桌面 / 公共桌面 / 开始菜单子目录 / 图标索引 / 广告式）、注册表、服务、环境变量、多 Feature、**XML 清单**、**内置中英多页向导**、**UI 模板导入**、自定义 UI 与数字签名 |
+| Transform | `transform` 用 `MsiDatabaseGenerateTransformW` + `MsiCreateTransformSummaryInfoW` 把两个 MSI 的差异写成真正的 `.mst`（可指定 error / validation 标志，`--dry-run` 只做逐表 diff）；`apply` 复制原包后在事务句柄上 `MsiDatabaseApplyTransformW` + `MsiDatabaseCommit` 落地新包；`mst` 读取摘要流与 `_TransformView` 变更明细；`--transform` 继续支持把 MST 作为只读视图查看 / 解包 |
 | 输出 | UTF-8 文本表格或 `--tsv`；控制字符转义为 `\xNN`；警告与详细日志走 stderr |
 | 图形界面 | 纯 Win32 API（user32 / gdi32 / shell32 / ole32）自绘的 Fluent 界面：亮/暗主题、高 DPI（Per-Monitor V2，实测 75%–300%，跨显示器热切换会重排布局与列宽）、导航、卡片、数据网格、SQL 查询、解包/导出/打包表单、实时日志与进度；**不使用任何第三方库或 UI 框架** |
 
@@ -128,6 +129,7 @@ build\msitool_x64.exe gui setup.msi         :: 启动 GUI 并直接打开一个�
 | 解包 | **整页是文件资源管理器**：命令 / 地址栏（后退、前进、上一级、刷新、可点击面包屑、搜索框、解包全部、解包选中、选项、日志）+ 左侧导航树 + 右侧详细信息列表（文件夹与文件混排、图标、类型列、点击表头排序、双击进入目录 / 双击文件解包、右键菜单）；常驻「解包到」位置条可直接编辑路径、点「浏览…」选目录、从「最近」下拉复用历史目录、点「打开」查看，默认自动填 `<包名>_files`；六个开关、MST transform 与基准 MSI 收进可折叠「选项」，运行日志收进可折叠「日志」抽屉（展开后按窗口高度自适应，约占页面 1/3，最大化时更高） |
 | 导出 | CAB / 完整归档两种模式、运行日志 |
 | 打包 | 「基本 / 高级 / 签名 / 快捷方式 / 自定义动作」五个标签页，字段按窗口尺寸自适应两列排布（基本页含源目录、输出 MSI、产品名称、产品版本、安装目录；高级页含 CAB 分卷、XML 清单、UI 模板、UI 语言与安装范围；快捷方式页含主程序、桌面 / 开始菜单勾选与可增删行的内联快捷方式表格——名称 / 位置 / 目标 / 参数 / 图标 / 索引 / 说明；自定义动作页为可视化编辑器——动作列表 + 类型感知属性表单 + 标志位 + 执行序列时间线 + 实时检查 + XML 导入 / 导出，详见 [自定义动作](#自定义动作customactions)）；右上角「开始打包」常驻，完成后自动打开新 MSI；文件 / 文件夹可直接拖入（见 [拖放](#拖放)） |
+| Transform | 原包 / 更新包 / `.mst` / 输出包四个路径 + `--errors` / `--validate` 标志输入，三个动作：生成 MST（逐表 diff 统计）、应用 MST（复制 + 提交成新包）、查看变更（摘要流 + `_TransformView` 明细）；结果与进度走运行日志 |
 | 验证 | 签名 / `MsiOpenDatabase` / `MsiVerifyPackage` / `_Tables` / 媒体检查报告 |
 | 设置 | 主题、DPI 信息、可自定义快捷键（点击按键框重新录制、Backspace 清除、一键恢复默认）与关于（版本 / 协议 / 可点击项目主页 / 构建信息） |
 
@@ -201,6 +203,9 @@ msitool                          :: 不带参数 = 图形界面
 | `export` | `<包> <输出目录>` | 导出全部表 `.idt`、全部流、Binary、`summary.txt` |
 | `extract` | `<包> <输出目录>` | 解包：还原目录树并解压 CAB 中的文件；`.msp` 导出补丁负载 |
 | `pack` | `<源目录> <输出.msi>` | 打包：目录 → 自包含 MSI（一个或多个内嵌 MSZIP CAB） |
+| `transform` | `<原包.msi> <新包.msi> <输出.mst>` | 生成 transform：比较两个 MSI，按差异写出 `.mst`（`--dry-run` 只比较不写） |
+| `apply` | `<原包.msi> <输出.msi> <file.mst...>` | 应用 transform：复制原包 → 依次应用 MST → 提交为新包 |
+| `mst` | `<file.mst>` | 查看 transform：摘要流（错误条件 / 校验项）、目标产品、内部流；`--base-msi` 时列出 `_TransformView` 变更明细 |
 
 `list` 的常用名称：`files`、`components`、`features`、`dirs` / `directories`、`media`、`properties`、`streams`、`cabs`、`shortcuts`、`registry`、`services`、`customactions`、`upgrade`、`launchconditions`、`featurecomponents`、`binaries`、`assemblies`、`tables`，也可直接写任意真实表名。
 
@@ -280,6 +285,73 @@ msitool extract KB2565063.msp C:\out\patch --base-msi C:\src\setup.msi
 ```
 
 QFE / hotfix 型补丁（例如 KB2565063）通常只有 `QFE.cab`、没有 transform 流：此时 `--base-msi` 只能解出目标 MSI 本身的布局，补丁文件仍以 CAB 内部名放在 `payload\`。
+
+### 生成 / 应用 transform（`transform` / `apply` / `mst`）
+
+transform（`.mst`）是 Windows Installer 的“补丁式差异数据”：它只包含两张数据库之间的**差异**（改动的行、新增/删除的表、替换的 `_Streams` 负载），应用时必须针对**原包（base）**。`msitool` 三个命令覆盖了完整生命周期：
+
+| 命令 | 做什么 | 用到的 API |
+| --- | --- | --- |
+| `transform` | 比较两个 MSI，写出 `.mst`；先逐表 diff 并打印改动统计 | `MsiDatabaseGenerateTransformW`、`MsiCreateTransformSummaryInfoW` |
+| `apply` | 复制原包 → 在事务句柄上依次应用 MST → 提交为新包 | `MsiDatabaseApplyTransformW`、`MsiDatabaseCommit` |
+| `mst` | 读取 `.mst` 的摘要流与内部流；带 `--base-msi` 时列出 `_TransformView` 变更明细 | 属性集（OLE）读取、`MSITRANSFORM_ERROR_VIEWTRANSFORM` |
+
+```bat
+:: 1) 只比较，不落盘（输出 .mst 可省略）
+msitool transform setup.msi setup2.msi --dry-run
+
+:: 2) 生成 transform，写入 error / validation 标志
+msitool transform setup.msi setup2.msi custom.mst --errors addexistingrow ^
+                 --validate product,language --force
+
+:: 3) 应用到一个新包（原包不动）
+msitool apply setup.msi setup-custom.msi custom.mst
+
+:: 4) 查看 transform 本身；再加 --base-msi 看安装程序视角的变更明细
+msitool mst custom.mst
+msitool mst custom.mst --base-msi setup.msi
+```
+
+`transform` 的输出（真实样例，两个 Windows Desktop Runtime 包）：
+
+```
+Transform : T:\out\big.mst
+Size      : 104.0 KiB
+Errors    : none (suppressed)
+Validation: none
+Summary   : written (MsiCreateTransformSummaryInfo)
+Changes   : 15 table(s), 877 added row(s), 601 removed, 6 modified
+
+Table                  | Added | Removed | Modified | Schema
+-----------------------+-------+---------+----------+--------
+Component              | 283   | 190     | 1        |
+Directory              | 15    | 6       | 0        |
+File                   | 282   | 184     | 0        |
+Media                  | 0     | 0       | 1        |
+Property               | 0     | 0       | 4        |
+_Streams               | 4     | 4       | 0        |
+```
+
+`mst --base-msi` 的输出直接来自安装程序：
+
+```
+Table             | Row           | Column      | New value             | Current value
+------------------+---------------+-------------+-----------------------+--------------------
+Directory         | INSTALLFOLDER | DefaultDir  | F basic               | F minimal
+Property          | ProductName   | Value       | F basic               | F minimal
+Property          | ProductCode   | Value       | {A957EE14-9111-...}   | {F44AAA7E-C4A5-...}
+Dialog            |               | DROP        |                       |
+```
+
+实现要点：
+
+- **diff 的行身份**用表的主键；无主键的表退化为整行内容，因此改动表现为「删除 + 新增」。
+- **二进制列**（`_Streams.Data`、`Binary.Data` 等）用 FNV-1a 64 位指纹比较，所以替换了 CAB 但行键不变也能看出来；`_Streams` / `_Storages` 不在 `_Tables` 里，diff 会显式补上（transform 会携带这些负载）。
+- `transform` 发现两个包完全相同（安装程序返回 `ERROR_NO_DATA`）时**不写空文件**，只报告“无差异”。
+- `apply` 先复制原包，再用 `MSIDBOPEN_TRANSACT` 打开副本：任何一步失败都不会留下半成品（副本会被删除）；目标与原包同一个文件时必须显式 `--force`（原地应用）。
+- 原包带 Authenticode 签名时，`apply` 会提示：签名流会被原样复制并因此失效，需要重新签名。
+- `--errors` / `--validate` 接受名称（`addexistingrow`、`product`、`language` …）或数值（`0x11`），含义就是 `MSITRANSFORM_ERROR_*` / `MSITRANSFORM_VALIDATE_*`；不带校验标志时按安装程序的默认行为（不校验）执行。
+- 查看 transform 摘要流时会把安装程序打包的「错误条件 / 校验项」解出来（低 16 位 = error conditions，高 16 位 = validation），无需猜测。
 
 ### 打包选项（`pack`）
 
@@ -567,7 +639,7 @@ MSI SQL 是 SQL 的**子集**（例如没有 `COUNT(*)` 这类聚合函数），
 │   ├── ui.h                     UI 层接口：主题、GDI 绘制器、控件声明
 │   ├── ui_draw.cpp              主题 / DPI / 双缓冲绘制 / 矢量图标
 │   ├── ui_widgets.cpp           自绘控件：按钮、输入框、下拉、网格、日志、进度、导航
-│   ├── ui_app.cpp               主窗口、九个页面、业务逻辑与后台任务
+│   ├── ui_app.cpp               主窗口、十个页面、业务逻辑与后台任务
 │   └── main.cpp                 入口：无参数进 GUI，带参数进 CLI（全部命令）
 ├── resources/
 │   ├── msitool.rc               RCDATA 资源清单
@@ -585,6 +657,7 @@ MSI SQL 是 SQL 的**子集**（例如没有 `COUNT(*)` 这类聚合函数），
 │   ├── layout_check.py          自定义动作编辑器几何检查（重叠 / 越界，无需截图）
 │   ├── make_ui_art.ps1          生成内置 banner / background / 示例 EULA
 │   ├── pack_regression.ps1      打包回归：全部 UI 模式 + verify + /a + 向导走查
+│   ├── transform_regression.py  transform / apply / mst 回归：生成、应用、往返一致、错误路径
 │   └── ui_walkthrough.py        真实安装向导自动走查（en / zh-CN，per-user）
 ├── build.bat                    MSVC 构建脚本（x64 / x86 / clean）
 ├── CMakeLists.txt               CMake 构建（MSVC）
@@ -686,6 +759,13 @@ build\msitool_x64.exe list setup.msi properties --transform custom.mst
 build\msitool_x64.exe extract setup.msi C:\out\files --transform custom.mst
 build\msitool_x64.exe extract update.msp C:\out\patch
 build\msitool_x64.exe extract update.msp C:\out\patch --base-msi setup.msi
+
+:: 6) transform 侧（生成 → 应用 → 往返比较）
+build\msitool_x64.exe transform setup.msi setup2.msi C:\out\diff.mst --force
+build\msitool_x64.exe transform setup.msi setup2.msi --dry-run
+build\msitool_x64.exe mst C:\out\diff.mst --base-msi setup.msi
+build\msitool_x64.exe apply setup.msi C:\out\applied.msi C:\out\diff.mst --force
+build\msitool_x64.exe transform C:\out\applied.msi setup2.msi --dry-run   :: 应报「无差异」
 ```
 
 还可以让 Windows Installer 自己验证生成的包（administrative install 不写注册表）：
@@ -693,6 +773,8 @@ build\msitool_x64.exe extract update.msp C:\out\patch --base-msi setup.msi
 ```bat
 msiexec /a C:\out\app.msi /qn TARGETDIR=C:\out\admin
 ```
+
+transform 侧的一键回归：`tools/transform_regression.py` 用 `build\f_minimal.msi` → `build\f_basic.msi` 覆盖 10 组断言（dry-run 不落盘、摘要流标志、`_TransformView` 变更、校验不匹配即失败且不留半成品、往返逐表一致、相同包不写空文件、`.msp` 被拒、未知标志报错、`--no-summary`、`--transform` 视图仍生效）。
 
 打包侧的一键回归：`tools/pack_regression.ps1` 会自动生成临时载荷，依次打包 `none` / `basic` / `minimal` / `wizard`（中英）/ `custom` / XML 清单 / 快捷方式 / per-user，逐个 `verify` + `msiexec /a`；若装了 Python，还会跑真实安装向导走查（见下）。
 
@@ -747,6 +829,16 @@ python tools\layout_check.py --dir %TEMP%\ca -v
 :: → 16 file(s), 0 problem(s)
 ```
 
+`MSITOOL_LAYOUT_PAGE=<page>` 可以把同一套检查套到表单页上（`transform` / `export` / `verify` / `pack` / `settings`），输出后缀变成 `<page>`，`layout_check.py` 会一并读取：
+
+```bat
+set MSITOOL_LAYOUT_DUMP=%TEMP%\mst
+set MSITOOL_LAYOUT_PAGE=transform
+build\msitool_x64.exe
+python tools\layout_check.py --dir %TEMP%\mst -v
+:: → 8 file(s), 0 problem(s)
+```
+
 ---
 
 ## 实测过的样本
@@ -771,6 +863,9 @@ python tools\layout_check.py --dir %TEMP%\ca -v
 | `pack`（2.3 GiB 稀疏文件） | 未压缩伴随 layout | `FileSize=0`、`Attributes=8192`、一条空 `Cabinet` 的 `Media` 行；`extract` 从伴随目录完整还原 2,300,000,000 字节 |
 | 纯空目录（0 文件 / 3 目录） | 仅 `CreateFolder` 表 | `MsiVerifyPackage` OK；`msiexec /i` 会真正创建空目录树 |
 | `makecab` 分卷集（400 KB 文件跨 `span1/2/3.cab`） | 3 条相同 `LastSequence` 的 `Media` 行 | `fdintNEXT_CABINET` 串起 3 个 CAB，`extract` 还原出 400,000 字节，sha256 与源文件完全一致 |
+| 自生成 transform（`f_minimal.msi` → `f_basic.msi`） | `transform` + `apply` + `mst --base-msi` | 20 KiB `.mst`（9 张表、43 行删除 / 8 行修改）；`apply` 后逐表与 `f_basic.msi` 完全一致（`transform --dry-run` 报「无差异」）；`mst --base-msi` 列出 19 条 `_TransformView` 变更（含 `DELETE` / `DROP` 行） |
+| .NET Desktop Runtime 8.0.11 x64 → 8.0.x x64（各 ~27 MiB） | 真实产品包之间的 diff / apply | 3 秒完成 15 张表、877 新增 / 601 删除 / 7 修改的 diff（含 `_Streams` 负载的 FNV-1a 指纹），104 KiB `.mst`；`apply` 1 秒写出 `MsiVerifyPackage` OK 的新包，产品名 / 版本 / ProductCode 变为目标包；已签名原包被提示需重新签名 |
+| 同一 payload 改一个字节后重新 `pack` | 流名相同、内容不同 | `_Streams` 正确报「修改 1」而非「新增 + 删除」（用 Name 作为行身份 + 内容指纹） |
 | Autodesk `acadps.mst` + 自生成 MSI | `--transform` 临时视图 | `Property` 表由 8 行变 14 行（新增 6 个 `ODIS_*` 属性），`extract` / `verify` 均正常 |
 | KB2565063 `.msp`（VS2010 QFE） | `QFE.cab` + `MsiPatchMetadata` | 解出 18 个补丁负载文件 + `manifest.txt` + 原始流；`--base-msi` 另解出目标 MSI 布局 |
 | 文本 / EXE / 伪造 CFB 头 / 目录 / 不存在路径 | 非 MSI | 预检拒绝，`verify` 输出 INVALID + 完整原因，退出码 1 |
@@ -791,6 +886,7 @@ python tools\layout_check.py --dir %TEMP%\ca -v
 - [x] ~~`pack`：多 CAB 分卷、> 2 GiB 文件、`CreateFolders` 保留空目录~~
 - [x] ~~`pack`：快捷方式、注册表、服务、环境变量、UI、数字签名、多个 Feature~~
 - [x] ~~`extract`：跨 CAB 连续文件（FDI `fdintNEXT_CABINET`）、应用 transform 后的视图、`.msp` 解包~~
+- [x] ~~`transform` / `apply` / `mst`：生成 `.mst`、把 MST 落盘合成新包、查看 `_TransformView` 变更明细~~
 - [ ] 工程：自动化单元测试 + GitHub Actions CI（MSVC x64/x86）
 
 欢迎在 issue 中讨论或认领（见 [CONTRIBUTING.md](CONTRIBUTING.md)）。
@@ -801,7 +897,8 @@ python tools\layout_check.py --dir %TEMP%\ca -v
 
 **解包 / 查看**
 
-- **不执行安装**：不解析条件、不执行 CustomAction、不写注册表；`--transform` 只叠加只读的临时视图，不落盘、不修改原包。
+- **不执行安装**：不解析条件、不执行 CustomAction、不写注册表；`--transform` 只叠加只读的临时视图，不落盘、不修改原包；`transform` / `apply` 只做数据库层面的差异与应用。
+- **transform 的固有边界**：安装程序的 transform 只能新增/覆盖流，**不能删除**包里的 `_Streams` 实体；对已签名包应用 transform 后旧签名流仍在但已失效（需要重新签名）。
 - 跨 CAB 连续文件依赖完整的**分卷集**：某个 CAB 缺失时 `extract` 会给出 `CAB set requested cabinet ... which is not staged` / `FDICopy ... aborted` 警告并跳过该分卷集；从分卷集中间的 CAB 开始解包则报 `partial file`，被截断的文件无法还原。
 - 外部 CAB 必须在 MSI 同目录（或 `Media.Cabinet` 指定的相对路径）；内嵌 CAB 无此要求。
 - `extract` 需要一块与 CAB 总大小相当的临时磁盘空间，结束后自动清理（`--keep-temp` 可保留）。
