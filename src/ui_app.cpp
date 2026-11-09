@@ -1784,20 +1784,22 @@ public:
 
     void layoutPack(const RECT& body) {
         Theme& t = theme();
-        const int gap = S(16);
+        const bool caTab = packTab_ == 4;
+        const int gap = caTab ? S(10) : S(16);
         const int tabH = S(46);
 
         // Everything below is derived from the current client size: log
         // height, form height, row pitch, control height and column width all
         // adapt when the window is resized / maximized.
-        // The custom action editor needs the whole form for its list,
-        // property sheet and sequence timeline, so the log card shrinks.
-        const bool caTab = packTab_ == 4;
-        int logH = caTab ? S(72)
+        // The custom action editor is a full-page editor: it drops the log
+        // card entirely (logs are still collected, and show up again on the
+        // other pack tabs) so the list / property sheet / timeline get the
+        // whole area below the tab strip.
+        int logH = caTab ? 0
                          : std::min(S(170), std::max(S(96), H(body) * 22 / 100));
-        int formH = H(body) - tabH - gap - logH - gap;
+        int formH = H(body) - tabH - gap - (caTab ? S(10) : logH + gap);
         const int minFormH = caTab ? S(360) : S(230);
-        if (formH < minFormH) {
+        if (formH < minFormH && !caTab) {
             logH = std::max(S(72), H(body) - tabH - gap * 2 - minFormH);
             formH = H(body) - tabH - gap - logH - gap;
         }
@@ -1819,7 +1821,8 @@ public:
                                      Ic::Bolt, Ic::Terminal};
         addCard(tabBar, L"", L"");
         addCard(form, kTitle[packTab_], kSub[packTab_], kIcon[packTab_]);
-        addCard(logCard, L"运行日志", L"FCI 压缩与 Msi 建库过程", Ic::Terminal);
+        if (!caTab)
+            addCard(logCard, L"运行日志", L"FCI 压缩与 Msi 建库过程", Ic::Terminal);
 
         // Tab strip + always-visible primary action.
         const int packBtnW = S(160), tabGap = S(6);
@@ -1941,21 +1944,28 @@ public:
             btnShortcutDel_->setRect(R(leftX + S(118), form.bottom - S(36), S(110), S(28)));
         } else if (packTab_ == 4) {
             // ---- Visual custom action editor ---------------------------
-            // Left: the action list and its row tools. Right: a property
-            // sheet that only shows the fields relevant to the selected type.
-            // Bottom: a merged timeline of standard + custom sequence rows.
-            const int caPadX = S(18);
+            // Two full-height columns: the left one is the action list with
+            // its row tools, the right one stacks the property sheet above
+            // the sequence timeline. No full-width bottom strip and no log
+            // card any more, so both columns use the whole form.
+            const int caPadX = S(18), caColGap = S(18);
             int caInnerW = W(form) - caPadX * 2;
             int caLeftX = form.left + caPadX;
-            int top = form.top + S(52);
+            int top = form.top + S(52);       // leave room for title + subtitle
             int bottom = form.bottom - S(10);
-            int timelineH = std::min(S(150),
-                                     std::max(S(96), H(form) * 26 / 100));
-            int mainBottom = bottom - timelineH - S(10);
-            int mainH = std::max(S(140), mainBottom - top);
-            int listW = std::max(S(300), (caInnerW - S(18)) * 42 / 100);
-            int propX = caLeftX + listW + S(18);
+            int caMainH = std::max(S(200), bottom - top);
+            int listW = std::max(S(300),
+                                 (caInnerW - caColGap) * 40 / 100);
+            int propX = caLeftX + listW + caColGap;
             int propW = form.right - caPadX - propX;
+            int timelineH = std::min(S(190),
+                                     std::max(S(110), caMainH * 30 / 100));
+            // Snap the timeline to whole rows (label + header + N rows), so
+            // neither the first nor the last visible row is cut in half.
+            int tlRows = std::max(3, (timelineH - S(24) - S(28)) / S(23));
+            timelineH = S(24) + S(28) + tlRows * S(23);
+            int propBottom = bottom - timelineH;
+            int propH = std::max(S(180), propBottom - top);
             const bool hasSel = caSel_ >= 0 &&
                                 caSel_ < static_cast<int>(caSpecs_.size());
 
@@ -1964,9 +1974,10 @@ public:
                                static_cast<unsigned long long>(caSpecs_.size())),
                      t.fSmall, t.subText);
             gridCaList_->setRect(R(caLeftX, top + S(22), listW,
-                                   std::max(S(60), mainH - S(22) - S(60))));
+                                   std::max(S(80), caMainH - S(22) - S(60))));
+            gridCaList_->setColumnWidths(caListWidths());
             int bw = (listW - S(18)) / 4;
-            int by = mainBottom - S(56);
+            int by = bottom - S(56);
             Button* row1[4] = {btnCaAdd_, btnCaDup_, btnCaDel_, btnCaImport_};
             Button* row2[4] = {btnCaUp_, btnCaDown_, btnCaClear_, nullptr};
             for (int i = 0; i < 4; ++i) {
@@ -1999,9 +2010,9 @@ public:
             // Only allocate rows for the fields the selected type needs, so
             // the property sheet fills the available height at any type.
             const int totalRows = 6 + used;
-            int caRowH = std::min(S(44),
-                                  std::max(S(24), (mainH - S(40)) / totalRows));
-            int caCtrlH = std::min(S(30), caRowH - S(6));
+            int caRowH = std::min(S(52),
+                                  std::max(S(24), (propH - S(12)) / totalRows));
+            int caCtrlH = std::min(S(32), caRowH - S(6));
             auto pair = [&](int row, const wchar_t* l1, Widget* c1,
                             const wchar_t* l2, Widget* c2) {
                 if (!hasSel) return;   // labels are painted by the frame, so
@@ -2061,15 +2072,16 @@ public:
                 w->setVisible(hasSel);
             for (int i = 0; i < 9; ++i) chkCaFlags_[i]->setVisible(hasSel);
             if (!hasSel)
-                addLabel(R(propX, top + mainH / 2 - S(30), propW, S(60)),
+                addLabel(R(propX, top + propH / 2 - S(30), propW, S(60)),
                          L"尚未定义自定义动作。\r\n点击「新增」创建，或「导入清单」载入现有 <customactions>。",
                          t.fBody, t.muted, DT_LEFT | DT_TOP | DT_WORDBREAK);
 
-            addLabel(R(caLeftX, mainBottom + S(2), caInnerW, S(18)),
-                     L"执行序列预览 · 标准动作 + 自定义动作，按 InstallExecuteSequence 序号排列（点击自定义行可编辑）",
+            addLabel(R(propX, propBottom + S(2), propW, S(18)),
+                     L"执行序列预览 · 标准动作 + 自定义动作按序号排列（点击自定义行可编辑）",
                      t.fSmall, t.subText);
-            gridCaTimeline_->setRect(R(caLeftX, mainBottom + S(22), caInnerW,
-                                       std::max(S(48), timelineH - S(24))));
+            gridCaTimeline_->setRect(R(propX, propBottom + S(22), propW,
+                                       std::max(S(60), timelineH - S(24))));
+            gridCaTimeline_->setColumnWidths(caTimelineWidths());
         } else {
             field(0, 0, L"签名证书 (.pfx)", tbSignCert_, btnSignCertBrowse_);
             field(0, 1, L"证书密码", tbSignPassword_, nullptr);
@@ -2078,14 +2090,21 @@ public:
             note(1, 0, 4, L"打包完成后会自动打开生成的 MSI，方便立即检查表、CAB 与验证报告。\n\n源目录与输出 MSI 在「基本」标签页，构建开关在「高级」标签页；无论当前在哪个标签页，右上角的「开始打包」都会使用全部字段。");
         }
 
-        // Log card is shared with the extract / export pages.
-        int logBody = std::max(S(24), H(logCard) - S(66));
-        log_->setRect(R(logCard.left + S(12), logCard.top + S(54),
-                        W(logCard) - S(24), logBody));
-        btnClearLog_->setRect(R(logCard.right - S(96), logCard.top + S(8),
-                                S(84), S(30)));
-        btnOpenFolder_->setRect(R(logCard.right - S(212), logCard.top + S(8),
-                                  S(108), S(30)));
+        // Log card is shared with the extract / export pages, but hidden on
+        // the custom action tab so the editor owns the full client area.
+        if (caTab) {
+            for (Widget* w : std::initializer_list<Widget*>{
+                     log_, btnClearLog_, btnOpenFolder_})
+                w->setVisible(false);
+        } else {
+            int logBody = std::max(S(24), H(logCard) - S(66));
+            log_->setRect(R(logCard.left + S(12), logCard.top + S(54),
+                            W(logCard) - S(24), logBody));
+            btnClearLog_->setRect(R(logCard.right - S(96), logCard.top + S(8),
+                                    S(84), S(30)));
+            btnOpenFolder_->setRect(R(logCard.right - S(212),
+                                      logCard.top + S(8), S(108), S(30)));
+        }
     }
 
     void layoutVerify(const RECT& body) {
@@ -3565,6 +3584,25 @@ public:
                            : util::path::dirName(util::path::full(cfg));
     }
 
+    // Timeline columns follow the width of the right column (which grows /
+    // shrinks with the window); re-layout re-fits them after setRect().
+    std::vector<int> caTimelineWidths() const {
+        int w = std::max(S(400), gridCaTimeline_->width());
+        // The first column also holds the row icon, so it needs extra room
+        // for a four-digit sequence number.
+        std::vector<int> v = {S(76), w * 22 / 100, w * 24 / 100,
+                              w * 18 / 100, 0};
+        v[4] = std::max(S(90), w - v[0] - v[1] - v[2] - v[3]);
+        return v;
+    }
+
+    std::vector<int> caListWidths() const {
+        int w = std::max(S(320), gridCaList_->width());
+        std::vector<int> v = {w * 30 / 100, w * 28 / 100, w * 26 / 100, 0};
+        v[3] = std::max(S(46), w - v[0] - v[1] - v[2]);
+        return v;
+    }
+
     std::wstring caPhaseName(int seq) {
         if (seq < 1500) return L"成本计算 / 校验";
         if (seq < 4000) return L"安装初始化 / 清理旧版本";
@@ -3701,12 +3739,10 @@ public:
             icons.push_back(state[i] == 2 ? Ic::Cross
                           : state[i] == 1 ? Ic::Warning : Ic::Check);
         }
-        // Explicit widths keep all five columns visible even at the minimum
-        // window size (the grid would otherwise auto-fit to >500 px and hide
-        // the sequence / lint columns behind a horizontal scrollbar).
+        // Widths follow the list's own width: the grid would otherwise
+        // auto-fit to >500 px and hide the sequence column behind a scrollbar.
         gridCaList_->setData({L"动作", L"类型", L"来源", L"序号"},
-                            std::move(rows),
-                            {S(120), S(118), S(110), S(54)},
+                            std::move(rows), caListWidths(),
                             std::move(icons));
         if (caSel_ >= 0 && caSel_ < static_cast<int>(caSpecs_.size()))
             gridCaList_->select(caSel_);
@@ -3758,7 +3794,8 @@ public:
         const bool prev = caLoading_;
         caLoading_ = true;
         gridCaTimeline_->setData({L"序号", L"阶段", L"动作", L"条件", L"类型"},
-                                std::move(rows), {}, std::move(icons));
+                                std::move(rows), caTimelineWidths(),
+                                std::move(icons));
         // Scroll the timeline to the selected action so its position among
         // the standard actions is visible without manual scrolling.
         int want = -1;
