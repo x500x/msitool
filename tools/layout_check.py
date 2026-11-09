@@ -144,7 +144,9 @@ def main():
                     help="directory with the MSITOOL_LAYOUT_DUMP files")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
-    files = sorted(glob.glob(os.path.join(args.dir, "ca_*.txt")))
+    # Any dump written by MSITOOL_LAYOUT_DUMP: ca_* (custom action editor)
+    # and <page>_* for the form pages (MSITOOL_LAYOUT_PAGE=<page>).
+    files = sorted(glob.glob(os.path.join(args.dir, "*.txt")))
     if not files:
         print("no dump files in " + args.dir)
         return 2

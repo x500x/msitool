@@ -5,6 +5,7 @@
 #include "pack.h"
 #include "custom_actions.h"
 #include "pack_util.h"
+#include "transform.h"
 
 #include <objbase.h>
 #include <shobjidl_core.h>
@@ -108,7 +109,8 @@ std::vector<std::wstring> splitList(const std::wstring& text) {
 }
 
 LogView::Kind classifyLog(bool isError, const std::wstring& line) {
-    if (util::startsWith(line, L"[warn]")) return LogView::Kind::Warn;
+    if (util::startsWith(line, L"[warn]") || util::startsWith(line, L"warning"))
+        return LogView::Kind::Warn;
     if (util::startsWith(line, L"[v] ")) return LogView::Kind::Info;
     if (isError || util::startsWith(line, L"error") || util::startsWith(line, L"FAIL"))
         return LogView::Kind::Error;
@@ -305,12 +307,12 @@ constexpr int kShortcutCount = static_cast<int>(sizeof(kShortcuts) / sizeof(kSho
 
 enum Page {
     PgHome = 0, PgInfo, PgTables, PgQuery, PgExtract,
-    PgExport, PgPack, PgVerify, PgSettings, PgCount
+    PgExport, PgPack, PgTransform, PgVerify, PgSettings, PgCount
 };
 
 const wchar_t* kPageTitle[PgCount] = {
     L"概览", L"包信息", L"数据表", L"SQL 查询", L"解包",
-    L"导出", L"打包", L"验证", L"设置"
+    L"导出", L"打包", L"Transform", L"验证", L"设置"
 };
 const wchar_t* kPageSubtitle[PgCount] = {
     L"查看、解包和构建 Windows Installer 包",
@@ -320,12 +322,13 @@ const wchar_t* kPageSubtitle[PgCount] = {
     L"把包里的文件按目录树还原出来",
     L"导出 CAB、表、流和二进制资源",
     L"把一个目录打包成自包含的 MSI",
+    L"生成、应用与查看 .mst 差异数据",
     L"检查文件是否为合法的安装包",
     L"外观、快捷键与关于"
 };
 const Ic kPageIcon[PgCount] = {
     Ic::Home, Ic::Info, Ic::Table, Ic::Query, Ic::Extract,
-    Ic::Export, Ic::Pack, Ic::Shield, Ic::Settings
+    Ic::Export, Ic::Pack, Ic::Bolt, Ic::Shield, Ic::Settings
 };
 
 // ---------------------------------------------------------------------------
@@ -641,6 +644,19 @@ public:
     Check* chkDesktopShortcut_ = nullptr;
     Check* chkStartMenuShortcut_ = nullptr;
     TextBox* tbMainExe_ = nullptr;
+
+    // transform (.mst) ------------------------------------------------------
+    TextBox* tbMstBase_ = nullptr;      Button* btnMstBaseBrowse_ = nullptr;
+    TextBox* tbMstUpdated_ = nullptr;   Button* btnMstUpdatedBrowse_ = nullptr;
+    TextBox* tbMstFile_ = nullptr;      Button* btnMstFileBrowse_ = nullptr;
+    TextBox* tbMstOut_ = nullptr;       Button* btnMstOutBrowse_ = nullptr;
+    TextBox* tbMstErrors_ = nullptr;
+    TextBox* tbMstValidate_ = nullptr;
+    Check*   chkMstSummary_ = nullptr;
+    Check*   chkMstForce_ = nullptr;
+    Button*  btnMstGenerate_ = nullptr;
+    Button*  btnMstApply_ = nullptr;
+    Button*  btnMstView_ = nullptr;
 
     // Shortcut table editor (tab 3): one row of inline editable cells.
     struct ShortcutCells {
@@ -1400,6 +1416,33 @@ public:
         linkHome_->url = kAppHome;
         linkHome_->mono = true;
 
+        // ---- Transform -----------------------------------------------------
+        tbMstBase_ = makeText(PgTransform, L"原包 (base) .msi");
+        btnMstBaseBrowse_ = makeButton(PgTransform, L"浏览", Ic::Folder, false,
+                                       [this] { browseFileFor(tbMstBase_, false,
+                                           L"选择原包", L"MSI 安装包", L"*.msi"); });
+        tbMstUpdated_ = makeText(PgTransform, L"更新包 .msi（生成时用）");
+        btnMstUpdatedBrowse_ = makeButton(PgTransform, L"浏览", Ic::Folder, false,
+                                          [this] { browseFileFor(tbMstUpdated_, false,
+                                              L"选择更新包", L"MSI 安装包", L"*.msi"); });
+        tbMstFile_ = makeText(PgTransform, L".mst 路径（生成输出；应用/查看输入）");
+        btnMstFileBrowse_ = makeButton(PgTransform, L"浏览", Ic::Folder, false,
+                                       [this] { browseFileFor(tbMstFile_, false,
+                                           L"选择 .mst", L"MST 转换", L"*.mst"); });
+        tbMstOut_ = makeText(PgTransform, L"应用后的输出 .msi（应用时用）");
+        btnMstOutBrowse_ = makeButton(PgTransform, L"保存", Ic::Save, false,
+                                      [this] { browseSaveMstTarget(); });
+        tbMstErrors_ = makeText(PgTransform, L"error conditions：addexistingrow, viewtransform …");
+        tbMstValidate_ = makeText(PgTransform, L"validation：product, language, upgradecode …");
+        chkMstSummary_ = makeCheck(PgTransform, L"写入摘要流 (校验 / 错误条件)", true);
+        chkMstForce_ = makeCheck(PgTransform, L"覆盖已存在文件", false);
+        btnMstGenerate_ = makeButton(PgTransform, L"生成 MST", Ic::Bolt, true,
+                                     [this] { startMstGenerate(); });
+        btnMstApply_ = makeButton(PgTransform, L"应用 MST", Ic::Pack, false,
+                                  [this] { startMstApply(); });
+        btnMstView_ = makeButton(PgTransform, L"查看变更", Ic::Info, false,
+                                 [this] { startMstView(); });
+
         // Toast is a separate child window so it can float above the cards,
         // grids and every other widget.
         toastView_ = std::make_unique<ToastView>();
@@ -1523,6 +1566,7 @@ public:
         case PgExtract:  layoutExtract(b.body); break;
         case PgExport:   layoutExport(b.body); break;
         case PgPack:     layoutPack(b.body); break;
+        case PgTransform: layoutTransform(b.body); break;
         case PgVerify:   layoutVerify(b.body); break;
         case PgSettings: layoutSettings(b.body); break;
         default: break;
@@ -1548,10 +1592,47 @@ public:
             { 96, 1920, 1040}, {144, 1160, 620}, {144, 1160, 860},
             {144, 1360, 736}, {144, 1920, 1040},
         };
-        // Pack page, custom action tab, one action of every field layout:
-        // dll = three source fields (the tallest property sheet).
         RECT keep{};
         GetClientRect(hwnd_, &keep);
+
+        // MSITOOL_LAYOUT_PAGE=<name> dumps another (form) page instead of the
+        // custom action editor, so the same geometry check covers the simple
+        // forms as well. Default keeps the historical CA behaviour.
+        {
+            wchar_t which[64]{};
+            GetEnvironmentVariableW(L"MSITOOL_LAYOUT_PAGE", which, 64);
+            const std::wstring name = util::toLower(util::trim(which));
+            struct PageCase { const wchar_t* name; Page page; int tab; };
+            static const PageCase pageCases[] = {
+                {L"transform", PgTransform, -1}, {L"export", PgExport, -1},
+                {L"verify", PgVerify, -1},       {L"pack", PgPack, 0},
+                {L"settings", PgSettings, -1},
+            };
+            for (const PageCase& pc : pageCases) {
+                if (name != pc.name) continue;
+                if (pc.tab >= 0) { switchPage(pc.page); setPackTab(pc.tab); }
+                else switchPage(pc.page);
+                for (const Case& c : cases) {
+                    applyTheme(c.dpi);
+                    SetWindowPos(hwnd_, nullptr, 0, 0,
+                                 MulDiv(c.w, c.dpi, 96), MulDiv(c.h, c.dpi, 96),
+                                 SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE |
+                                 SWP_NOSENDCHANGING);
+                    layout();
+                    writeLayoutDump(util::fmt(L"%s_%d_%dx%d.%s.txt", base, c.dpi,
+                                              c.w, c.h, pc.name));
+                }
+                applyTheme();
+                SetWindowPos(hwnd_, nullptr, 0, 0, keep.right, keep.bottom,
+                             SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE |
+                             SWP_NOSENDCHANGING);
+                switchPage(PgHome);
+                return;
+            }
+        }
+
+        // Pack page, custom action tab, one action of every field layout:
+        // dll = three source fields (the tallest property sheet).
         switchPage(PgPack);
         setPackTab(4);
         caAdd();
@@ -1888,6 +1969,80 @@ public:
                  L"完整归档会导出全部 .idt 表、原始流、Binary 条目与 summary.txt；"
                  L"仅导出 CAB 时会附带 manifest.txt。",
                  t.fSmall, t.muted, DT_LEFT | DT_TOP | DT_WORDBREAK);
+    }
+
+    void layoutTransform(const RECT& body) {
+        Theme& t = theme();
+        int optW = std::min(S(470), std::max(S(340), W(body) * 44 / 100));
+        RECT oc = R(body.left, body.top, optW, H(body));
+        RECT lc = R(oc.right + S(16), body.top, W(body) - optW - S(16), H(body));
+        addCard(oc, L"Transform", L"两个包的差异 · 写回一个新包", Ic::Bolt);
+        layoutLogCard(lc, S(54));
+
+        const int x = oc.left + S(16);
+        const int w = W(oc) - S(32);
+        const int btnW = S(72);
+        const int topPad = S(50);
+        const int bottomPad = S(12);
+        const int fieldGap = S(2);
+
+        // Six field rows plus the check row and the button row have to fit
+        // any window height: tighten the row rhythm before anything can
+        // bleed out of the card (620 logical px is the shortest case).
+        int fieldH = S(32), labelH = S(18), rowGap = S(12);
+        const int checkH = S(26), btnH = S(38), gap = S(12);
+        const int avail = H(oc) - topPad - bottomPad;
+        auto needed = [&](int fh, int lh, int rg) {
+            return 6 * (lh + fieldGap + fh) + 5 * rg + gap + checkH + gap + btnH;
+        };
+        if (needed(fieldH, labelH, rowGap) > avail) {
+            fieldH = S(28); labelH = S(16); rowGap = S(6);
+        }
+        if (needed(fieldH, labelH, rowGap) > avail) {
+            fieldH = S(26); labelH = S(15); rowGap = S(4);
+        }
+
+        int y = oc.top + topPad;
+        auto row = [&](const wchar_t* label, TextBox* box, Button* browse) {
+            addLabel(R(x, y, w, labelH), label, t.fSmall, t.subText);
+            y += labelH + fieldGap;
+            if (browse) {
+                box->setRect(R(x, y, w - btnW - S(8), fieldH));
+                browse->setRect(R(x + w - btnW, y, btnW, fieldH));
+            } else {
+                box->setRect(R(x, y, w, fieldH));
+            }
+            y += fieldH + rowGap;
+        };
+        row(L"原包 / 基准包 (.msi)", tbMstBase_, btnMstBaseBrowse_);
+        row(L"更新包 (.msi) — 生成 transform 时使用", tbMstUpdated_, btnMstUpdatedBrowse_);
+        row(L"Transform 文件 (.mst)", tbMstFile_, btnMstFileBrowse_);
+        row(L"应用后的输出包 (.msi)", tbMstOut_, btnMstOutBrowse_);
+        row(L"错误条件 (--errors)", tbMstErrors_, nullptr);
+        row(L"校验项 (--validate)", tbMstValidate_, nullptr);
+
+        chkMstSummary_->setRect(R(x, y, w / 2 - S(8), checkH));
+        chkMstForce_->setRect(R(x + w / 2, y, w / 2, checkH));
+        y += checkH + gap;
+
+        const int room = static_cast<int>(oc.bottom) - bottomPad - y;
+        const int actionH = std::max(S(30), std::min(btnH, room));
+        const int bw = (w - S(16)) / 3;
+        btnMstGenerate_->setRect(R(x, y, bw, actionH));
+        btnMstApply_->setRect(R(x + bw + S(8), y, bw, actionH));
+        btnMstView_->setRect(R(x + (bw + S(8)) * 2, y, bw, actionH));
+        y += actionH + S(10);
+
+        // The help text is the first thing to go when the window is short.
+        const int textRoom = static_cast<int>(oc.bottom) - bottomPad - y;
+        if (textRoom >= S(46)) {
+            addLabel(R(x, y, w, textRoom),
+                     L"生成：比较原包与更新包，按差异写出 .mst（先打印逐表新增 / 删除 / 修改统计）。\n"
+                     L"应用：复制原包 → 依次应用 .mst → 提交为新包，原包不会被修改。\n"
+                     L"查看：读取 .mst 的摘要流，并让安装程序生成 _TransformView 变更明细。\n"
+                     L"标志可写名称（addexistingrow、product、language …）或数值（0x11）。",
+                     t.fSmall, t.muted, DT_LEFT | DT_TOP | DT_WORDBREAK);
+        }
     }
 
     void layoutPack(const RECT& body) {
@@ -2363,7 +2518,8 @@ public:
     // hidden on 解包 (its own browser shows the package), on 打包 (which builds
     // a package) and on 设置.
     bool showsFileBar() const {
-        return page_ != PgSettings && page_ != PgExtract && page_ != PgPack;
+        return page_ != PgSettings && page_ != PgExtract && page_ != PgPack &&
+               page_ != PgTransform;
     }
 
     void setVisibility() {
@@ -2372,7 +2528,8 @@ public:
             bool v = p >= 0 ? (p == page_)
                    : p == -1 ? true
                    : p == -2 ? showsFileBar()
-                   : (page_ == PgExtract || page_ == PgExport || page_ == PgPack);
+                   : (page_ == PgExtract || page_ == PgExport || page_ == PgPack ||
+                      page_ == PgTransform);
             if (page_ == PgPack && w->tab() >= 0 && w->tab() != packTab_)
                 v = false;
             if (page_ == PgExtract && w->tab() == 1 && !extractAdv_)
@@ -2955,6 +3112,13 @@ public:
                 target->setValue(target->value() + L";" + p);
             else target->setValue(p);
         }
+    }
+
+    void browseSaveMstTarget() {
+        COMDLG_FILTERSPEC f[] = {{L"Windows Installer 包 (*.msi)", L"*.msi"}};
+        std::wstring p;
+        if (pickPath(hwnd_, Pick::Save, L"保存应用后的包", f, 1, L"msi", p))
+            tbMstOut_->setValue(p);
     }
 
     void browseSaveMsi() {
@@ -3724,6 +3888,107 @@ public:
             if (mode == 0) extract::exportCabs(db, dir, true);
             else extract::exportArchive(db, dir, true);
         }, L"正在导出 " + util::path::fileName(path), L"导出完成");
+    }
+
+    // ---- transform (.mst) ----------------------------------------------
+    // Shared input validation for the three buttons below.
+    bool mstInputs(bool needUpdated, bool needFile, bool needOut) {
+        if (util::trim(tbMstBase_->value()).empty()) {
+            toast(L"请先选择原包 (.msi)", 1);
+            return false;
+        }
+        if (needUpdated && util::trim(tbMstUpdated_->value()).empty()) {
+            toast(L"请填写更新包 (.msi)", 1);
+            return false;
+        }
+        if (needFile && util::trim(tbMstFile_->value()).empty()) {
+            toast(L"请填写 .mst 路径", 1);
+            return false;
+        }
+        if (needOut && util::trim(tbMstOut_->value()).empty()) {
+            toast(L"请填写应用后的输出 .msi", 1);
+            return false;
+        }
+        return true;
+    }
+
+    // Flags are parsed in the worker thread so a typo lands in the log view.
+    mst::GenerateOptions mstGenerateOptions(bool dryRun) const {
+        mst::GenerateOptions o;
+        o.baseMsi = util::trim(tbMstBase_->value());
+        o.updatedMsi = util::trim(tbMstUpdated_->value());
+        o.outMst = util::trim(tbMstFile_->value());
+        o.flags.errors = mst::parseErrorFlags(util::trim(tbMstErrors_->value()));
+        o.flags.validation = mst::parseValidationFlags(util::trim(tbMstValidate_->value()));
+        o.summaryInfo = chkMstSummary_->checked;
+        o.force = chkMstForce_->checked;
+        o.verbose = true;
+        o.dryRun = dryRun;
+        return o;
+    }
+
+    void startMstGenerate() {
+        if (!mstInputs(false, true, false)) return;
+        mst::GenerateOptions o = mstGenerateOptions(false);
+        startTask([o] {
+            mst::GenerateResult r = mst::generate(o);
+            if (r.identical) {
+                util::outLine(L"两个包完全相同：没有生成 transform。");
+                return;
+            }
+            util::outLine(L"Transform: " + r.outMst + L"  (" +
+                          std::to_wstring(r.size) + L" bytes)");
+            util::Table t;
+            t.headers = {L"Table", L"Added", L"Removed", L"Modified", L"Schema"};
+            for (const auto& d : r.tables) {
+                if (d.changes() == 0 && !d.schemaChanged) continue;
+                t.rows.push_back({d.table, std::to_wstring(d.added),
+                                  std::to_wstring(d.removed),
+                                  std::to_wstring(d.modified),
+                                  d.schemaChanged ? L"changed" : L""});
+            }
+            util::outLine(L"");
+            util::printTable(t, false);
+        }, L"正在生成 transform", L"transform 已生成");
+    }
+
+    void startMstApply() {
+        if (!mstInputs(false, true, true)) return;
+        mst::ApplyOptions o;
+        o.baseMsi = util::trim(tbMstBase_->value());
+        o.outMsi = util::trim(tbMstOut_->value());
+        o.transforms.push_back(util::trim(tbMstFile_->value()));
+        o.force = chkMstForce_->checked;
+        o.verbose = true;
+        startTask([o] {
+            mst::ApplyResult r = mst::apply(o);
+            util::outLine(L"已应用 " + std::to_wstring(r.applied) + L" 个 transform -> " +
+                          r.outMsi);
+            util::outLine(L"Package : " + r.packageKind);
+        }, L"正在应用 transform", L"新包已写入");
+    }
+
+    void startMstView() {
+        if (!mstInputs(false, true, false)) return;
+        std::wstring base = util::trim(tbMstBase_->value());
+        std::wstring file = util::trim(tbMstFile_->value());
+        startTask([base, file] {
+            mst::TransformInfo info = mst::inspect(file);
+            util::outLine(L"Transform : " + info.path);
+            util::outLine(L"Errors    : " + mst::describeErrorFlags(info.errorConditions));
+            util::outLine(L"Validation: " + mst::describeValidationFlags(info.validation));
+            util::outLine(L"");
+            std::vector<mst::ChangeRow> rows = mst::viewTransform(base, file);
+            if (rows.empty()) {
+                util::outLine(L"(该 transform 对这个原包没有任何改动)");
+                return;
+            }
+            util::Table t;
+            t.headers = {L"Table", L"Row", L"Column", L"New value", L"Current value"};
+            for (const auto& c : rows)
+                t.rows.push_back({c.table, c.row, c.column, c.data, c.current});
+            util::printTable(t, false);
+        }, L"正在读取 transform", L"变更明细已列出");
     }
 
     // ---- visual custom action editor -----------------------------------
