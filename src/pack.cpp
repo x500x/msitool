@@ -972,6 +972,38 @@ Stats pack(const Options& opt) {
         applyManifest(o, cfgData);
     }
 
+    // The visual editor is authoritative as soon as the user touches it: its
+    // rows replace the manifest's <customactions>, and sequence rows that
+    // scheduled those actions are removed before the new ones are appended.
+    // That makes editing / deleting an imported action actually take effect
+    // instead of silently producing a duplicate CustomAction row.
+    if (o.customActionsSet) {
+        std::set<std::wstring> manifestIds;
+        for (const auto& a : cfgData.customActions)
+            manifestIds.insert(util::toLower(a.id));
+        cfgData.executeSequence.erase(
+            std::remove_if(cfgData.executeSequence.begin(),
+                           cfgData.executeSequence.end(),
+                           [&manifestIds](const SequenceEntry& e) {
+                               return manifestIds.count(util::toLower(e.action)) != 0;
+                           }),
+            cfgData.executeSequence.end());
+        cfgData.customActions.clear();
+        const std::wstring baseDir = o.configFile.empty()
+            ? inDir : util::path::dirName(util::path::full(o.configFile));
+        for (const CustomActionSpec& s : o.customActions) {
+            cfgData.customActions.push_back(compileCustomAction(s, baseDir));
+            if (s.sequence <= 0) continue;
+            SequenceEntry e;
+            e.action = toIdentifier(s.id);
+            e.sequence = s.sequence;
+            e.condition = s.condition;
+            e.hasCondition = !s.condition.empty();
+            cfgData.executeSequence.push_back(std::move(e));
+            cfgData.hasExecuteSequence = true;
+        }
+    }
+
     o.ui = util::toLower(o.ui);
     if (o.ui != L"none" && o.ui != L"basic" && o.ui != L"minimal" &&
         o.ui != L"wizard" && o.ui != L"custom")

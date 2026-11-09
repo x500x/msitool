@@ -8,6 +8,7 @@
 > - 清单解析使用 MSXML6，禁用 DTD / 外部实体（XXE）。
 > - 内置向导以 RCDATA 嵌入 `resources/ui/`，`--dump-ui` 可导出。
 > - GUI 的快捷方式编辑器采用可增删行的内联表格（7 列，逐行对应 XML 的 shortcut 字段）。
+> - GUI 新增「自定义动作」标签页：列表 + 类型感知属性表单 + 执行序列时间线 + 实时 lint + XML 导入 / 导出；解析 / 编码 / 检查 / 序列化集中在 `custom_actions.h/.cpp`，由 XML 清单加载器与 GUI 共用。打包时编辑器列表为权威数据源（替换清单的 `<customactions>`）。
 > - `_Validation` 已写入各表列元数据；`msiexec` / `MsiVerifyPackage` 不受影响。项目不内置第三方 ICE 校验器。
 > - `AdminExecuteSequence` 未包含 `CreateFolders`（该动作不允许出现在此序列）。
 > - 安装范围已支持 per-user / per-machine（`--per-user` / `<pack scope>`），per-user 的子菜单 keypath 组件改用 HKCU；`ALLUSERS=1` 仅在 per-machine 下写入。

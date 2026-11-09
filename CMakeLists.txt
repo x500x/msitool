@@ -20,6 +20,7 @@ add_executable(msitool WIN32
     src/extract.cpp
     src/pack.cpp
     src/pack_util.cpp
+    src/custom_actions.cpp
     src/xml.cpp
     src/pack_xml.cpp
     src/pack_ui.cpp

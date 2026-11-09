@@ -3,6 +3,7 @@
 #include "msidb.h"
 #include "extract.h"
 #include "pack.h"
+#include "custom_actions.h"
 #include "pack_util.h"
 
 #include <objbase.h>
@@ -652,6 +653,44 @@ public:
     Button* btnShortcutAdd_ = nullptr;
     Button* btnShortcutDel_ = nullptr;
     Button* btnPack_ = nullptr;
+
+    // Visual custom action editor (tab 4). The list on the left selects a
+    // row, the form on the right edits it (only the fields relevant to the
+    // selected type are shown), and the grid at the bottom visualises where
+    // every action lands in InstallExecuteSequence.
+    Button*   btnTabActions_ = nullptr;
+    DataGrid* gridCaList_ = nullptr;
+    DataGrid* gridCaTimeline_ = nullptr;
+    Button*   btnCaAdd_ = nullptr;
+    Button*   btnCaDup_ = nullptr;
+    Button*   btnCaDel_ = nullptr;
+    Button*   btnCaUp_ = nullptr;
+    Button*   btnCaDown_ = nullptr;
+    Button*   btnCaImport_ = nullptr;
+    Button*   btnCaClear_ = nullptr;
+    Button*   btnCaCopyXml_ = nullptr;
+    Button*   btnCaSaveXml_ = nullptr;
+    TextBox*  tbCaId_ = nullptr;
+    TextBox*  tbCaBinary_ = nullptr;   Button* btnCaBinaryBrowse_ = nullptr;
+    TextBox*  tbCaEntry_ = nullptr;
+    TextBox*  tbCaFile_ = nullptr;
+    TextBox*  tbCaDirectory_ = nullptr;
+    TextBox*  tbCaProperty_ = nullptr;
+    TextBox*  tbCaValue_ = nullptr;
+    TextBox*  tbCaTarget_ = nullptr;
+    TextBox*  tbCaSeq_ = nullptr;
+    TextBox*  tbCaCondition_ = nullptr;
+    DropDown* ddCaType_ = nullptr;
+    DropDown* ddCaPhase_ = nullptr;
+    Check*    chkCaFlags_[9] = {};
+    std::vector<pack::CustomActionSpec> caSpecs_;
+    std::vector<std::wstring>           caTypeIds_;   // parallel to ddCaType_->items
+    std::vector<int>                    caTimelineRows_;  // timeline row -> action index, -1 = standard
+    int       caSel_ = -1;
+    bool      caLoading_ = false;   // suppress changed callbacks while reloading
+    bool      caEdited_ = false;    // true => the editor replaces manifest <customactions>
+    std::wstring caStatus_;
+    int       caStatusKind_ = 0;    // 0 ok, 1 warning, 2 error
     // drag & drop -----------------------------------------------------------
     // The pack form is split over three tabs, so the drop targets are
     // collected from the currently visible fields plus one window-wide
@@ -1217,6 +1256,77 @@ public:
         });
         btnShortcutAdd_->subtle = true;
         btnShortcutDel_->subtle = true;
+
+        // ---- Visual custom action editor (tab 4) -------------------------
+        btnTabActions_ = makeButton(PgPack, L"自定义动作", Ic::Bolt, false,
+                                    [this] { setPackTab(4); });
+        gridCaList_ = add<DataGrid>(PgPack);
+        gridCaList_->selectionChanged = [this](int row) { caSelectRow(row); };
+        gridCaList_->rowActivated = [this](int row) { caSelectRow(row); };
+        gridCaTimeline_ = add<DataGrid>(PgPack);
+        gridCaTimeline_->selectionChanged = [this](int row) {
+            if (row >= 0 && row < static_cast<int>(caTimelineRows_.size()) &&
+                caTimelineRows_[row] >= 0)
+                caSelectRow(caTimelineRows_[row]);
+        };
+        auto caBtn = [this](const wchar_t* text, Ic icon,
+                            const std::function<void()>& fn) {
+            Button* b = makeButton(PgPack, text, icon, false, fn);
+            b->subtle = true;
+            return b;
+        };
+        btnCaAdd_    = caBtn(L"新增",   Ic::Add,        [this] { caAdd(); });
+        btnCaDup_    = caBtn(L"复制",   Ic::Copy,       [this] { caDuplicate(); });
+        btnCaDel_    = caBtn(L"删除",   Ic::Close,      [this] { caDelete(); });
+        btnCaUp_     = caBtn(L"上移",   Ic::ArrowUp,    [this] { caMove(-1); });
+        btnCaDown_   = caBtn(L"下移",   Ic::ChevronDown, [this] { caMove(1); });
+        btnCaImport_ = caBtn(L"导入",   Ic::Open,       [this] { caImport(); });
+        btnCaClear_  = caBtn(L"清空",   Ic::Cross,      [this] { caClear(); });
+        btnCaCopyXml_ = caBtn(L"复制片段", Ic::Copy,    [this] { caCopyXml(); });
+        btnCaSaveXml_ = caBtn(L"导出清单", Ic::Save,    [this] { caSaveXml(); });
+
+        auto edit = [this] { caOnEdit(); };
+        auto text = [this, &edit](const wchar_t* cue) {
+            TextBox* t = makeText(PgPack, cue);
+            t->changed = edit;
+            return t;
+        };
+        tbCaId_        = text(L"动作 ID，例如 SetProp");
+        tbCaBinary_    = text(L"要嵌入的 .dll / .exe 文件");
+        tbCaEntry_     = text(L"DLL 入口点，例如 MyEntry");
+        tbCaFile_      = text(L"已安装文件的 File 键 / 相对路径");
+        tbCaDirectory_ = text(L"目录键，例如 SystemFolder / INSTALLFOLDER");
+        tbCaProperty_  = text(L"属性名，例如 MYPROP / Cmd");
+        tbCaValue_     = text(L"格式化的属性值，例如 [INSTALLFOLDER]");
+        tbCaTarget_    = text(L"命令行 / Target，例如 cmd.exe /c ...");
+        tbCaSeq_       = text(L"0 或留空 = 不排入执行序列");
+        tbCaCondition_ = text(L"条件，例如 NOT Installed（留空 = 总是执行）");
+        btnCaBinaryBrowse_ = makeButton(PgPack, L"浏览", Ic::Folder, false,
+            [this] {
+                browseFileFor(tbCaBinary_, false, L"选择内嵌 Binary 文件",
+                              L"DLL / EXE 文件", L"*.dll;*.exe");
+                caOnEdit();
+            });
+        ddCaType_ = add<DropDown>(PgPack);
+        ddCaType_->selected = [this](int) { caOnTypeChanged(); };
+        ddCaPhase_ = add<DropDown>(PgPack);
+        ddCaPhase_->selected = [this](int i) { caOnPhase(i); };
+        {
+            std::vector<std::wstring> labels;
+            for (int i = 0; i < pack::caPhaseCount(); ++i)
+                labels.push_back(pack::caPhases()[i].label);
+            ddCaPhase_->setItems(std::move(labels));
+        }
+        static const wchar_t* kFlagLabels[9] = {
+            L"延迟执行 (deferred)", L"提交时 (commit)", L"回滚时 (rollback)",
+            L"异步 (async)", L"失败继续 (continue)", L"不模拟用户",
+            L"终端服务感知", L"64 位 (x64)", L"隐藏 Target"};
+        for (int i = 0; i < 9; ++i) {
+            chkCaFlags_[i] = makeCheck(PgPack, kFlagLabels[i], false);
+            chkCaFlags_[i]->changed = [this](bool) { caOnEdit(); };
+        }
+        caRefreshTypeItems();
+
         btnPack_ = makeButton(PgPack, L"开始打包", Ic::Pack, true,
                               [this] { startPack(); });
 
@@ -1232,6 +1342,14 @@ public:
         tag(2, {tbSignCert_, btnSignCertBrowse_, tbSignPassword_, tbSignTime_});
         tag(3, {tbMainExe_, chkDesktopShortcut_, chkStartMenuShortcut_,
                 btnShortcutAdd_, btnShortcutDel_});
+        tag(4, {gridCaList_, gridCaTimeline_,
+                btnCaAdd_, btnCaDup_, btnCaDel_, btnCaUp_, btnCaDown_,
+                btnCaImport_, btnCaClear_, btnCaCopyXml_, btnCaSaveXml_,
+                tbCaId_, tbCaBinary_, btnCaBinaryBrowse_, tbCaEntry_,
+                tbCaFile_, tbCaDirectory_, tbCaProperty_, tbCaValue_,
+                tbCaTarget_, tbCaSeq_, tbCaCondition_,
+                ddCaType_, ddCaPhase_});
+        for (int i = 0; i < 9; ++i) chkCaFlags_[i]->setTab(4);
 
         // ---- Verify -------------------------------------------------------
         gridVerify_ = add<DataGrid>(PgVerify);
@@ -1326,6 +1444,10 @@ public:
         gridBrowseDirs_->rowHeightPx = S(28);
         gridBrowseFiles_->rowHeightPx = S(28);
         gridBrowseFiles_->headHeightPx = S(32);
+        gridCaList_->rowHeightPx = S(27);
+        gridCaList_->headHeightPx = S(30);
+        gridCaTimeline_->rowHeightPx = S(23);
+        gridCaTimeline_->headHeightPx = S(28);
         Base b = baseLayout();
         Theme& t = theme();
         int cap = S(40), navW = S(216), statusH = S(34);
@@ -1668,9 +1790,13 @@ public:
         // Everything below is derived from the current client size: log
         // height, form height, row pitch, control height and column width all
         // adapt when the window is resized / maximized.
-        int logH = std::min(S(170), std::max(S(96), H(body) * 22 / 100));
+        // The custom action editor needs the whole form for its list,
+        // property sheet and sequence timeline, so the log card shrinks.
+        const bool caTab = packTab_ == 4;
+        int logH = caTab ? S(72)
+                         : std::min(S(170), std::max(S(96), H(body) * 22 / 100));
         int formH = H(body) - tabH - gap - logH - gap;
-        const int minFormH = S(230);
+        const int minFormH = caTab ? S(360) : S(230);
         if (formH < minFormH) {
             logH = std::max(S(72), H(body) - tabH - gap * 2 - minFormH);
             formH = H(body) - tabH - gap - logH - gap;
@@ -1680,26 +1806,32 @@ public:
         RECT logCard = R(body.left, form.bottom + gap, W(body), logH);
         packForm_ = form;        // drop fallback target of this page
 
-        static const wchar_t* kTitle[4] = {
-            L"基本信息", L"高级选项", L"代码签名（可选）", L"快捷方式"};
-        static const wchar_t* kSub[4] = {
+        static const wchar_t* kTitle[5] = {
+            L"基本信息", L"高级选项", L"代码签名（可选）", L"快捷方式",
+            L"自定义动作"};
+        static const wchar_t* kSub[5] = {
             L"源目录、输出路径与产品标识 · 支持拖放",
             L"分卷、清单、UI 模板与构建开关 · 支持拖放",
             L"Authenticode 签名需要 signtool.exe 与证书 · 支持拖放",
-            L"桌面 / 开始菜单快捷方式与主程序 · 支持拖放"};
-        static const Ic kIcon[4] = {Ic::Pack, Ic::Settings, Ic::Shield, Ic::Bolt};
+            L"桌面 / 开始菜单快捷方式与主程序 · 支持拖放",
+            L"可视化编辑 CustomAction 与执行序列 · 编辑后以本页列表为准"};
+        static const Ic kIcon[5] = {Ic::Pack, Ic::Settings, Ic::Shield,
+                                     Ic::Bolt, Ic::Terminal};
         addCard(tabBar, L"", L"");
         addCard(form, kTitle[packTab_], kSub[packTab_], kIcon[packTab_]);
         addCard(logCard, L"运行日志", L"FCI 压缩与 Msi 建库过程", Ic::Terminal);
 
         // Tab strip + always-visible primary action.
-        int tw = S(112), th = tabH - S(10), tx = tabBar.left + S(10);
-        int ty = tabBar.top + S(5);
-        btnTabBasic_->setRect(R(tx, ty, tw, th));
-        btnTabAdvanced_->setRect(R(tx + tw + S(8), ty, tw, th));
-        btnTabSign_->setRect(R(tx + (tw + S(8)) * 2, ty, tw, th));
-        btnTabShortcut_->setRect(R(tx + (tw + S(8)) * 3, ty, tw, th));
-        btnPack_->setRect(R(tabBar.right - S(10) - S(170), ty, S(170), th));
+        const int packBtnW = S(160), tabGap = S(6);
+        int tx = tabBar.left + S(10), ty = tabBar.top + S(5);
+        int th = tabH - S(10);
+        int tabAvail = tabBar.right - S(10) - packBtnW - S(10) - tx;
+        int tw = std::min(S(124), std::max(S(84), (tabAvail - 4 * tabGap) / 5));
+        Button* tabs[5] = {btnTabBasic_, btnTabAdvanced_, btnTabSign_,
+                           btnTabShortcut_, btnTabActions_};
+        for (int i = 0; i < 5; ++i)
+            tabs[i]->setRect(R(tx + (tw + tabGap) * i, ty, tw, th));
+        btnPack_->setRect(R(tabBar.right - S(10) - packBtnW, ty, packBtnW, th));
 
         // Two adaptive columns inside the form card.
         const int padX = S(18), colGap = S(28);
@@ -1807,6 +1939,137 @@ public:
             }
             btnShortcutAdd_->setRect(R(leftX, form.bottom - S(36), S(110), S(28)));
             btnShortcutDel_->setRect(R(leftX + S(118), form.bottom - S(36), S(110), S(28)));
+        } else if (packTab_ == 4) {
+            // ---- Visual custom action editor ---------------------------
+            // Left: the action list and its row tools. Right: a property
+            // sheet that only shows the fields relevant to the selected type.
+            // Bottom: a merged timeline of standard + custom sequence rows.
+            const int caPadX = S(18);
+            int caInnerW = W(form) - caPadX * 2;
+            int caLeftX = form.left + caPadX;
+            int top = form.top + S(52);
+            int bottom = form.bottom - S(10);
+            int timelineH = std::min(S(150),
+                                     std::max(S(96), H(form) * 26 / 100));
+            int mainBottom = bottom - timelineH - S(10);
+            int mainH = std::max(S(140), mainBottom - top);
+            int listW = std::max(S(300), (caInnerW - S(18)) * 42 / 100);
+            int propX = caLeftX + listW + S(18);
+            int propW = form.right - caPadX - propX;
+            const bool hasSel = caSel_ >= 0 &&
+                                caSel_ < static_cast<int>(caSpecs_.size());
+
+            addLabel(R(caLeftX, top, listW, S(18)),
+                     util::fmt(L"动作列表 · %llu 项",
+                               static_cast<unsigned long long>(caSpecs_.size())),
+                     t.fSmall, t.subText);
+            gridCaList_->setRect(R(caLeftX, top + S(22), listW,
+                                   std::max(S(60), mainH - S(22) - S(60))));
+            int bw = (listW - S(18)) / 4;
+            int by = mainBottom - S(56);
+            Button* row1[4] = {btnCaAdd_, btnCaDup_, btnCaDel_, btnCaImport_};
+            Button* row2[4] = {btnCaUp_, btnCaDown_, btnCaClear_, nullptr};
+            for (int i = 0; i < 4; ++i) {
+                if (row1[i]) row1[i]->setRect(
+                    R(caLeftX + (bw + S(6)) * i, by, bw, S(26)));
+                if (row2[i]) row2[i]->setRect(
+                    R(caLeftX + (bw + S(6)) * i, by + S(30), bw, S(26)));
+            }
+
+            struct Slot {
+                int bit; const wchar_t* label; Widget* ctrl; Button* browse;
+            };
+            const Slot slots[] = {
+                {pack::CaBinary,    L"Binary 文件", tbCaBinary_,    btnCaBinaryBrowse_},
+                {pack::CaFile,      L"文件键",      tbCaFile_,      nullptr},
+                {pack::CaEntry,     L"入口点",      tbCaEntry_,     nullptr},
+                {pack::CaDirectory, L"目录键",      tbCaDirectory_, nullptr},
+                {pack::CaProperty,  L"属性名",      tbCaProperty_,  nullptr},
+                {pack::CaValue,     L"值",          tbCaValue_,     nullptr},
+                {pack::CaTarget,    L"命令行",      tbCaTarget_,    nullptr},
+            };
+            const int mask = hasSel ? pack::caFieldMask(caSpecs_[caSel_].type) : 0;
+            int used = 0;
+            for (const Slot& s : slots) {
+                bool show = hasSel && (mask & s.bit) && used < 4;
+                s.ctrl->setVisible(show);
+                if (s.browse) s.browse->setVisible(show);
+                if (show) ++used;
+            }
+            // Only allocate rows for the fields the selected type needs, so
+            // the property sheet fills the available height at any type.
+            const int totalRows = 6 + used;
+            int caRowH = std::min(S(44),
+                                  std::max(S(24), (mainH - S(40)) / totalRows));
+            int caCtrlH = std::min(S(30), caRowH - S(6));
+            auto pair = [&](int row, const wchar_t* l1, Widget* c1,
+                            const wchar_t* l2, Widget* c2) {
+                if (!hasSel) return;   // labels are painted by the frame, so
+                                       // skip them together with hidden fields
+                int y = top + row * caRowH;
+                int half = (propW - S(12)) / 2;
+                addLabel(R(propX, y, S(74), S(18)), l1, t.fSmall, t.subText);
+                c1->setRect(R(propX + S(76), y - S(2), half - S(76), caCtrlH));
+                int x2 = propX + half + S(12);
+                addLabel(R(x2, y, S(74), S(18)), l2, t.fSmall, t.subText);
+                c2->setRect(R(x2 + S(76), y - S(2), half - S(76), caCtrlH));
+            };
+            auto line = [&](int row, const wchar_t* label, Widget* ctrl,
+                            Button* browse) {
+                if (!hasSel) return;
+                int y = top + row * caRowH;
+                const int labelW = S(90);
+                const int bw2 = browse ? S(70) : 0;
+                addLabel(R(propX, y, labelW, S(18)), label, t.fSmall, t.subText);
+                ctrl->setRect(R(propX + labelW + S(6), y - S(2),
+                                propW - labelW - S(6) - bw2 - (bw2 ? S(6) : 0),
+                                caCtrlH));
+                if (browse)
+                    browse->setRect(R(propX + propW - bw2, y - S(2),
+                                      bw2, caCtrlH));
+            };
+            pair(0, L"动作 ID", tbCaId_, L"类型", ddCaType_);
+            int shown = 0;
+            for (const Slot& s : slots) {
+                if (!s.ctrl->visible()) continue;
+                line(1 + shown, s.label, s.ctrl, s.browse);
+                ++shown;
+            }
+            pair(1 + used, L"插入阶段", ddCaPhase_, L"序号", tbCaSeq_);
+            line(2 + used, L"执行条件", tbCaCondition_, nullptr);
+
+            int flagsTop = top + (3 + used) * caRowH;
+            int fh = std::max(S(16), (caRowH * 2 - S(6)) / 3);
+            int caColW = (propW - S(16)) / 3;
+            for (int i = 0; i < 9; ++i)
+                chkCaFlags_[i]->setRect(R(propX + (i % 3) * (caColW + S(8)),
+                                          flagsTop + (i / 3) * fh,
+                                          caColW, fh));
+            int sy = top + (5 + used) * caRowH;
+            const int btnW = S(110);
+            btnCaCopyXml_->setRect(R(propX + propW - btnW * 2 - S(8), sy,
+                                     btnW, caCtrlH));
+            btnCaSaveXml_->setRect(R(propX + propW - btnW, sy, btnW, caCtrlH));
+            COLORREF statusColor = caStatusKind_ == 2 ? t.danger
+                                 : caStatusKind_ == 1 ? t.warning : t.success;
+            addLabel(R(propX, sy, propW - btnW * 2 - S(16), caCtrlH),
+                     caStatus_, t.fSmall, statusColor);
+
+            for (Widget* w : std::initializer_list<Widget*>{
+                     tbCaId_, ddCaType_, ddCaPhase_, tbCaSeq_, tbCaCondition_,
+                     btnCaCopyXml_, btnCaSaveXml_})
+                w->setVisible(hasSel);
+            for (int i = 0; i < 9; ++i) chkCaFlags_[i]->setVisible(hasSel);
+            if (!hasSel)
+                addLabel(R(propX, top + mainH / 2 - S(30), propW, S(60)),
+                         L"尚未定义自定义动作。\r\n点击「新增」创建，或「导入清单」载入现有 <customactions>。",
+                         t.fBody, t.muted, DT_LEFT | DT_TOP | DT_WORDBREAK);
+
+            addLabel(R(caLeftX, mainBottom + S(2), caInnerW, S(18)),
+                     L"执行序列预览 · 标准动作 + 自定义动作，按 InstallExecuteSequence 序号排列（点击自定义行可编辑）",
+                     t.fSmall, t.subText);
+            gridCaTimeline_->setRect(R(caLeftX, mainBottom + S(22), caInnerW,
+                                       std::max(S(48), timelineH - S(24))));
         } else {
             field(0, 0, L"签名证书 (.pfx)", tbSignCert_, btnSignCertBrowse_);
             field(0, 1, L"证书密码", tbSignPassword_, nullptr);
@@ -1955,16 +2218,16 @@ public:
 
     void setPackTab(int tab) {
         packTab_ = tab;
-        btnTabBasic_->accent = (tab == 0);
-        btnTabAdvanced_->accent = (tab == 1);
-        btnTabSign_->accent = (tab == 2);
-        btnTabShortcut_->accent = (tab == 3);
-        btnTabBasic_->invalidate();
-        btnTabAdvanced_->invalidate();
-        btnTabSign_->invalidate();
-        btnTabShortcut_->invalidate();
+        Button* tabs[5] = {btnTabBasic_, btnTabAdvanced_, btnTabSign_,
+                           btnTabShortcut_, btnTabActions_};
+        for (int i = 0; i < 5; ++i) {
+            tabs[i]->accent = (tab == i);
+            tabs[i]->invalidate();
+        }
         setVisibility();
-        layout();
+        // First visit: build the list / timeline / lint summary before layout.
+        if (tab == 4) caRefresh();
+        else layout();
     }
 
     // ---- painting --------------------------------------------------------
@@ -3294,6 +3557,410 @@ public:
         }, L"正在导出 " + util::path::fileName(path), L"导出完成");
     }
 
+    // ---- visual custom action editor -----------------------------------
+    // Same base directory the packer uses to resolve a relative `binary`.
+    std::wstring caBaseDir() const {
+        std::wstring cfg = util::trim(tbConfig_->value());
+        return cfg.empty() ? util::path::full(util::trim(tbSrcDir_->value()))
+                           : util::path::dirName(util::path::full(cfg));
+    }
+
+    std::wstring caPhaseName(int seq) {
+        if (seq < 1500) return L"成本计算 / 校验";
+        if (seq < 4000) return L"安装初始化 / 清理旧版本";
+        if (seq < 4500) return L"文件复制";
+        if (seq < 6000) return L"注册表 / 快捷方式 / 服务";
+        return L"发布产品 / 安装完成";
+    }
+
+    // Rebuild the type drop-down. Raw numeric types coming from an imported
+    // manifest are appended so no row silently loses its type.
+    void caRefreshTypeItems() {
+        std::vector<std::wstring> labels;
+        caTypeIds_.clear();
+        for (int i = 0; i < pack::caTypeCount(); ++i) {
+            const pack::CaType& k = pack::caTypes()[i];
+            labels.push_back(std::wstring(k.id) + L" · " + k.label);
+            caTypeIds_.push_back(k.id);
+        }
+        for (const auto& s : caSpecs_) {
+            bool known = false;
+            for (int i = 0; i < pack::caTypeCount(); ++i)
+                if (util::iequals(s.type, pack::caTypes()[i].id)) known = true;
+            if (known || s.type.empty())
+                continue;
+            if (s.type.find_first_not_of(L"0123456789") != std::wstring::npos)
+                continue;
+            std::wstring label = L"原始类型 " + s.type;
+            if (std::find(labels.begin(), labels.end(), label) == labels.end()) {
+                labels.push_back(label);
+                caTypeIds_.push_back(s.type);
+            }
+        }
+        ddCaType_->setItems(std::move(labels));
+    }
+
+    std::wstring caTypeIdFor(int index) const {
+        return (index >= 0 && index < static_cast<int>(caTypeIds_.size()))
+                   ? caTypeIds_[index] : std::wstring(L"setproperty");
+    }
+
+    void caSaveForm() {
+        if (caLoading_ || caSel_ < 0 ||
+            caSel_ >= static_cast<int>(caSpecs_.size())) return;
+        pack::CustomActionSpec& s = caSpecs_[caSel_];
+        s.id = util::trim(tbCaId_->value());
+        s.type = caTypeIdFor(ddCaType_->index);
+        s.binary = util::trim(tbCaBinary_->value());
+        s.entry = util::trim(tbCaEntry_->value());
+        s.file = util::trim(tbCaFile_->value());
+        s.directory = util::trim(tbCaDirectory_->value());
+        s.property = util::trim(tbCaProperty_->value());
+        s.value = util::trim(tbCaValue_->value());
+        s.target = util::trim(tbCaTarget_->value());
+        s.args.clear();
+        s.source.clear();
+        s.sequence = _wtoi(util::trim(tbCaSeq_->value()).c_str());
+        if (s.sequence < 0) s.sequence = 0;
+        s.condition = util::trim(tbCaCondition_->value());
+        bool* flags[9] = {&s.deferred, &s.commit, &s.rollback, &s.asyncRun,
+                          &s.continueOnError, &s.noImpersonate, &s.taware,
+                          &s.x64, &s.hideTarget};
+        for (int i = 0; i < 9; ++i) *flags[i] = chkCaFlags_[i]->checked;
+    }
+
+    void caRefreshForm() {
+        const bool prev = caLoading_;
+        caLoading_ = true;
+        caRefreshTypeItems();
+        pack::CustomActionSpec* s =
+            (caSel_ >= 0 && caSel_ < static_cast<int>(caSpecs_.size()))
+                ? &caSpecs_[caSel_] : nullptr;
+        tbCaId_->setValue(s ? s->id : L"");
+        tbCaBinary_->setValue(s ? s->binary : L"");
+        tbCaEntry_->setValue(s ? s->entry : L"");
+        tbCaFile_->setValue(s ? s->file : L"");
+        tbCaDirectory_->setValue(s ? s->directory : L"");
+        tbCaProperty_->setValue(s ? s->property : L"");
+        tbCaValue_->setValue(s ? s->value : L"");
+        tbCaTarget_->setValue(s ? (s->target.empty() ? s->args : s->target)
+                                : std::wstring());
+        tbCaSeq_->setValue(s && s->sequence > 0
+                               ? std::to_wstring(s->sequence) : L"");
+        tbCaCondition_->setValue(s ? s->condition : L"");
+        int typeIndex = 0;
+        if (s) {
+            for (int i = 0; i < static_cast<int>(caTypeIds_.size()); ++i)
+                if (util::iequals(caTypeIds_[i], s->type)) { typeIndex = i; break; }
+        }
+        ddCaType_->setIndex(typeIndex);
+        int phaseIndex = pack::caPhaseCount() - 1;   // "自定义序号"
+        if (s) {
+            for (int i = 0; i < pack::caPhaseCount(); ++i)
+                if (pack::caPhases()[i].sequence == s->sequence) {
+                    phaseIndex = i; break;
+                }
+        }
+        ddCaPhase_->setIndex(phaseIndex);
+        pack::CustomActionSpec blank;
+        const pack::CustomActionSpec* cur = s ? s : &blank;
+        const bool* flags[9] = {&cur->deferred, &cur->commit, &cur->rollback,
+                                &cur->asyncRun, &cur->continueOnError,
+                                &cur->noImpersonate, &cur->taware, &cur->x64,
+                                &cur->hideTarget};
+        for (int i = 0; i < 9; ++i) chkCaFlags_[i]->checked = *flags[i];
+        caLoading_ = prev;
+    }
+
+    void caRefreshList() {
+        const bool prev = caLoading_;
+        caLoading_ = true;
+        auto issues = pack::lintCustomActions(caSpecs_, caBaseDir());
+        // 0 = OK, 1 = warning, 2 = error. The row icon carries the state;
+        // the concrete message is shown in the status line.
+        std::vector<int> state(caSpecs_.size(), 0);
+        for (const auto& i : issues) {
+            if (i.row < 0 || i.row >= static_cast<int>(state.size())) continue;
+            int sev = i.error ? 2 : 1;
+            if (sev > state[i.row]) state[i.row] = sev;
+        }
+        std::vector<std::vector<std::wstring>> rows;
+        std::vector<Ic> icons;
+        for (size_t i = 0; i < caSpecs_.size(); ++i) {
+            const pack::CustomActionSpec& s = caSpecs_[i];
+            const int mask = pack::caFieldMask(s.type);
+            std::wstring src;
+            if (mask & pack::CaBinary)
+                src = L"Binary: " + util::path::fileName(s.binary);
+            else if (mask & pack::CaFile) src = L"File: " + s.file;
+            else if (mask & pack::CaDirectory) src = L"Dir: " + s.directory;
+            else if (mask & pack::CaProperty) src = L"Prop: " + s.property;
+            rows.push_back({s.id.empty() ? L"(未命名)" : s.id,
+                            pack::caTypeLabel(s.type), src,
+                            s.sequence > 0 ? std::to_wstring(s.sequence) : L"—"});
+            icons.push_back(state[i] == 2 ? Ic::Cross
+                          : state[i] == 1 ? Ic::Warning : Ic::Check);
+        }
+        // Explicit widths keep all five columns visible even at the minimum
+        // window size (the grid would otherwise auto-fit to >500 px and hide
+        // the sequence / lint columns behind a horizontal scrollbar).
+        gridCaList_->setData({L"动作", L"类型", L"来源", L"序号"},
+                            std::move(rows),
+                            {S(120), S(118), S(110), S(54)},
+                            std::move(icons));
+        if (caSel_ >= 0 && caSel_ < static_cast<int>(caSpecs_.size()))
+            gridCaList_->select(caSel_);
+        caLoading_ = prev;
+    }
+
+    void caRefreshTimeline() {
+        struct Row {
+            int seq = 0;
+            bool custom = false;
+            int index = -1;
+            std::wstring action, condition, phase, kind;
+        };
+        std::vector<Row> all;
+        for (const auto& a : pack::standardSequence()) {
+            Row r;
+            r.seq = a.second;
+            r.action = a.first;
+            r.phase = caPhaseName(a.second);
+            r.kind = L"标准动作";
+            all.push_back(std::move(r));
+        }
+        for (size_t i = 0; i < caSpecs_.size(); ++i) {
+            const pack::CustomActionSpec& s = caSpecs_[i];
+            if (s.sequence <= 0) continue;
+            Row r;
+            r.seq = s.sequence;
+            r.custom = true;
+            r.index = static_cast<int>(i);
+            r.action = s.id.empty() ? L"(未命名)" : s.id;
+            r.condition = s.condition;
+            r.phase = caPhaseName(s.sequence);
+            r.kind = L"自定义 · " + pack::caTypeLabel(s.type);
+            all.push_back(std::move(r));
+        }
+        std::stable_sort(all.begin(), all.end(), [](const Row& a, const Row& b) {
+            if (a.seq != b.seq) return a.seq < b.seq;
+            return a.custom < b.custom;
+        });
+        std::vector<std::vector<std::wstring>> rows;
+        std::vector<Ic> icons;
+        caTimelineRows_.clear();
+        for (const Row& r : all) {
+            rows.push_back({std::to_wstring(r.seq), r.phase, r.action,
+                            r.condition, r.kind});
+            icons.push_back(r.custom ? Ic::Bolt : Ic::None);
+            caTimelineRows_.push_back(r.index);
+        }
+        const bool prev = caLoading_;
+        caLoading_ = true;
+        gridCaTimeline_->setData({L"序号", L"阶段", L"动作", L"条件", L"类型"},
+                                std::move(rows), {}, std::move(icons));
+        // Scroll the timeline to the selected action so its position among
+        // the standard actions is visible without manual scrolling.
+        int want = -1;
+        if (caSel_ >= 0) {
+            for (size_t i = 0; i < caTimelineRows_.size(); ++i)
+                if (caTimelineRows_[i] == caSel_) {
+                    want = static_cast<int>(i); break;
+                }
+        }
+        if (want < 0) {
+            for (size_t i = 0; i < caTimelineRows_.size(); ++i)
+                if (caTimelineRows_[i] >= 0) {
+                    want = static_cast<int>(i); break;
+                }
+        }
+        if (want >= 0) gridCaTimeline_->select(want);
+        caLoading_ = prev;
+    }
+
+    void caRefreshStatus() {
+        auto issues = pack::lintCustomActions(caSpecs_, caBaseDir());
+        int errors = 0, warns = 0;
+        for (const auto& i : issues) { if (i.error) ++errors; else ++warns; }
+        if (caSpecs_.empty()) {
+            caStatus_ = caEdited_
+                ? L"列表为空 · 打包时不会写入自定义动作"
+                : L"未编辑 · 清单中的 <customactions> 仍会生效";
+            caStatusKind_ = 0;
+        } else if (errors) {
+            caStatus_ = util::fmt(L"%d 个错误 · %d 个提醒 · 打包前需修正",
+                                  errors, warns);
+            caStatusKind_ = 2;
+        } else if (warns) {
+            caStatus_ = util::fmt(L"%d 个提醒 · 可继续打包", warns);
+            caStatusKind_ = 1;
+        } else {
+            caStatus_ = util::fmt(
+                L"%llu 个动作 · 检查通过 · 打包时以本页列表为准",
+                static_cast<unsigned long long>(caSpecs_.size()));
+            caStatusKind_ = 0;
+        }
+        // The grid only has room for a ✓/⚠/✗ marker; show the concrete
+        // message of the selected row in the status line.
+        for (const auto& i : issues) {
+            if (i.row != caSel_) continue;
+            caStatus_ = (i.error ? L"✗ " : L"⚠ ") + i.text + L" · " + caStatus_;
+            break;
+        }
+    }
+
+    void caRefresh() {
+        caRefreshList();
+        caRefreshForm();
+        caRefreshTimeline();
+        caRefreshStatus();
+        layout();
+    }
+
+    void caSelectRow(int row) {
+        if (caLoading_ || row < 0 ||
+            row >= static_cast<int>(caSpecs_.size()) || row == caSel_) return;
+        caSaveForm();
+        caSel_ = row;
+        caRefresh();
+    }
+
+    void caOnEdit() {
+        if (caLoading_) return;
+        caSaveForm();
+        caEdited_ = true;
+        caRefreshList();
+        caRefreshTimeline();
+        caRefreshStatus();
+        layout();
+    }
+
+    void caOnTypeChanged() {
+        if (caLoading_) return;
+        caSaveForm();
+        caEdited_ = true;
+        caRefresh();
+    }
+
+    void caOnPhase(int index) {
+        if (caLoading_ || index < 0 || index >= pack::caPhaseCount()) return;
+        const pack::CaPhase& p = pack::caPhases()[index];
+        if (p.sequence < 0) return;   // "自定义序号" leaves the value alone
+        tbCaSeq_->setValue(std::to_wstring(p.sequence));
+        caOnEdit();
+    }
+
+    void caAdd() {
+        caSaveForm();
+        pack::CustomActionSpec s;
+        s.id = L"NewAction" + std::to_wstring(caSpecs_.size() + 1);
+        s.type = L"setproperty";
+        s.property = L"MYPROP";
+        s.value = L"[INSTALLFOLDER]";
+        s.sequence = 4100;
+        caSpecs_.push_back(std::move(s));
+        caSel_ = static_cast<int>(caSpecs_.size()) - 1;
+        caEdited_ = true;
+        caRefresh();
+    }
+
+    void caDuplicate() {
+        caSaveForm();
+        if (caSel_ < 0 || caSel_ >= static_cast<int>(caSpecs_.size())) return;
+        pack::CustomActionSpec s = caSpecs_[caSel_];
+        std::wstring base = s.id + L"_2";
+        for (int n = 3; ; ++n) {
+            bool clash = false;
+            for (const auto& a : caSpecs_)
+                if (util::iequals(a.id, base)) { clash = true; break; }
+            if (!clash) break;
+            base = s.id + L"_" + std::to_wstring(n);
+        }
+        s.id = base;
+        caSpecs_.insert(caSpecs_.begin() + caSel_ + 1, std::move(s));
+        ++caSel_;
+        caEdited_ = true;
+        caRefresh();
+    }
+
+    void caDelete() {
+        if (caSel_ < 0 || caSel_ >= static_cast<int>(caSpecs_.size())) return;
+        caSpecs_.erase(caSpecs_.begin() + caSel_);
+        if (caSel_ >= static_cast<int>(caSpecs_.size()))
+            caSel_ = static_cast<int>(caSpecs_.size()) - 1;
+        caEdited_ = true;
+        caRefresh();
+    }
+
+    void caMove(int delta) {
+        int to = caSel_ + delta;
+        if (caSel_ < 0 || to < 0 ||
+            to >= static_cast<int>(caSpecs_.size())) return;
+        caSaveForm();
+        std::swap(caSpecs_[caSel_], caSpecs_[to]);
+        caSel_ = to;
+        caEdited_ = true;
+        caRefresh();
+    }
+
+    void caClear() {
+        caSpecs_.clear();
+        caSel_ = -1;
+        caEdited_ = true;
+        caRefresh();
+        toast(L"已清空自定义动作列表", 0);
+    }
+
+    void caImport() {
+        std::wstring path = util::trim(tbConfig_->value());
+        if (path.empty()) {
+            COMDLG_FILTERSPEC f[] = {{L"XML 清单 (*.xml)", L"*.xml"},
+                                     {L"所有文件 (*.*)", L"*.*"}};
+            if (!pickPath(hwnd_, Pick::Open, L"导入自定义动作清单",
+                          f, 2, nullptr, path)) return;
+        }
+        try {
+            std::vector<pack::CustomActionSpec> rows =
+                pack::loadCustomActionSpecs(path);
+            caSpecs_ = std::move(rows);
+            caSel_ = caSpecs_.empty() ? -1 : 0;
+            caEdited_ = true;
+            caRefresh();
+            toast(util::fmt(L"已导入 %llu 个自定义动作；打包时以本页列表为准",
+                            static_cast<unsigned long long>(caSpecs_.size())), 3);
+            logLine(L"[actions] 从 " + path + L" 导入 " +
+                    std::to_wstring(caSpecs_.size()) + L" 个动作");
+        } catch (const util::Error& e) {
+            toast(L"导入失败：" + e.message(), 2);
+            logLine(L"[actions] 导入失败：" + e.message());
+        }
+    }
+
+    void caCopyXml() {
+        caSaveForm();
+        setClipboardText(hwnd_, pack::customActionsToXml(caSpecs_, false));
+        toast(L"已复制 <customactions> / <executeSequence> 片段", 3);
+        logLine(L"[actions] 复制 XML 片段（" +
+                std::to_wstring(caSpecs_.size()) + L" 个动作）");
+    }
+
+    void caSaveXml() {
+        caSaveForm();
+        COMDLG_FILTERSPEC f[] = {{L"XML 清单 (*.xml)", L"*.xml"}};
+        std::wstring path;
+        if (!pickPath(hwnd_, Pick::Save, L"导出自定义动作清单",
+                      f, 1, L"xml", path)) return;
+        std::string bytes =
+            util::narrow(pack::customActionsToXml(caSpecs_, true), CP_UTF8);
+        if (!util::path::writeFile(path, bytes.data(), bytes.size())) {
+            toast(L"写入清单失败：" + path, 2);
+            return;
+        }
+        toast(L"已导出清单：" + util::path::fileName(path) +
+              L"（可作为 --config 使用）", 3);
+        logLine(L"[actions] 导出清单 " + path);
+    }
+
     void startPack() {
         pack::Options o;
         o.inputDir = util::trim(tbSrcDir_->value());
@@ -3368,6 +4035,27 @@ public:
             if (!idx.empty()) d.iconIndex = _wtoi(idx.c_str());
             d.description = util::trim(c.desc->value());
             o.shortcuts.push_back(std::move(d));
+        }
+
+        // Visual custom action editor: once the user has touched the list it
+        // replaces the manifest's <customactions> (see pack.cpp). Refuse to
+        // build while any row has a hard error, and jump back to the editor.
+        caSaveForm();
+        o.customActionsSet = caEdited_;
+        o.customActions = caSpecs_;
+        auto caIssues = pack::lintCustomActions(caSpecs_, caBaseDir());
+        int caErrors = 0;
+        std::wstring caFirst;
+        for (const auto& i : caIssues) {
+            if (!i.error) continue;
+            ++caErrors;
+            if (caFirst.empty())
+                caFirst = L"第 " + std::to_wstring(i.row + 1) + L" 行：" + i.text;
+        }
+        if (caEdited_ && caErrors) {
+            toast(util::fmt(L"自定义动作有 %d 个错误：", caErrors) + caFirst, 2);
+            if (packTab_ != 4) setPackTab(4);
+            return;
         }
 
         lastOutputDir_ = util::path::dirName(util::path::full(o.outputMsi));
@@ -3680,7 +4368,30 @@ public:
         if (packTab_ != 1) setPackTab(1);
         tbConfig_->setValue(full);
         logLine(L"[drop] 清单 = " + full);
-        toast(L"配置文件：" + util::path::fileName(full) +
+        std::wstring extra;
+        // A fresh editor mirrors the dropped manifest's custom actions, so
+        // they can be inspected / edited visually right away. Never clobber
+        // rows the user already edited.
+        if (!caEdited_ && caSpecs_.empty()) {
+            try {
+                std::vector<pack::CustomActionSpec> rows =
+                    pack::loadCustomActionSpecs(full);
+                if (!rows.empty()) {
+                    caSpecs_ = std::move(rows);
+                    caSel_ = 0;
+                    caEdited_ = true;
+                    caRefresh();
+                    extra = util::fmt(L" · 已载入 %llu 个自定义动作",
+                                      static_cast<unsigned long long>(caSpecs_.size()));
+                    logLine(L"[actions] 从拖放清单载入 " +
+                            std::to_wstring(caSpecs_.size()) + L" 个动作");
+                }
+            } catch (const util::Error&) {
+                // Not a msitool manifest (or malformed XML): keep the path,
+                // the packer reports the real error when it runs.
+            }
+        }
+        toast(L"配置文件：" + util::path::fileName(full) + extra +
                   (known ? L"" : L"（清单必须为 XML 格式）"),
               known ? 3 : 1);
     }

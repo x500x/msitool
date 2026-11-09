@@ -8,6 +8,7 @@
 
 ### Added
 
+- **GUI · 可视化自定义动作编辑器**：打包页新增第 5 个标签页——左侧动作列表（新增 / 复制 / 删除 / 上移下移 / 清空、状态图标），右侧按类型动态显隐的属性表单（8 种类型 / 9 个标志 / 插入阶段建议序号 / 序号 / 条件），底部把标准动作与自定义动作按 `InstallExecuteSequence` 混排的时间线（自动滚动到当前动作、点击可跳回编辑）；实时 lint（ID 重复、必填来源 / 目标、序号冲突、延迟动作未排序列、Binary 文件缺失）在打包前拦截错误；支持从 XML 清单「导入」、复制 XML 片段、导出可直接 `--config` 的清单。XML 解析与 MSI 编码抽到 `custom_actions.h/.cpp` 由清单加载器和 GUI 共用；编辑器一旦被编辑就以本页列表为准替换清单中的 `<customactions>`，拖放清单时也会自动载入动作。实测「新增 → 打包」生成的 MSI 含 `CustomAction` 行与 4100 序列行，「导入 examples/custom-actions.xml → 复制片段」字段（含 `deferred` / 条件 / 序号）完整往返。
 - **打包 · 自定义动作**：清单新增 `<customactions>`（`CustomAction` 表 + 可选 `Binary` 流）与 `<executeSequence>` / `<adminExecuteSequence>` 追加行；`type` 支持 `dll` / `exe` / `dllfile` / `exefile` / `exedir` / `setproperty` / `setdirectory` / `runcommand` 或数字，支持 `deferred` / `commit` / `rollback` / `async` / `continue` / `impersonate` / `taware` / `x64` / `hidetarget`；UI 的 `DoAction` 可直接引用已定义动作，导入 UI 模板时 Binary 类动作随流一起导入。示例见 `examples/custom-actions.xml`。
 - **GUI · 快捷方式表格**：打包页「快捷方式」标签页改为可增删行的内联表格（名称 / 位置 / 目标 / 参数 / 图标 / 索引 / 说明），不再使用多行文本；打包时逐行读取。
 

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "util.h"
+#include "custom_actions.h"
 #include "pack_xml.h"
 
 namespace pack {
@@ -58,9 +59,13 @@ struct Options {
     std::wstring uiLocale;         // --ui-locale en|zh-CN
     std::wstring dumpUiDir;        // --dump-ui <dir>
 
-    // In-memory manifest entries (GUI: shortcut editor / "create desktop
-    // shortcut" checkboxes). They are merged with --config / --manifest.
+    // In-memory manifest entries (GUI: shortcut editor / custom action editor
+    // / "create desktop shortcut" checkboxes). They are merged with --config.
     std::vector<ShortcutDef> shortcuts;
+    // When true the list below replaces the manifest's <customactions> and
+    // the sequence rows that schedule them (the GUI editor is authoritative).
+    std::vector<CustomActionSpec> customActions;
+    bool         customActionsSet = false;
     bool         desktopShortcut = false;
     bool         startMenuShortcut = false;
     std::wstring mainExe;
