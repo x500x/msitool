@@ -29,6 +29,11 @@ struct Options {
     std::wstring outDir;
     Format       format = Format::All;
     bool         verbose = false;
+    // Refuse to overwrite existing output files unless force is set.
+    bool         force = false;
+    // Fail instead of commenting out commands that still contain unresolved
+    // MSI formatted text ([UNKNOWN_PROPERTY] etc.).
+    bool         strict = false;
 };
 
 struct Stats {
@@ -40,6 +45,7 @@ struct Stats {
     size_t                    customActions = 0;
     size_t                    properties = 0;
     size_t                    files = 0;
+    size_t                    unresolved = 0;   // tokens left in generated scripts
     std::vector<std::wstring> outputs;   // absolute paths, in write order
 };
 

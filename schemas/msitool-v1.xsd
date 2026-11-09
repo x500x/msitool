@@ -18,6 +18,8 @@
         <xs:element name="shortcuts" type="shortcutsType"/>
         <xs:element name="registry" type="registryType"/>
         <xs:element name="services" type="servicesType"/>
+        <xs:element name="servicecontrols" type="serviceControlsType"/>
+        <xs:element name="properties" type="propertiesType"/>
         <xs:element name="environment" type="environmentType"/>
         <xs:element name="customactions" type="customActionsType"/>
         <xs:element name="executeSequence" type="sequenceType"/>
@@ -125,6 +127,37 @@
     <xs:attribute name="dependencies" type="xs:string"/>
     <xs:attribute name="description" type="xs:string"/>
     <xs:attribute name="component" type="xs:string"/>
+    <xs:attribute name="control" type="xs:string"/>
+    <xs:attribute name="controlId" type="xs:string"/>
+    <xs:attribute name="controlEvent" type="xs:integer"/>
+    <xs:attribute name="controlWait" type="xs:integer"/>
+    <xs:attribute name="controlArguments" type="xs:string"/>
+  </xs:complexType>
+
+  <xs:complexType name="serviceControlsType">
+    <xs:sequence>
+      <xs:element name="servicecontrol" minOccurs="0" maxOccurs="unbounded"
+                  type="serviceControlType"/>
+    </xs:sequence>
+  </xs:complexType>
+  <xs:complexType name="serviceControlType">
+    <xs:attribute name="id" type="xs:string"/>
+    <xs:attribute name="name" type="xs:string"/>
+    <xs:attribute name="event" type="xs:integer"/>
+    <xs:attribute name="arguments" type="xs:string"/>
+    <xs:attribute name="wait" type="xs:integer"/>
+    <xs:attribute name="component" type="xs:string"/>
+  </xs:complexType>
+
+  <xs:complexType name="propertiesType">
+    <xs:sequence>
+      <xs:element name="property" minOccurs="0" maxOccurs="unbounded"
+                  type="propertyType"/>
+    </xs:sequence>
+  </xs:complexType>
+  <xs:complexType name="propertyType">
+    <xs:attribute name="name" type="xs:string" use="required"/>
+    <xs:attribute name="value" type="xs:string"/>
   </xs:complexType>
 
   <xs:complexType name="environmentType">

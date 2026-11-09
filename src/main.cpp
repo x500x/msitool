@@ -24,6 +24,7 @@ struct Cli {
     bool                      keepTemp = false;
     bool                      sourceLayout = false;
     bool                      force = false;
+    bool                      strict = false;              // --strict (effects)
     bool                      desktopShortcut = false;
     bool                      startMenuShortcut = false;
     std::wstring              mainExe;
@@ -125,6 +126,8 @@ Options:
                            instead of the installed (target) tree
   --format <all|scripts|manifest>
                            effects: what to write (default: all)
+  --strict                 effects: fail when a command still contains
+                           unresolved MSI formatted text (default: comment it out)
   --keep-temp              extract: keep staged temporary cabinets
   --transform <file.mst>   apply an MST as a temporary view (repeatable);
                            info/tables/schema/query/list/extract see the
@@ -191,7 +194,7 @@ Options:
   --sign-password <text>   pack: PFX password
   --sign-timestamp <url>   pack: RFC 3161 timestamp URL
   --sign-tool <path>       pack: explicit path to signtool.exe
-  --force                  pack: overwrite an existing output MSI
+  --force                  pack/effects: overwrite existing output
   -h, --help               Show this help
 
 )"
@@ -206,6 +209,7 @@ Examples:
   msitool export setup.msi C:\out\archive
   msitool effects setup.msi C:\out\effects
   msitool effects setup.msi C:\out\effects --format manifest
+  msitool effects setup.msi C:\out\effects --strict --force
   msitool extract setup.msi C:\out\files --verbose
   msitool extract setup.msi C:\out\files --transform custom.mst
   msitool extract update.msp C:\out\patch
@@ -267,6 +271,7 @@ Cli parseCommandLine(int argc, wchar_t** argv) {
         if (a == L"--source-layout") { cli.sourceLayout = true; continue; }
         if (a == L"--keep-temp") { cli.keepTemp = true; continue; }
         if (a == L"--force") { cli.force = true; continue; }
+        if (a == L"--strict") { cli.strict = true; continue; }
         if (a == L"--no-empty-dirs") { cli.keepEmptyDirs = false; continue; }
         if (a == L"--per-user") { cli.scope = L"perUser"; cli.scopeSet = true; continue; }
         if (a == L"--all-users") { cli.scope = L"perMachine"; cli.scopeSet = true; continue; }
@@ -909,6 +914,8 @@ int run(int argc, wchar_t** argv) {
         o.outDir = requireArg(cli, 1, L"output directory");
         o.format = effects::parseFormat(cli.effectsFormat);
         o.verbose = cli.verbose;
+        o.force = cli.force;
+        o.strict = cli.strict;
         effects::exportEffects(db, o);
     } else {
         util::fail(L"Unknown command '" + cli.command + L"'. Run 'msitool --help'.");

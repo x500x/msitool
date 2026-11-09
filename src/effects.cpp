@@ -504,6 +504,174 @@ std::wstring dirExpr(const std::wstring& key, const Model& m, bool powershell) {
     return joinPath(base, tail);
 }
 
+// ---------------------------------------------------------------------------
+// Static MSI formatted-string formatter
+//
+// Windows Installer resolves [Property], [#file], [!file], [$component],
+// [%ENV], [INSTALLFOLDER], [~], [\]] and ## at install time. We cannot run
+// CostFinalize, but we can resolve most of them from the Property / File /
+// Component / Directory tables. Tokens we cannot resolve are reported so the
+// generated command can be commented out instead of being executed with a
+// literal bracket in it.
+// ---------------------------------------------------------------------------
+
+struct FormattedValue {
+    std::wstring              cmd;        // plain text for .cmd / .reg
+    std::wstring              ps;         // PowerShell expression yielding a string
+    std::vector<std::wstring> unresolved;
+};
+
+struct FileTarget {
+    std::wstring dir, name;
+};
+
+FileTarget findFile(const std::wstring& fileKey, const Model& m) {
+    FileTarget t;
+    for (size_t i = 0; i < m.tFile.size(); ++i) {
+        if (!util::iequals(m.tFile.get(i, L"File"), fileKey)) continue;
+        t.name = util::path::longName(m.tFile.get(i, L"FileName"));
+        std::wstring comp = m.tFile.get(i, L"Component_");
+        for (size_t j = 0; j < m.tComponent.size(); ++j)
+            if (util::iequals(m.tComponent.get(j, L"Component"), comp)) {
+                t.dir = m.tComponent.get(j, L"Directory_");
+                break;
+            }
+        return t;
+    }
+    return t;
+}
+
+std::wstring fileCmdPath(const std::wstring& fileKey, const Model& m) {
+    FileTarget t = findFile(fileKey, m);
+    if (t.name.empty()) return L"";
+    return joinPath(dirExpr(t.dir, m, false), t.name);
+}
+
+std::wstring filePsExpr(const std::wstring& fileKey, const Model& m) {
+    FileTarget t = findFile(fileKey, m);
+    if (t.name.empty()) return L"''";
+    return L"(Join-Path " + dirExpr(t.dir, m, true) + L" " + psQuote(t.name) + L")";
+}
+
+std::wstring componentDir(const std::wstring& comp, const Model& m, bool powershell) {
+    for (size_t i = 0; i < m.tComponent.size(); ++i)
+        if (util::iequals(m.tComponent.get(i, L"Component"), comp))
+            return dirExpr(m.tComponent.get(i, L"Directory_"), m, powershell);
+    return L"";
+}
+
+FormattedValue formatMsi(const std::wstring& raw, const Model& m, int depth = 0) {
+    FormattedValue out;
+    std::vector<std::wstring> psParts;
+    std::wstring literal;   // buffered literal text for the PS expression
+    auto flush = [&]() {
+        if (!literal.empty()) { psParts.push_back(psQuote(literal)); literal.clear(); }
+    };
+    auto addLiteral = [&](const std::wstring& s) { out.cmd += s; literal += s; };
+    auto addExpr = [&](const std::wstring& c, const std::wstring& p) {
+        out.cmd += c;
+        flush();
+        psParts.push_back(p);
+    };
+    auto unresolvedToken = [&](const std::wstring& text) {
+        addLiteral(text);
+        out.unresolved.push_back(text);
+    };
+
+    for (size_t i = 0; i < raw.size();) {
+        if (raw[i] == L'#' && i + 1 < raw.size() && raw[i + 1] == L'#') {
+            addLiteral(L"#");
+            i += 2;
+            continue;
+        }
+        if (raw[i] == L'[') {
+            size_t j = raw.find(L']', i + 1);
+            if (j != std::wstring::npos) {
+                std::wstring tok = raw.substr(i + 1, j - i - 1);
+                if (tok == L"~") {                 // multi-string / env separator
+                    addLiteral(L"[~]");
+                } else if (tok == L"\\[") {
+                    addLiteral(L"[");
+                } else if (tok == L"\\]") {
+                    addLiteral(L"]");
+                } else if (tok.size() > 1 && (tok[0] == L'#' || tok[0] == L'!')) {
+                    std::wstring key = tok.substr(1);
+                    std::wstring c = fileCmdPath(key, m);
+                    if (c.empty()) unresolvedToken(L"[#" + key + L"]");
+                    else addExpr(c, filePsExpr(key, m));
+                } else if (tok.size() > 1 && tok[0] == L'$') {
+                    std::wstring comp = tok.substr(1);
+                    std::wstring c = componentDir(comp, m, false);
+                    if (c.empty()) unresolvedToken(L"[$" + comp + L"]");
+                    else addExpr(c + L"\\",
+                                 L"(Join-Path " + componentDir(comp, m, true) + L" '')");
+                } else if (tok.size() > 1 && tok[0] == L'%') {
+                    std::wstring env = tok.substr(1);
+                    addExpr(L"%" + env + L"%", L"$env:" + env);
+                } else if (util::iequals(tok, L"INSTALLFOLDER")) {
+                    auto it = m.scriptProps.find(L"installfolder");
+                    if (it == m.scriptProps.end() || it->second.empty())
+                        unresolvedToken(L"[INSTALLFOLDER]");
+                    else
+                        addExpr(it->second,
+                                L"(Join-Path " + dirExpr(L"INSTALLFOLDER", m, true) + L" '')");
+                } else {
+                    auto it = m.scriptProps.find(util::toLower(tok));
+                    if (it != m.scriptProps.end() && !it->second.empty() &&
+                        it->second.find(L'[') == std::wstring::npos &&
+                        it->second.find(L']') == std::wstring::npos) {
+                        if (depth < 4) {
+                            FormattedValue sub = formatMsi(it->second, m, depth + 1);
+                            out.cmd += sub.cmd;
+                            flush();
+                            psParts.push_back(L"(" + sub.ps + L")");
+                            for (const auto& u : sub.unresolved)
+                                out.unresolved.push_back(u);
+                        } else {
+                            addLiteral(it->second);
+                        }
+                    } else {
+                        unresolvedToken(L"[" + tok + L"]");
+                    }
+                }
+                i = j + 1;
+                continue;
+            }
+        }
+        addLiteral(std::wstring(1, raw[i]));
+        ++i;
+    }
+    flush();
+    if (psParts.empty()) out.ps = L"''";
+    else {
+        for (size_t k = 0; k < psParts.size(); ++k) {
+            if (k) out.ps += L" + ";
+            out.ps += psParts[k];
+        }
+    }
+    return out;
+}
+
+std::set<std::wstring> collectUnresolvedTokens(const Model& m) {
+    std::set<std::wstring> out;
+    auto add = [&](const std::wstring& s) {
+        if (s.empty()) return;
+        FormattedValue fv = formatMsi(s, m);
+        for (const auto& t : fv.unresolved) out.insert(t);
+    };
+    for (const auto& r : m.registry) add(r.value);
+    for (const auto& s : m.services) {
+        add(s.display); add(s.args); add(s.deps); add(s.account);
+        add(s.description); add(s.group);
+    }
+    for (const auto& c : m.controls) { add(c.name); add(c.args); }
+    for (const auto& e : m.env) add(e.value);
+    for (const auto& s : m.shortcuts) {
+        add(s.target); add(s.args); add(s.description); add(s.dir); add(s.wkdir);
+    }
+    return out;
+}
+
 // PowerShell expression for a Shortcut.Target. `[#file]` is resolved through
 // the File / Component / Directory tables; everything else stays a literal.
 std::wstring shortcutTargetExpr(const std::wstring& raw, const Model& m) {
@@ -511,21 +679,12 @@ std::wstring shortcutTargetExpr(const std::wstring& raw, const Model& m) {
     if (t.size() > 3 && t.front() == L'[' && (t[1] == L'#' || t[1] == L'!') &&
         t.back() == L']') {
         std::wstring key = t.substr(2, t.size() - 3);
-        for (size_t i = 0; i < m.tFile.size(); ++i) {
-            if (!util::iequals(m.tFile.get(i, L"File"), key)) continue;
-            std::wstring comp = m.tFile.get(i, L"Component_");
-            std::wstring dir;
-            for (size_t j = 0; j < m.tComponent.size(); ++j)
-                if (util::iequals(m.tComponent.get(j, L"Component"), comp)) {
-                    dir = m.tComponent.get(j, L"Directory_");
-                    break;
-                }
-            return L"(Join-Path " + dirExpr(dir, m, true) + L" " +
-                   psQuote(util::path::longName(m.tFile.get(i, L"FileName"))) + L")";
-        }
+        FileTarget f = findFile(key, m);
+        if (!f.name.empty()) return filePsExpr(key, m);
         return psQuote(t);
     }
-    return psQuote(resolve(t, m.props));
+    FormattedValue fv = formatMsi(t, m);
+    return L"(" + fv.ps + L")";
 }
 
 // The service executable is the key file of ServiceInstall.Component_.
@@ -553,7 +712,7 @@ std::wstring serviceImage(const std::wstring& component, const Model& m) {
     }
     if (fileName.empty()) return L"[#" + component + L"]";
     (void)fileKey;
-    return resolve(joinPath(dirExpr(dir, m, false), fileName), m.scriptProps);
+    return formatMsi(joinPath(dirExpr(dir, m, false), fileName), m).cmd;
 }
 
 // ---------------------------------------------------------------------------
@@ -571,19 +730,20 @@ std::wstring hiveFor(int root) {
 }
 
 std::wstring regValueLine(const std::wstring& name, const std::wstring& raw,
-                          const Props& props) {
+                          const Model& m) {
     std::wstring lhs = name.empty() ? L"@"
                                     : L"\"" + regEscape(name) + L"\"";
     if (raw.size() >= 2 && raw[0] == L'#' && (raw[1] == L'x' || raw[1] == L'X'))
         return lhs + L"=hex:" + normalizeHex(raw.substr(2));
     if (raw.size() >= 2 && raw[0] == L'#' && raw[1] == L'%')
-        return lhs + L"=hex(2):" + toHexBytes(resolve(raw.substr(2), props)) + L"00,00";
+        return lhs + L"=hex(2):" +
+               toHexBytes(formatMsi(raw.substr(2), m).cmd) + L"00,00";
     if (!raw.empty() && raw[0] == L'#')
         return lhs + L"=dword:" +
                util::fmt(L"%08x", static_cast<unsigned>(_wtoi(raw.substr(1).c_str())));
-    std::wstring value = resolve(raw, props);
+    std::wstring value = formatMsi(raw, m).cmd;
     if (raw.find(L"[~]") != std::wstring::npos) {
-        std::wstring body = resolve(util::replaceAll(raw, L"[~]", L"\u0001"), props);
+        std::wstring body = formatMsi(util::replaceAll(raw, L"[~]", L"\u0001"), m).cmd;
         std::wstring hex;
         size_t start = 0;
         while (true) {
@@ -602,7 +762,7 @@ std::wstring regValueLine(const std::wstring& name, const std::wstring& raw,
     return lhs + L"=\"" + regEscape(value) + L"\"";
 }
 
-std::wstring buildRegFile(const std::vector<RegRow>& rows, const Props& props,
+std::wstring buildRegFile(const std::vector<RegRow>& rows, const Model& m,
                           bool uninstall) {
     std::wstring out = L"Windows Registry Editor Version 5.00\r\n"
                        L"; Generated by msitool effects from the Registry table.\r\n"
@@ -636,7 +796,7 @@ std::wstring buildRegFile(const std::vector<RegRow>& rows, const Props& props,
             continue;
         }
         out += L"[" + full + L"]\r\n";
-        out += regValueLine(r.name, r.value, props) + L"\r\n\r\n";
+        out += regValueLine(r.name, r.value, m) + L"\r\n\r\n";
     }
     return out;
 }
@@ -672,9 +832,9 @@ std::wstring buildServicesScript(const Model& m, bool uninstall) {
         L"rem Review placeholders and run from an elevated shell.\r\n\r\n";
     if (!uninstall) {
         for (const auto& s : m.services) {
-            std::wstring image = serviceImage(s.component, m);
+            std::wstring image = formatMsi(serviceImage(s.component, m), m).cmd;
             std::wstring binPath = image;
-            if (!s.args.empty()) binPath += L" " + resolve(s.args, m.scriptProps);
+            if (!s.args.empty()) binPath += L" " + formatMsi(s.args, m).cmd;
             out += L"rem ServiceInstall row: " + oneLine(s.id) + L"\r\n";
             if (hasFormatted(image) || hasFormatted(s.args))
                 out += L"rem MSI formatted text kept verbatim: " + oneLine(image) +
@@ -684,15 +844,15 @@ std::wstring buildServicesScript(const Model& m, bool uninstall) {
                 L" type= " + svcType(s.type) +
                 L" start= " + svcStart(s.start) +
                 L" error= " + svcError(s.error);
-            if (!s.display.empty()) line += L" DisplayName= " + cmdQuote(resolve(s.display, m.scriptProps));
-            if (!s.group.empty()) line += L" group= " + cmdQuote(resolve(s.group, m.scriptProps));
-            if (!s.deps.empty()) line += L" depend= " + cmdQuote(resolve(s.deps, m.scriptProps));
-            if (!s.account.empty()) line += L" obj= " + cmdQuote(resolve(s.account, m.scriptProps));
+            if (!s.display.empty()) line += L" DisplayName= " + cmdQuote(formatMsi(s.display, m).cmd);
+            if (!s.group.empty()) line += L" group= " + cmdQuote(formatMsi(s.group, m).cmd);
+            if (!s.deps.empty()) line += L" depend= " + cmdQuote(formatMsi(s.deps, m).cmd);
+            if (!s.account.empty()) line += L" obj= " + cmdQuote(formatMsi(s.account, m).cmd);
             if (!s.password.empty()) line += L" password= " + cmdQuote(s.password);
             out += line + L"\r\n";
             if (!s.description.empty())
                 out += L"sc description " + cmdQuote(s.name) + L" " +
-                       cmdQuote(resolve(s.description, m.scriptProps)) + L"\r\n";
+                       cmdQuote(formatMsi(s.description, m).cmd) + L"\r\n";
             out += L"\r\n";
         }
     }
@@ -769,7 +929,7 @@ std::wstring buildEnvironmentScript(const Model& m) {
     for (const auto& r : m.env) {
         EnvParsed p = parseEnv(r);
         if (p.name.empty()) continue;
-        std::wstring val = resolve(p.value, m.scriptProps);
+        std::wstring val = formatMsi(p.value, m).cmd;
         out += L"rem Environment row: " + oneLine(r.id) + L" (" +
                p.action + (p.system ? L", machine" : L", user") + L")\r\n";
         if (hasFormatted(p.value))
@@ -797,12 +957,69 @@ std::wstring buildEnvironmentScript(const Model& m) {
     return out;
 }
 
+// Accurate counterpart of environment.cmd: setx expands the *process*
+// environment (machine + user merged) and truncates at 1024 characters.
+// [Environment]::SetEnvironmentVariable targets the persisted User/Machine
+// value, which is what MSI's WriteEnvironmentStrings actually changes.
+std::wstring buildEnvironmentPs1(const Model& m) {
+    std::wstring out =
+        L"# Generated by msitool effects from the Environment table.\r\n"
+        L"# UTF-8 with BOM; run with PowerShell. Review every value first.\r\n"
+        L"# Preferred over environment.cmd: reads/writes the persisted variable.\r\n"
+        L"$ErrorActionPreference = 'Stop'\r\n"
+        L"$InstallRoot = " + dirExpr(L"INSTALLFOLDER", m, true) + L"\r\n"
+        L"function Get-MsiEnv([string]$Name, [string]$Scope) {\r\n"
+        L"    [Environment]::GetEnvironmentVariable($Name, $Scope)\r\n"
+        L"}\r\n"
+        L"function Set-MsiEnv([string]$Name, $Value, [string]$Scope) {\r\n"
+        L"    [Environment]::SetEnvironmentVariable($Name, $Value, $Scope)\r\n"
+        L"}\r\n\r\n";
+    for (const auto& r : m.env) {
+        EnvParsed p = parseEnv(r);
+        if (p.name.empty()) continue;
+        const std::wstring name = psQuote(p.name);
+        const std::wstring sep = psQuote(p.separator);
+        const std::wstring scope = p.system ? L"'Machine'" : L"'User'";
+        const std::wstring expr = L"(" + formatMsi(p.value, m).ps + L")";
+        out += L"# " + oneLine(r.id) + L" (" + p.action +
+               (p.system ? L", machine" : L", user") + L")\r\n";
+        if (p.action == L"remove") {
+            out += L"Set-MsiEnv " + name + L" $null " + scope + L"\r\n\r\n";
+        } else if (p.action == L"create") {
+            out += L"if ($null -eq (Get-MsiEnv " + name + L" " + scope + L")) {\r\n";
+            out += L"    Set-MsiEnv " + name + L" " + expr + L" " + scope + L"\r\n";
+            out += L"}\r\n\r\n";
+        } else if (p.action == L"append" || p.action == L"prepend") {
+            out += L"$cur = Get-MsiEnv " + name + L" " + scope + L"\r\n";
+            out += L"$add = " + expr + L"\r\n";
+            if (p.action == L"append")
+                out += L"Set-MsiEnv " + name + L" (($cur.TrimEnd(" + sep + L")) + " +
+                       sep + L" + $add) " + scope + L"\r\n\r\n";
+            else
+                out += L"Set-MsiEnv " + name + L" ($add + " + sep +
+                       L" + ($cur.TrimStart(" + sep + L"))) " + scope + L"\r\n\r\n";
+        } else {
+            out += L"Set-MsiEnv " + name + L" " + expr + L" " + scope + L"\r\n\r\n";
+        }
+    }
+    out += L"# Broadcast WM_SETTINGCHANGE so new processes see the change.\r\n"
+           L"try {\r\n"
+           L"    Add-Type -Namespace Win32 -Name EnvNotify -MemberDefinition @'\r\n"
+           L"[DllImport(\"user32.dll\", SetLastError=true, CharSet=CharSet.Auto)]\r\n"
+           L"public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, IntPtr wParam, string lParam, uint fuFlags, uint uTimeout, out IntPtr result);\r\n"
+           L"'@\r\n"
+           L"    $r = [IntPtr]::Zero\r\n"
+           L"    [void][Win32.EnvNotify]::SendMessageTimeout([IntPtr]0xffff, 0x1A, [IntPtr]::Zero, 'Environment', 2, 5000, [ref]$r)\r\n"
+           L"} catch { Write-Warning \"WM_SETTINGCHANGE broadcast failed: $_\" }\r\n";
+    return out;
+}
+
 std::wstring buildShortcutsScript(const Model& m,
                                   const std::map<std::wstring, std::wstring>& iconFiles) {
     std::wstring out =
         L"# Generated by msitool effects from the Shortcut table.\r\n"
         L"# UTF-8 with BOM; run with PowerShell. Review every path first.\r\n"
-        L"$InstallFolder = '<set INSTALLFOLDER here>'   # MSI install root\r\n"
+        L"$InstallFolder = " + dirExpr(L"INSTALLFOLDER", m, true) + L"   # MSI install root\r\n"
         L"$ws = New-Object -ComObject WScript.Shell\r\n\r\n";
     for (const auto& s : m.shortcuts) {
         if (s.target.empty()) continue;
@@ -819,11 +1036,11 @@ std::wstring buildShortcutsScript(const Model& m,
         out += L"$lnk = $ws.CreateShortcut(" + lnk + L")\r\n";
         out += L"$lnk.TargetPath = " + shortcutTargetExpr(s.target, m) + L"\r\n";
         if (!s.args.empty())
-            out += L"$lnk.Arguments = " + psQuote(resolve(s.args, m.props)) + L"\r\n";
+            out += L"$lnk.Arguments = (" + formatMsi(s.args, m).ps + L")\r\n";
         if (!s.wkdir.empty())
             out += L"$lnk.WorkingDirectory = " + dirExpr(s.wkdir, m, true) + L"\r\n";
         if (!s.description.empty())
-            out += L"$lnk.Description = " + psQuote(resolve(s.description, m.props)) + L"\r\n";
+            out += L"$lnk.Description = (" + formatMsi(s.description, m).ps + L")\r\n";
         auto it = iconFiles.find(s.icon);
         if (!s.icon.empty() && it != iconFiles.end())
             out += L"$lnk.IconLocation = " +
@@ -903,6 +1120,21 @@ std::wstring buildManifest(msi::Db& db, const Model& m,
     out += L"     UI, features, files and transforms are intentionally not replayed. -->\r\n";
     out += L"<msitool xmlns=\"https://msitool.dev/schema/pack/v1\" minVersion=\"1\">\r\n";
 
+    // Custom Property rows are preserved verbatim; pack skips names it
+    // already writes (ProductName, ProductCode, ALLUSERS, ...).
+    if (!m.tProperty.rows.empty()) {
+        out += L"\r\n  <properties>\r\n";
+        for (size_t i = 0; i < m.tProperty.size(); ++i) {
+            std::wstring name = m.tProperty.get(i, L"Property");
+            if (name.empty()) continue;
+            std::wstring line = L"    <property";
+            addAttr(line, L"name", name);
+            addAttr(line, L"value", m.tProperty.get(i, L"Value"));
+            out += line + L"/>\r\n";
+        }
+        out += L"  </properties>\r\n";
+    }
+
     out += xmlTag(L"pack", {
         {L"name", m.prop(L"ProductName")},
         {L"version", m.prop(L"ProductVersion")},
@@ -964,12 +1196,26 @@ std::wstring buildManifest(msi::Db& db, const Model& m,
             addAttr(line, L"dependencies", s.deps);
             addAttr(line, L"description", s.description);
             addAttr(line, L"component", s.component);
+            // Explicit <servicecontrol> rows below reproduce the original
+            // Event / Arguments / Wait exactly, so suppress pack's default.
+            addAttr(line, L"control", L"none");
             out += line + L"/>\r\n";
         }
         out += L"  </services>\r\n";
-        if (!m.controls.empty())
-            out += L"  <!-- Source ServiceControl events (pack normalises them to Event=163): "
-                   L"see services-install.cmd / services-uninstall.cmd. -->\r\n";
+    }
+    if (!m.controls.empty()) {
+        out += L"\r\n  <servicecontrols>\r\n";
+        for (const auto& c : m.controls) {
+            std::wstring line = L"    <servicecontrol";
+            addAttr(line, L"id", c.id);
+            addAttr(line, L"name", c.name);
+            addAttr(line, L"event", std::to_wstring(c.event));
+            addAttr(line, L"arguments", c.args);
+            addAttr(line, L"wait", std::to_wstring(c.wait));
+            addAttr(line, L"component", c.component);
+            out += line + L"/>\r\n";
+        }
+        out += L"  </servicecontrols>\r\n";
     }
     if (!m.env.empty()) {
         out += L"\r\n  <environment>\r\n";
@@ -1101,6 +1347,7 @@ std::wstring buildManifest(msi::Db& db, const Model& m,
 
 std::wstring buildReport(msi::Db& db, const Model& m, const Stats& st,
                          const Options& opt, const std::wstring& reportPath,
+                         const std::vector<std::wstring>& outputs,
                          const std::vector<std::wstring>& warnings) {
     const wchar_t* fmtName = opt.format == Format::All ? L"all"
                            : opt.format == Format::Scripts ? L"scripts" : L"manifest";
@@ -1109,6 +1356,9 @@ std::wstring buildReport(msi::Db& db, const Model& m, const Stats& st,
     out += L"- 产品: " + m.prop(L"ProductName") + L" " +
            m.prop(L"ProductVersion") + L" (" + m.prop(L"Manufacturer") + L")\r\n";
     out += L"- 导出格式: " + std::wstring(fmtName) + L"\r\n";
+    out += L"- 安全: " + std::wstring(opt.force ? L"允许覆盖" : L"拒绝覆盖已有文件") +
+           L" / " + std::wstring(opt.strict ? L"严格模式" : L"未解析占位符自动注释") +
+           L"；被注释的命令 " + std::to_wstring(st.unresolved) + L" 行\r\n";
     out += L"- 统计: 注册表 " + std::to_wstring(st.registry) +
            L" / 服务 " + std::to_wstring(st.services) +
            L" / 服务控制 " + std::to_wstring(st.serviceControls) +
@@ -1117,17 +1367,18 @@ std::wstring buildReport(msi::Db& db, const Model& m, const Stats& st,
            L" / 自定义动作 " + std::to_wstring(st.customActions) +
            L" / 属性 " + std::to_wstring(st.properties) + L"\r\n\r\n";
     out += L"## 生成的文件\r\n\r\n";
-    for (const auto& p : st.outputs) out += L"- `" + p + L"`\r\n";
-    out += L"- `" + reportPath + L"`（本文件）\r\n\r\n";
+    for (const auto& p : outputs) out += L"- `" + p + L"`\r\n";
+    out += L"\r\n";
     out += L"## 文件说明\r\n\r\n";
     out += L"| 文件 | 内容 |\r\n| --- | --- |\r\n";
     out += L"| `registry.reg` | 安装侧注册表写入，UTF-16 LE + BOM，可直接由 regedit 导入 |\r\n";
     out += L"| `registry-uninstall.reg` | 卸载侧删除（普通值写 `\"Name\"=-`，`*` 键写 `[-Key]`） |\r\n";
     out += L"| `services-install.cmd` / `services-uninstall.cmd` | `sc create` / `sc start` / `sc stop` / `sc delete` / `sc description` |\r\n";
-    out += L"| `environment.cmd` | `setx` / `reg delete`，`[~]` 追加写成 `%NAME%;value` |\r\n";
+    out += L"| `environment.cmd` | `setx` / `reg delete`，`[~]` 追加写成 `%NAME%;value`（简易版） |\r\n";
+    out += L"| `environment.ps1` | **推荐**：`[Environment]::SetEnvironmentVariable` 读写持久化的 User/Machine 变量，支持 create / append / prepend / remove + `WM_SETTINGCHANGE` 广播 |\r\n";
     out += L"| `shortcuts.ps1` | PowerShell + WScript.Shell 创建 .lnk |\r\n";
     out += L"| `custom-actions.txt`、`tables.txt`、`properties.txt` | 原始表数据与属性，供人工核对 |\r\n";
-    out += L"| `pack.xml` | 可回填的打包清单；`icons/` 与 `binaries/` 是它引用的资源 |\r\n\r\n";
+    out += L"| `pack.xml` | 可回填的打包清单（含 `<properties>` / `<servicecontrols>`）；`icons/` 与 `binaries/` 是它引用的资源 |\r\n\r\n";
     out += L"## 回填打包\r\n\r\n";
     out += L"```bat\r\n";
     out += L"msitool pack <payload-dir> <out.msi> --config \"" +
@@ -1135,11 +1386,12 @@ std::wstring buildReport(msi::Db& db, const Model& m, const Stats& st,
     out += L"```\r\n\r\n";
     out += L"## 限制\r\n\r\n";
     out += L"- 工具只读 MSI 表，**不执行安装、不求值条件、不运行 CustomAction**。\r\n";
-    out += L"- `[Property]` 只在 Property 表里有字面值时替换；`[#file]`、`[~]`、条件表达式等保持原样并写入注释。\r\n";
+    out += L"- 静态 formatter 解析 `[Property]` / `[#file]` / `[!file]` / `[$component]` / `[%ENV]` / `[INSTALLFOLDER]` / `##` / `[\\[]`；无法解析的 token 会写进注释，含它的可执行命令自动注释（`--strict` 则直接失败）。\r\n";
     out += L"- 服务的可执行路径由 `Component.KeyPath` / `File` / `Directory` 推导，找不到时写 `[#Component]` 占位符。\r\n";
-    out += L"- `pack.xml` 不重放 UI、Feature、文件树、Transform 与签名；`ServiceControl` 事件在 pack 里归一化为 163，原始事件见两个 .cmd。\r\n";
+    out += L"- `pack.xml` 不重放 UI、Feature、文件树、Transform 与签名；`<servicecontrols>` 会逐位还原 `Event` / `Arguments` / `Wait`。\r\n";
     out += L"- `Component_` 是源包的组件键；新包里找不到时 pack 会回退到根组件。\r\n";
     out += L"- 脚本是**审计/复现辅助**，不是逐字节等价的安装器；导入前请人工审阅。\r\n";
+    out += L"- 默认拒绝覆盖已有输出文件；需要覆盖时加 `--force`。\r\n";
     if (!warnings.empty()) {
         out += L"\r\n## 警告\r\n\r\n";
         for (const auto& x : warnings) out += L"- " + oneLine(x) + L"\r\n";
@@ -1147,13 +1399,66 @@ std::wstring buildReport(msi::Db& db, const Model& m, const Stats& st,
     return out;
 }
 
+enum class ScriptKind { Cmd, Reg, Ps1 };
+
+// Safety net: a command that still contains an unresolved MSI token (e.g.
+// [UNKNOWN_PROP]) would create a broken service / registry value. Comment it
+// out instead of executing it. --strict turns this into a hard failure before
+// anything is written to disk.
+std::wstring guardScript(const std::wstring& text,
+                         const std::set<std::wstring>& tokens,
+                         bool strict, ScriptKind kind, size_t& guarded) {
+    if (tokens.empty()) return text;
+    if (strict) {
+        std::wstring all;
+        for (const auto& t : tokens) all += t + L" ";
+        util::fail(L"unresolved MSI formatted text (--strict): " + util::trim(all) +
+                   L" (add it to the Property table or edit the scripts by hand)");
+    }
+    const wchar_t* comment = kind == ScriptKind::Cmd ? L"rem "
+                           : kind == ScriptKind::Reg ? L"; " : L"# ";
+    std::wstring out;
+    size_t pos = 0;
+    while (pos < text.size()) {
+        size_t e = text.find(L"\r\n", pos);
+        std::wstring line = e == std::wstring::npos ? text.substr(pos)
+                                                    : text.substr(pos, e - pos);
+        bool hasToken = false;
+        for (const auto& t : tokens)
+            if (line.find(t) != std::wstring::npos) { hasToken = true; break; }
+        const bool isComment =
+            line.empty() || line[0] == L'#' || line[0] == L';' ||
+            util::startsWith(line, L"rem ") ||
+            util::startsWith(line, L"@echo") ||
+            util::startsWith(line, L"chcp ");
+        if (hasToken && !isComment) {
+            out += std::wstring(comment) + L"TODO(unresolved MSI text): " + line;
+            ++guarded;
+        } else {
+            out += line;
+        }
+        if (e == std::wstring::npos) break;
+        out += L"\r\n";
+        pos = e + 2;
+    }
+    return out;
+}
+
+// Two-phase writer: everything is staged in memory, checked for existing
+// output files, and only then written. A collision or --strict failure can
+// never leave a half-written export behind.
 struct Writer {
     const Options& opt;
     Stats&         stats;
     std::wstring   dir;
 
-    std::wstring text(const std::wstring& rel, const std::wstring& content, Enc enc) {
-        std::wstring path = util::path::join(dir, rel);
+    struct Item {
+        std::wstring               rel, path;
+        std::vector<unsigned char> bytes;
+    };
+    std::vector<Item> staged;
+
+    static std::vector<unsigned char> encode(const std::wstring& content, Enc enc) {
         std::vector<unsigned char> bytes;
         if (enc == Enc::Utf16LeBom) {
             bytes.push_back(0xFF);
@@ -1163,16 +1468,53 @@ struct Writer {
                 bytes.push_back(static_cast<unsigned char>((ch >> 8) & 0xff));
             }
         } else {
-            if (enc == Enc::Utf8Bom) { bytes.push_back(0xEF); bytes.push_back(0xBB); bytes.push_back(0xBF); }
+            if (enc == Enc::Utf8Bom) {
+                bytes.push_back(0xEF); bytes.push_back(0xBB); bytes.push_back(0xBF);
+            }
             std::string s = util::narrow(content, CP_UTF8);
             bytes.insert(bytes.end(), s.begin(), s.end());
         }
-        if (!util::path::writeFile(path, bytes))
-            util::fail(L"Cannot write " + path);
-        ++stats.files;
-        stats.outputs.push_back(path);
-        util::verboseLine(opt.verbose, L"wrote " + path);
-        return path;
+        return bytes;
+    }
+
+    void stageBytes(const std::wstring& rel,
+                    const std::vector<unsigned char>& data) {
+        staged.push_back({rel, util::path::join(dir, rel), data});
+    }
+    void stage(const std::wstring& rel, const std::wstring& content, Enc enc) {
+        stageBytes(rel, encode(content, enc));
+    }
+    std::wstring pathOf(const std::wstring& rel) const {
+        return util::path::join(dir, rel);
+    }
+    std::vector<std::wstring> paths() const {
+        std::vector<std::wstring> v;
+        for (const auto& i : staged) v.push_back(i.path);
+        return v;
+    }
+    void commit() {
+        if (!opt.force) {
+            std::vector<std::wstring> conflicts;
+            for (const auto& i : staged)
+                if (util::path::exists(i.path)) conflicts.push_back(i.path);
+            if (!conflicts.empty()) {
+                std::wstring msg =
+                    L"Output file(s) already exist (pass --force to overwrite):";
+                for (const auto& c : conflicts) msg += L"\n  " + c;
+                util::fail(msg);
+            }
+        }
+        // Created only now: a --strict failure or an overwrite conflict
+        // leaves no empty output directory behind either.
+        if (!util::path::makeDirs(dir))
+            util::fail(L"Cannot create output directory: " + dir);
+        for (const auto& i : staged) {
+            if (!util::path::writeFile(i.path, i.bytes))
+                util::fail(L"Cannot write " + i.path);
+            ++stats.files;
+            stats.outputs.push_back(i.path);
+            util::verboseLine(opt.verbose, L"wrote " + i.path);
+        }
     }
 };
 
@@ -1189,8 +1531,6 @@ Format parseFormat(const std::wstring& text) {
 
 Stats exportEffects(msi::Db& db, const Options& opt) {
     const std::wstring outDir = util::path::full(opt.outDir);
-    if (!util::path::makeDirs(outDir))
-        util::fail(L"Cannot create output directory: " + outDir);
 
     Stats stats;
     Writer w{opt, stats, outDir};
@@ -1211,23 +1551,21 @@ Stats exportEffects(msi::Db& db, const Options& opt) {
     stats.customActions   = m.customActions.size();
     stats.properties      = m.props.size();
     std::vector<std::wstring> warnings;
+    const std::set<std::wstring> tokens = collectUnresolvedTokens(m);
+    size_t guarded = 0;
 
     // Icons and custom-action binaries are shared resources: the PowerShell
-    // shortcut script and pack.xml both reference the files written here.
+    // shortcut script and pack.xml both reference the staged files.
     std::map<std::wstring, std::wstring> iconFiles, binaryRels;
     std::set<std::wstring> seenIcons, seenBinaries;
     auto exportStream = [&](const wchar_t* table, const std::wstring& key,
                             const std::wstring& rel) {
-        std::wstring path = util::path::join(outDir, rel);
         try {
             std::wstring sql = L"SELECT `Data` FROM " + msi::quoteIdent(table) +
                                L" WHERE `Name`=?";
             auto data = db.readStream(sql, {key}, 1);
             if (data.empty()) return false;
-            if (!util::path::writeFile(path, data)) return false;
-            ++stats.files;
-            stats.outputs.push_back(path);
-            util::verboseLine(opt.verbose, L"wrote " + path);
+            w.stageBytes(rel, data);
             return true;
         } catch (const util::Error&) {
             return false;
@@ -1238,7 +1576,7 @@ Stats exportEffects(msi::Db& db, const Options& opt) {
         std::wstring rel = joinPath(L"icons",
             util::path::sanitizeComponent(s.icon) + L".ico");
         if (exportStream(L"Icon", s.icon, rel))
-            iconFiles[s.icon] = util::path::join(outDir, rel);
+            iconFiles[s.icon] = w.pathOf(rel);
         else
             warnings.push_back(L"cannot export icon '" + s.icon + L"'");
     }
@@ -1253,30 +1591,58 @@ Stats exportEffects(msi::Db& db, const Options& opt) {
             warnings.push_back(L"cannot export custom action binary '" + c.source + L"'");
     }
 
+    // Scripts are built (and guarded) before anything is written, so --strict
+    // and overwrite checks can never leave a partial export behind.
     if (opt.format != Format::Manifest) {
-        w.text(L"registry.reg", buildRegFile(m.registry, m.scriptProps, false),
-               Enc::Utf16LeBom);
-        w.text(L"registry-uninstall.reg", buildRegFile(m.registry, m.scriptProps, true),
-               Enc::Utf16LeBom);
-        w.text(L"services-install.cmd", buildServicesScript(m, false), Enc::Utf8);
-        w.text(L"services-uninstall.cmd", buildServicesScript(m, true), Enc::Utf8);
-        w.text(L"environment.cmd", buildEnvironmentScript(m), Enc::Utf8);
-        w.text(L"shortcuts.ps1", buildShortcutsScript(m, iconFiles), Enc::Utf8Bom);
-        w.text(L"custom-actions.txt", buildCustomActionDump(m), Enc::Utf8);
-        w.text(L"properties.txt", buildPropertyDump(m), Enc::Utf8);
+        w.stage(L"registry.reg",
+                guardScript(buildRegFile(m.registry, m, false), tokens, opt.strict,
+                            ScriptKind::Reg, guarded), Enc::Utf16LeBom);
+        w.stage(L"registry-uninstall.reg",
+                guardScript(buildRegFile(m.registry, m, true), tokens, opt.strict,
+                            ScriptKind::Reg, guarded), Enc::Utf16LeBom);
+        w.stage(L"services-install.cmd",
+                guardScript(buildServicesScript(m, false), tokens, opt.strict,
+                            ScriptKind::Cmd, guarded), Enc::Utf8);
+        w.stage(L"services-uninstall.cmd",
+                guardScript(buildServicesScript(m, true), tokens, opt.strict,
+                            ScriptKind::Cmd, guarded), Enc::Utf8);
+        w.stage(L"environment.cmd",
+                guardScript(buildEnvironmentScript(m), tokens, opt.strict,
+                            ScriptKind::Cmd, guarded), Enc::Utf8);
+        w.stage(L"environment.ps1",
+                guardScript(buildEnvironmentPs1(m), tokens, opt.strict,
+                            ScriptKind::Ps1, guarded), Enc::Utf8Bom);
+        w.stage(L"shortcuts.ps1",
+                guardScript(buildShortcutsScript(m, iconFiles), tokens, opt.strict,
+                            ScriptKind::Ps1, guarded), Enc::Utf8Bom);
+        w.stage(L"custom-actions.txt", buildCustomActionDump(m), Enc::Utf8);
+        w.stage(L"properties.txt", buildPropertyDump(m), Enc::Utf8);
         std::wstring raw =
             dumpTable(m.tRegistry) + L"\r\n" + dumpTable(m.tServices) + L"\r\n" +
             dumpTable(m.tControls) + L"\r\n" + dumpTable(m.tEnvironment) + L"\r\n" +
             dumpTable(m.tShortcuts) + L"\r\n" + dumpTable(m.tCustomActions);
-        w.text(L"tables.txt", raw, Enc::Utf8);
+        w.stage(L"tables.txt", raw, Enc::Utf8);
     }
     if (opt.format != Format::Scripts)
-        w.text(L"pack.xml", buildManifest(db, m, iconFiles, binaryRels, warnings),
-               Enc::Utf8Bom);
+        w.stage(L"pack.xml", buildManifest(db, m, iconFiles, binaryRels, warnings),
+                Enc::Utf8Bom);
+
+    stats.unresolved = guarded;
+    if (!tokens.empty()) {
+        std::wstring all;
+        for (const auto& t : tokens) all += t + L" ";
+        warnings.push_back(L"unresolved MSI formatted text: " + util::trim(all) +
+                           L" (" + std::to_wstring(guarded) +
+                           L" command line(s) commented out; use --strict to fail)");
+    }
 
     const std::wstring reportPath = util::path::join(outDir, L"effects.md");
-    w.text(L"effects.md", buildReport(db, m, stats, opt, reportPath, warnings),
-           Enc::Utf8);
+    std::vector<std::wstring> outputs = w.paths();
+    outputs.push_back(reportPath);
+    w.stage(L"effects.md",
+            buildReport(db, m, stats, opt, reportPath, outputs, warnings),
+            Enc::Utf8);
+    w.commit();
 
     for (const auto& x : warnings) util::errLine(L"[warn] " + x);
     util::outLine(util::fmt(

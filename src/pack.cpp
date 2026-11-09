@@ -1238,6 +1238,7 @@ Stats pack(const Options& opt) {
     const bool needShortcuts = !cfgData.shortcuts.empty();
     const bool needRegistry = !cfgData.registry.empty();
     const bool needServices = !cfgData.services.empty();
+    const bool needServiceControls = !cfgData.serviceControls.empty();
     const bool needEnvironment = !cfgData.environment.empty();
     const bool needCustomActions = !allCustomActions.empty();
     const UiTables uiTables = uiTablesFor(uiSpec);
@@ -1274,7 +1275,10 @@ Stats pack(const Options& opt) {
             create(L"RemoveFile");
         }
         if (needRegistry) create(L"Registry");
-        if (needServices) { create(L"ServiceInstall"); create(L"ServiceControl"); }
+        if (needServices || needServiceControls) {
+            if (needServices) create(L"ServiceInstall");
+            create(L"ServiceControl");
+        }
         if (needEnvironment) create(L"Environment");
         if (needCustomActions) {
             create(L"CustomAction");
@@ -1679,11 +1683,32 @@ Stats pack(const Options& opt) {
                        d.args.empty() ? Null() : S(d.args), S(compKey),
                        d.description.empty() ? Null() : S(d.description)});
             (void)ti;
+            // An explicit <servicecontrol> row (or control="none") owns the
+            // ServiceControl table for this service; otherwise emit the
+            // conventional start/stop/delete row with the configured bits.
+            bool explicitControl = false;
+            for (const auto& sc : cfgData.serviceControls)
+                if (util::iequals(sc.name, d.name)) { explicitControl = true; break; }
+            if (d.control != L"none" && !explicitControl) {
+                std::wstring ctlId = d.controlId.empty()
+                    ? toIdentifier(d.id + L"Control") : d.controlId;
+                insertRow(h, L"ServiceControl",
+                          {L"ServiceControl", L"Name", L"Event", L"Arguments", L"Wait",
+                           L"Component_"},
+                          {S(ctlId), S(d.name), I(d.controlEvent),
+                           d.controlArguments.empty() ? Null() : S(d.controlArguments),
+                           I(d.controlWait), S(compKey)});
+            }
+        }
+
+        // Explicit ServiceControl rows (round-tripped by `effects`).
+        for (const auto& sc : cfgData.serviceControls) {
             insertRow(h, L"ServiceControl",
                       {L"ServiceControl", L"Name", L"Event", L"Arguments", L"Wait",
                        L"Component_"},
-                      {S(toIdentifier(d.id + L"Control")), S(d.name), I(163), Null(), I(1),
-                       S(compKey)});
+                      {S(sc.id), S(sc.name), I(sc.event),
+                       sc.arguments.empty() ? Null() : S(sc.arguments), I(sc.wait),
+                       S(componentFor(sc.component, L""))});
         }
 
         // Environment variables.
@@ -1735,8 +1760,12 @@ Stats pack(const Options& opt) {
                        d.target.empty() ? Null() : S(d.target)});
         }
 
-        // Properties.
+        // Properties. Names written here are remembered so an exported
+        // <properties> section can add custom properties without clashing
+        // with the built-in rows on the Property table's primary key.
+        std::set<std::wstring> writtenProps;
         auto prop = [&](const wchar_t* name, const std::wstring& value) {
+            if (!writtenProps.insert(util::toLower(std::wstring(name))).second) return;
             insertRow(h, L"Property", {L"Property", L"Value"}, {S(name), S(value)});
         };
         prop(L"ProductName", productName);
@@ -1750,6 +1779,12 @@ Stats pack(const Options& opt) {
         // unset so msiexec installs into the user profile.
         if (!perUser) prop(L"ALLUSERS", L"1");
         if (!installTarget.pinned.empty()) prop(L"INSTALLFOLDER", installTarget.pinned);
+        for (const auto& p : cfgData.properties) {
+            if (p.name.empty()) continue;
+            if (!writtenProps.insert(util::toLower(p.name)).second) continue;
+            insertRow(h, L"Property", {L"Property", L"Value"},
+                      {S(p.name), S(p.value)});
+        }
 
         // Execute sequences.
         for (const auto& a : kSequence)

@@ -34,6 +34,17 @@ struct RegistryDef {
 struct ServiceDef {
     std::wstring id, name, displayName, image, type, start, error, account,
                  password, args, dependencies, description, component;
+    // Optional control over the ServiceControl row pack generates for this
+    // service. `control="none"` suppresses it (e.g. when an explicit
+    // <servicecontrol> row below carries the original Event/Wait bits).
+    std::wstring control = L"default";
+    std::wstring controlId, controlArguments;
+    int          controlEvent = 163, controlWait = 1;
+};
+
+struct ServiceControlDef {
+    std::wstring id, name, arguments, component;
+    int          event = 163, wait = 1;
 };
 
 struct EnvDef {
@@ -61,6 +72,8 @@ struct Manifest {
     std::vector<ShortcutDef> shortcuts;
     std::vector<RegistryDef> registry;
     std::vector<ServiceDef>  services;
+    std::vector<ServiceControlDef> serviceControls;
+    std::vector<PropertyDef> properties;
     std::vector<EnvDef>      environment;
     std::vector<CustomActionDef> customActions;
     std::vector<SequenceEntry> executeSequence;

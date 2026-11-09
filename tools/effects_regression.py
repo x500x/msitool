@@ -8,12 +8,18 @@ What it verifies (all outputs go to a temporary directory):
 
 * --format all / scripts / manifest write the right set of files;
 * registry.reg is UTF-16 LE with BOM and contains the expected value types,
-  the .cmd scripts contain sc / setx commands, shortcuts.ps1 is a real
-  PowerShell script, pack.xml is well-formed XML in the pack namespace;
-* the generated pack.xml really is a round-trip manifest: packing a tiny
-  payload with it reproduces Registry / ServiceInstall / ServiceControl /
-  Environment / Shortcut rows and passes MsiVerifyPackage;
+  the .cmd scripts contain sc / setx commands, environment.ps1 and
+  shortcuts.ps1 are real PowerShell scripts and the static formatter resolved
+  [INSTALLFOLDER] / [#file] placeholders, pack.xml is well-formed XML in the
+  pack namespace with <properties> / <servicecontrols> sections;
+* the generated pack.xml really is a lossless round-trip manifest: packing a
+  tiny payload with it reproduces Registry / ServiceInstall / ServiceControl /
+  Environment / Shortcut / Property / CustomAction rows (including a
+  non-default ServiceControl Event/Arguments/Wait) and passes MsiVerifyPackage;
 * custom actions survive the round trip (t_ca.msi / t_cabin.msi when present);
+* a second export refuses to overwrite, --force allows it;
+* --strict rejects unresolved MSI formatted text without leaving a directory,
+  while the default mode comments the affected commands out;
 * an invalid --format is rejected with a non-zero exit code.
 
 The tool itself never installs anything; neither does this script.
@@ -76,8 +82,9 @@ def main():
     print("exe : %s\nmsi : %s\nwork: %s\n" % (exe, msi, work))
 
     scripts = ["registry.reg", "registry-uninstall.reg", "services-install.cmd",
-               "services-uninstall.cmd", "environment.cmd", "shortcuts.ps1",
-               "custom-actions.txt", "properties.txt", "tables.txt", "effects.md"]
+               "services-uninstall.cmd", "environment.cmd", "environment.ps1",
+               "shortcuts.ps1", "custom-actions.txt", "properties.txt",
+               "tables.txt", "effects.md"]
     manifest = "pack.xml"
 
     # ---- 1. three formats ------------------------------------------------
@@ -113,6 +120,17 @@ def main():
     env = open(os.path.join(allout, "environment.cmd"), "rb").read().decode("utf-8")
     check("setx" in env and "%PATH%" in env,
           "environment.cmd contains an append via setx")
+    envps = open(os.path.join(allout, "environment.ps1"), "rb").read()
+    check(envps[:3] == b"\xef\xbb\xbf", "environment.ps1 is UTF-8 with BOM")
+    ps_text = envps.decode("utf-8-sig")
+    check("SetEnvironmentVariable" in ps_text and "GetEnvironmentVariable" in ps_text,
+          "environment.ps1 reads/writes the persisted variable")
+    check("$env:ProgramFiles" in ps_text,
+          "static formatter resolves [INSTALLFOLDER] in PowerShell")
+    check("WM_SETTINGCHANGE" in ps_text,
+          "environment.ps1 broadcasts WM_SETTINGCHANGE")
+    check("%ProgramFiles%" in svc,
+          "static formatter resolves the service image path in .cmd")
     ps = open(os.path.join(allout, "shortcuts.ps1"), "rb").read()
     check(ps[:3] == b"\xef\xbb\xbf", "shortcuts.ps1 is UTF-8 with BOM")
     check(b"CreateShortcut" in ps, "shortcuts.ps1 creates .lnk files")
@@ -130,6 +148,14 @@ def main():
         check(root.find(NS + "services") is not None, "pack.xml has <services>")
         check(root.find(NS + "environment") is not None, "pack.xml has <environment>")
         check(root.find(NS + "shortcuts") is not None, "pack.xml has <shortcuts>")
+        check(root.find(NS + "properties") is not None, "pack.xml has <properties>")
+        scs = root.find(NS + "servicecontrols")
+        check(scs is not None, "pack.xml has <servicecontrols>")
+        if scs is not None:
+            sc = scs.find(NS + "servicecontrol")
+            check(sc is not None and sc.get("event") == "163" and
+                  sc.get("wait") == "1",
+                  "pack.xml preserves ServiceControl event/wait")
     except ET.ParseError as e:
         check(False, "pack.xml is well-formed XML (%s)" % e)
 
@@ -156,6 +182,9 @@ def main():
     rows = table(exe, rebuilt, "ServiceControl")
     check(any("163" in row for row in rows),
           "round-trip ServiceControl has the standard event bits")
+    props = table(exe, rebuilt, "Property")
+    check(any(len(row) > 1 and row[0] == "WIXUI_INSTALLDIR" for row in props[1:]),
+          "round-trip preserves custom Property rows")
 
     # ---- 3. custom action round trips ------------------------------------
     for name in ("t_ca.msi", "t_cabin.msi", "merge_ref.msi"):
@@ -179,7 +208,75 @@ def main():
     check(os.path.isdir(os.path.join(cabin, "binaries")),
           "Binary-backed custom action payload is exported")
 
-    # ---- 4. invalid format ------------------------------------------------
+    # ---- 4. lossless <servicecontrols> / <properties> round trip ---------
+    lossless_xml = os.path.join(work, "lossless.xml")
+    with open(lossless_xml, "w", encoding="utf-8") as f:
+        f.write('<?xml version="1.0" encoding="utf-8"?>\n'
+                '<msitool xmlns="https://msitool.dev/schema/pack/v1" minVersion="1">\n'
+                '  <pack name="Lossless" version="1.0"/>\n'
+                '  <properties><property name="CUSTOM_FLAG" value="on"/></properties>\n'
+                '  <services><service id="Svc" name="SvcX" control="none"/></services>\n'
+                '  <servicecontrols><servicecontrol id="SvcCtl" name="SvcX" '
+                'event="170" arguments="--x" wait="0"/></servicecontrols>\n'
+                '</msitool>\n')
+    src_loss = os.path.join(work, "lossless_src.msi")
+    r = run(exe, "pack", payload, src_loss, "--config", lossless_xml, "--force")
+    check(r.returncode == 0, "lossless: source package builds")
+    out_loss = os.path.join(work, "lossless_effects")
+    r = run(exe, "effects", src_loss, out_loss, "--format", "manifest")
+    check(r.returncode == 0, "lossless: effects --format manifest exits 0")
+    cfg_loss = os.path.join(out_loss, manifest)
+    dest_loss = os.path.join(work, "lossless_dest.msi")
+    r = run(exe, "pack", payload, dest_loss, "--config", cfg_loss, "--force")
+    check(r.returncode == 0 and "MsiVerifyPackage: OK" in
+          r.stdout.decode("utf-8", "replace"), "lossless: round-trip pack succeeds")
+    ctl = table(exe, dest_loss, "ServiceControl")
+    check(any(len(row) > 4 and "170" in row and "--x" in row and "0" in row
+              for row in ctl[1:]),
+          "lossless: non-default Event/Arguments/Wait survive the round trip")
+    props = table(exe, dest_loss, "Property")
+    check(any(len(row) > 1 and row[0] == "CUSTOM_FLAG" and row[1] == "on"
+              for row in props[1:]),
+          "lossless: custom Property rows survive the round trip")
+
+    # ---- 5. overwrite protection ------------------------------------------
+    ov = os.path.join(work, "overwrite")
+    check(run(exe, "effects", msi, ov).returncode == 0,
+          "overwrite: first export succeeds")
+    check(run(exe, "effects", msi, ov).returncode != 0,
+          "overwrite: second export is refused")
+    check(run(exe, "effects", msi, ov, "--force").returncode == 0,
+          "overwrite: --force allows the second export")
+
+    # ---- 6. --strict / unresolved formatted text --------------------------
+    unres_xml = os.path.join(work, "unresolved.xml")
+    with open(unres_xml, "w", encoding="utf-8") as f:
+        f.write('<?xml version="1.0" encoding="utf-8"?>\n'
+                '<msitool xmlns="https://msitool.dev/schema/pack/v1" minVersion="1">\n'
+                '  <pack name="Unresolved" version="1.0"/>\n'
+                '  <registry><registryValue id="R1" root="HKCU" key="Software\\Demo" '
+                'name="Who" value="[TOTALLY_UNKNOWN_PROP]" type="string"/></registry>\n'
+                '  <environment><variable id="E1" name="DEMO_PATH" '
+                'value="[ANOTHER_UNKNOWN]bin" action="set" system="no"/></environment>\n'
+                '</msitool>\n')
+    src_un = os.path.join(work, "unresolved.msi")
+    check(run(exe, "pack", payload, src_un, "--config", unres_xml, "--force")
+          .returncode == 0, "strict: source package builds")
+    out_un = os.path.join(work, "unresolved_effects")
+    check(run(exe, "effects", src_un, out_un, "--strict").returncode != 0,
+          "strict: unresolved formatted text fails the export")
+    check(not os.path.exists(out_un),
+          "strict: failure leaves no output directory behind")
+    check(run(exe, "effects", src_un, out_un).returncode == 0,
+          "strict: default mode succeeds with unresolved text")
+    reg_un = open(os.path.join(out_un, "registry.reg"), "rb").read()[2:].decode("utf-16-le")
+    check("TODO(unresolved" in reg_un,
+          "strict: unresolved registry value is commented out")
+    env_un = open(os.path.join(out_un, "environment.ps1"), "rb").read().decode("utf-8-sig")
+    check("TODO(unresolved" in env_un,
+          "strict: unresolved environment command is commented out")
+
+    # ---- 7. invalid format ------------------------------------------------
     r = run(exe, "effects", msi, os.path.join(work, "bad"), "--format", "bogus")
     check(r.returncode != 0, "invalid --format is rejected")
 

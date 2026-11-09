@@ -203,7 +203,9 @@ void parseServices(const xml::Node& n, Manifest& m) {
         checkAttrs(*s, {L"id", L"name", L"displayName", L"image", L"type",
                         L"start", L"error", L"account", L"password",
                         L"arguments", L"dependencies", L"description",
-                        L"component"}, L"service");
+                        L"component", L"control", L"controlId",
+                        L"controlEvent", L"controlWait", L"controlArguments"},
+                   L"service");
         ServiceDef d;
         d.id = toIdentifier(s->attr(L"id", L"Service"));
         d.name = s->attr(L"name", d.id);
@@ -218,7 +220,41 @@ void parseServices(const xml::Node& n, Manifest& m) {
         d.dependencies = s->attr(L"dependencies");
         d.description = s->attr(L"description");
         d.component = s->attr(L"component");
+        d.control = util::toLower(s->attr(L"control", L"default"));
+        if (d.control != L"none" && d.control != L"default")
+            util::fail(L"<service> " + d.id + L": control must be default or none");
+        d.controlId = s->attr(L"controlId");
+        d.controlArguments = s->attr(L"controlArguments");
+        d.controlEvent = intAttr(*s, L"controlEvent", 163, L"service " + d.id);
+        d.controlWait = intAttr(*s, L"controlWait", 1, L"service " + d.id);
         m.services.push_back(std::move(d));
+    }
+}
+
+void parseServiceControls(const xml::Node& n, Manifest& m) {
+    checkAttrs(n, {}, L"servicecontrols");
+    for (const xml::Node* c : n.childList(L"servicecontrol")) {
+        checkAttrs(*c, {L"id", L"name", L"event", L"arguments", L"wait",
+                        L"component"}, L"servicecontrol");
+        ServiceControlDef d;
+        d.id = toIdentifier(c->attr(L"id", L"ServiceControl"), 38);
+        d.name = c->attr(L"name", d.id);
+        d.event = intAttr(*c, L"event", 163, L"servicecontrol " + d.id);
+        d.arguments = c->attr(L"arguments");
+        d.wait = intAttr(*c, L"wait", 1, L"servicecontrol " + d.id);
+        d.component = c->attr(L"component");
+        m.serviceControls.push_back(std::move(d));
+    }
+}
+
+void parseProperties(const xml::Node& n, Manifest& m) {
+    checkAttrs(n, {}, L"properties");
+    for (const xml::Node* p : n.childList(L"property")) {
+        checkAttrs(*p, {L"name", L"value"}, L"property");
+        PropertyDef d;
+        d.name = p->require(L"name", L"property");
+        d.value = p->attr(L"value");
+        if (!d.name.empty()) m.properties.push_back(std::move(d));
     }
 }
 
@@ -647,6 +683,10 @@ Manifest loadManifestXml(const std::wstring& path) {
             parseRegistry(ch, m);
         } else if (util::iequals(ch.name, L"services")) {
             parseServices(ch, m);
+        } else if (util::iequals(ch.name, L"servicecontrols")) {
+            parseServiceControls(ch, m);
+        } else if (util::iequals(ch.name, L"properties")) {
+            parseProperties(ch, m);
         } else if (util::iequals(ch.name, L"environment")) {
             parseEnvironment(ch, m);
         } else if (util::iequals(ch.name, L"customactions")) {
@@ -678,6 +718,7 @@ Manifest loadManifestXml(const std::wstring& path) {
     for (auto& d : m.shortcuts) d.id = unique(d.id);
     for (auto& d : m.registry) d.id = unique(d.id);
     for (auto& d : m.services) d.id = unique(d.id);
+    for (auto& d : m.serviceControls) d.id = unique(d.id);
     for (auto& d : m.environment) d.id = unique(d.id);
 
     return m;

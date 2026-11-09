@@ -620,6 +620,8 @@ public:
     TextBox* tbEffectsDir_ = nullptr;
     Button* btnEffectsBrowse_ = nullptr;
     Button* btnEffects_ = nullptr;
+    Check* chkEffectsForce_ = nullptr;
+    Check* chkEffectsStrict_ = nullptr;
     // pack -----------------------------------------------------------------
     int    packTab_ = 0;              // 0 basic, 1 advanced, 2 signing
     Button* btnTabBasic_ = nullptr;
@@ -1207,6 +1209,8 @@ public:
                                        [this] { browseFolderFor(tbEffectsDir_, L"选择导出目录"); });
         btnEffects_ = makeButton(PgEffects, L"导出安装效果", Ic::Terminal, true,
                                  [this] { startEffects(); });
+        chkEffectsForce_ = makeCheck(PgEffects, L"覆盖已有文件", false);
+        chkEffectsStrict_ = makeCheck(PgEffects, L"严格模式", false);
 
         // ---- Pack ---------------------------------------------------------
         // The form is split into three tabs so every field stays readable at
@@ -2013,11 +2017,19 @@ public:
         btnEffectsBrowse_->setRect(R(x + w - S(72), y, S(72), S(32)));
         y += S(32) + S(24);
         btnEffects_->setRect(R(x, y, S(184), S(40)));
-        addLabel(R(x, y + S(54), w, S(150)),
-                 L"脚本包：registry(.reg) / services(.cmd) / environment(.cmd) / "
+        y += S(40) + S(14);
+        const int half = (w - S(12)) / 2;
+        chkEffectsForce_->setRect(R(x, y, half, S(26)));
+        chkEffectsStrict_->setRect(R(x + half + S(12), y, half, S(26)));
+        const int noteY = y + S(32);
+        const int avail = static_cast<int>(oc.bottom - noteY - S(12));
+        const int noteH = std::max(S(24), std::min(S(150), avail));
+        addLabel(R(x, noteY, w, noteH),
+                 L"脚本包：registry(.reg) / services(.cmd) / environment(.cmd|.ps1) / "
                  L"shortcuts(.ps1) / tables.txt / properties.txt / effects.md。\n"
-                 L"XML 清单：pack.xml（含 icons / binaries 资源），可直接用于 "
-                 L"pack --config 回填。\n只读取 MSI 表，不执行安装、不求值条件。",
+                 L"XML 清单：pack.xml（含 properties / servicecontrols / icons / binaries），"
+                 L"可直接用于 pack --config 回填。\n"
+                 L"含未解析占位符的命令默认被注释；严格模式则直接失败。默认拒绝覆盖已有文件。",
                  t.fSmall, t.muted, DT_LEFT | DT_TOP | DT_WORDBREAK);
     }
 
@@ -3962,13 +3974,17 @@ public:
         effects::Format fmt = effects::Format::All;
         if (ddEffectsMode_->index == 1) fmt = effects::Format::Scripts;
         else if (ddEffectsMode_->index == 2) fmt = effects::Format::Manifest;
+        const bool force = chkEffectsForce_->checked;
+        const bool strict = chkEffectsStrict_->checked;
         std::wstring path = package_;
-        startTask([path, dir, fmt] {
+        startTask([path, dir, fmt, force, strict] {
             msi::Db db(path);
             effects::Options o;
             o.outDir = dir;
             o.format = fmt;
             o.verbose = true;
+            o.force = force;
+            o.strict = strict;
             effects::exportEffects(db, o);
         }, L"正在导出安装效果 " + util::path::fileName(path), L"安装效果导出完成");
     }

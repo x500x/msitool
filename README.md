@@ -130,7 +130,7 @@ build\msitool_x64.exe gui setup.msi         :: 启动 GUI 并直接打开一个�
 | SQL 查询 | MSI SQL 编辑器、示例查询、结果网格与耗时 |
 | 解包 | **整页是文件资源管理器**：命令 / 地址栏（后退、前进、上一级、刷新、可点击面包屑、搜索框、解包全部、解包选中、选项、日志）+ 左侧导航树 + 右侧详细信息列表（文件夹与文件混排、图标、类型列、点击表头排序、双击进入目录 / 双击文件解包、右键菜单）；常驻「解包到」位置条可直接编辑路径、点「浏览…」选目录、从「最近」下拉复用历史目录、点「打开」查看，默认自动填 `<包名>_files`；六个开关、MST transform 与基准 MSI 收进可折叠「选项」，运行日志收进可折叠「日志」抽屉（展开后按窗口高度自适应，约占页面 1/3，最大化时更高） |
 | 导出 | CAB / 完整归档两种模式、运行日志 |
-| 安装效果 | 三种导出内容（两者 / 仅脚本 / 仅 XML 清单）、输出目录（留空自动填 `<包名>_effects`，可拖放）、「导出安装效果」按钮与运行日志；结果文件列表直接回显在日志里 |
+| 安装效果 | 三种导出内容（两者 / 仅脚本 / 仅 XML 清单）、输出目录（留空自动填 `<包名>_effects`，可拖放）、「覆盖已有文件」「严格模式」两个开关、「导出安装效果」按钮与运行日志；结果文件列表直接回显在日志里 |
 | 打包 | 「基本 / 高级 / 签名 / 快捷方式 / 自定义动作」五个标签页，字段按窗口尺寸自适应两列排布（基本页含源目录、输出 MSI、产品名称、产品版本、安装目录；高级页含 CAB 分卷、XML 清单、UI 模板、UI 语言与安装范围；快捷方式页含主程序、桌面 / 开始菜单勾选与可增删行的内联快捷方式表格——名称 / 位置 / 目标 / 参数 / 图标 / 索引 / 说明；自定义动作页为可视化编辑器——动作列表 + 类型感知属性表单 + 标志位 + 执行序列时间线 + 实时检查 + XML 导入 / 导出，详见 [自定义动作](#自定义动作customactions)）；右上角「开始打包」常驻，完成后自动打开新 MSI；文件 / 文件夹可直接拖入（见 [拖放](#拖放)） |
 | Transform | 原包 / 更新包 / `.mst` / 输出包四个路径 + `--errors` / `--validate` 标志输入，三个动作：生成 MST（逐表 diff 统计）、应用 MST（复制 + 提交成新包）、查看变更（摘要流 + `_TransformView` 明细）；结果与进度走运行日志 |
 | 验证 | 签名 / `MsiOpenDatabase` / `MsiVerifyPackage` / `_Tables` / 媒体检查报告 |
@@ -221,6 +221,8 @@ msitool                          :: 不带参数 = 图形界面
 | `-v`, `--verbose` | 详细日志（stderr，前缀 `[v]`） |
 | `--tsv` | 表格以 TSV 输出（单元格内的 tab/换行会转义） |
 | `--format <all\|scripts\|manifest>` | `effects`：写脚本包 + XML 清单 / 仅脚本包 / 仅 XML 清单（默认 `all`） |
+| `--strict` | `effects`：遇到无法解析的 MSI formatted 文本直接失败（默认把含它的命令注释掉；仅生成脚本时生效，`--format manifest` 不含可执行命令） |
+| `--force` | `pack` / `effects`：允许覆盖已有输出（`effects` 默认拒绝覆盖，避免毁掉已有的 `.reg` / `.cmd`） |
 
 ### 解包选项（`extract`）
 
@@ -487,7 +489,9 @@ msiexec /i app.msi /qb INSTALLFOLDER="D:\Apps\My App"
 | `<features><feature>` | `id`、`title`、`description`、`dirs`（`;` 分隔）、`level`、`display`、`attributes` | `Feature` + `FeatureComponents`；未匹配的目录归 `MainFeature` |
 | `<shortcuts><shortcut>` | `id`、`name`、`directory`（标准目录 / 别名 / 子目录 / 源内目录）、`target`、`arguments`、`description`、`icon`、`iconIndex`、`workingDirectory`、`component`、`advertise` | `Shortcut` + `Icon` + 可选 `MsiShortcutProperty` |
 | `<registry><registryValue>` | `id`、`root`（`HKLM` / `HKCU` / `HKCR` / `HKU` / `auto`）、`key`、`name`、`value`、`type`（`string` / `integer` / `binary` / `expand` / `multi` / `key` / `keydelete` / `keycreatedelete`）、`component` | `Registry` |
-| `<services><service>` | `id`、`name`、`displayName`、`image`、`type`（`own` / `share` / `interactive`）、`start`（`auto` / `demand` / `disabled` / `system`）、`error`、`account`、`password`、`arguments`、`dependencies`、`description` | `ServiceInstall` + `ServiceControl` |
+| `<services><service>` | `id`、`name`、`displayName`、`image`、`type`（`own` / `share` / `interactive`）、`start`（`auto` / `demand` / `disabled` / `system`）、`error`、`account`、`password`、`arguments`、`dependencies`、`description`、`control`（`default` / `none`）、`controlId` / `controlEvent` / `controlWait` / `controlArguments` | `ServiceInstall` + 默认 `ServiceControl`（`Event=163`）；`control="none"` 或存在同名 `<servicecontrol>` 时不生成 |
+| `<servicecontrols><servicecontrol>` | `id`、`name`、`event`、`arguments`、`wait`、`component` | 逐位写 `ServiceControl`（`effects` 导出的清单用它做无损往返） |
+| `<properties><property>` | `name`、`value` | 追加 `Property` 行；与打包器内置属性同名的行自动跳过，避免主键冲突 |
 | `<environment><variable>` | `id`、`name`、`value`、`action`（`set` / `create` / `append` / `prepend` / `remove`）、`separator`、`system` | `Environment` |
 | `<sign>` | `cert`、`password`、`timestamp`、`tool` | 与 `--sign-*` 等价 |
 | `<customactions><customaction>` | `id`、`type`（`dll` / `exe` / `dllfile` / `exefile` / `exedir` / `setproperty` / `setdirectory` / `runcommand` 或数字）、`binary` / `file` / `directory` / `property` / `entry` / `target` / `args` / `value`、`deferred` / `commit` / `rollback` / `async` / `continue` / `impersonate` / `taware` / `x64` / `hidetarget` | `CustomAction` + 可选 `Binary` 流 |
@@ -593,9 +597,12 @@ msitool effects setup.msi C:\out\effects
 msitool effects setup.msi C:\out\effects --format scripts
 msitool effects setup.msi C:\out\effects --format manifest
 msitool effects setup.msi C:\out\effects --transform custom.mst --verbose
+msitool effects setup.msi C:\out\effects --strict --force
 ```
 
-`--transform` 与 `info` / `list` / `extract` 一样先叠加只读视图，所以导出的也是 transform 之后的效果。GUI 在「安装效果」页提供同样的三种导出内容与输出目录（留空自动填 `<包名>_effects`）。
+`--transform` 与 `info` / `list` / `extract` 一样先叠加只读视图，所以导出的也是 transform 之后的效果。GUI 在「安装效果」页提供同样的三种导出内容、输出目录（留空自动填 `<包名>_effects`）以及「覆盖已有文件」「严格模式」两个开关。
+
+**安全**：所有文件先在内存里生成并检查，再一次性落盘；默认拒绝覆盖同名输出文件（需 `--force`）。含未解析 MSI 占位符的可执行命令默认被注释成 `TODO(unresolved MSI text): ...`，`--strict` 则在写任何文件之前直接失败，也不会留下空目录。
 
 | `--format` | 产出 |
 | --- | --- |
@@ -608,24 +615,26 @@ msitool effects setup.msi C:\out\effects --transform custom.mst --verbose
 <outdir>\registry-uninstall.reg     卸载侧删除（值写 "Name"=-，* 键写 [-Key]）
 <outdir>\services-install.cmd      sc create / sc description / 安装侧 ServiceControl
 <outdir>\services-uninstall.cmd    sc stop / sc delete / 卸载侧 ServiceControl
-<outdir>\environment.cmd           setx / reg delete，[~] 追加写成 %PATH%;...
+<outdir>\environment.cmd           setx / reg delete，[~] 追加写成 %PATH%;...（简易版）
+<outdir>\environment.ps1           推荐：读写持久化的 User/Machine 环境变量 + WM_SETTINGCHANGE 广播
 <outdir>\shortcuts.ps1             PowerShell + WScript.Shell 重建 .lnk
 <outdir>\custom-actions.txt        CustomAction + 自定义动作序列行（仅审计）
 <outdir>\tables.txt                Registry / ServiceInstall / ServiceControl / Environment / Shortcut / CustomAction 原始表
 <outdir>\properties.txt            Property 表，便于人工解析 [Property]
 <outdir>\icons\<Icon_>.ico        Shortcut.Icon_ 的原始流
 <outdir>\binaries\<Source>.bin    Binary 型自定义动作的 DLL / EXE 流
-<outdir>\pack.xml                  可回填的清单（<registry> / <services> / <environment> / <shortcuts> / <customactions> / <executeSequence>）
+<outdir>\pack.xml                  可回填的清单（<properties> / <registry> / <services> / <servicecontrols> / <environment> / <shortcuts> / <customactions> / <executeSequence>）
 <outdir>\effects.md                统计、文件说明、回填命令与限制清单
 ```
 
 关键映射：
 
-- **注册表**：`Root` → 根键，`#` → `dword:`，`#x` → `hex:`，`#%` → `hex(2)`，`[~]` → `hex(7)`，`+` / `-` / `*` → 建键 / 删键 / 卸载删键；`[ProductVersion]` 之类会用 Property 表的字面值替换。
+- **静态 formatter**：解析 `[Property]`（Property 表字面值，可递归）、`[#file]` / `[!file]`（File / Component / Directory 还原路径）、`[$component]`、`[%ENV]`、`[INSTALLFOLDER]`（Directory 表推导）、`##` → `#`、`[\[]` → `[`、`[\]]` → `]`；`[~]` 保留为多字符串 / 追加标记。无法解析的 token 上报给安全层。
+- **注册表**：`Root` → 根键，`#` → `dword:`，`#x` → `hex:`，`#%` → `hex(2)`，`[~]` → `hex(7)`，`+` / `-` / `*` → 建键 / 删键 / 卸载删键，`-Name` → 安装时删除值。
 - **服务**：`ServiceInstall` 没有 ImagePath，工具按 `Component.KeyPath` → `File` → `Directory` 推导出可执行文件；`ServiceType` / `StartType` / `ErrorControl` 映射为 `type=` / `start=` / `error=`。`ServiceControl.Event` 的安装位（1/2/8）与卸载位（16/32/128）分别落到两个 `.cmd`。
-- **环境变量**：`=-` / `+-` / `!-` 前缀与 `*` 系统标志映射为 `setx` / `setx /M` / `reg delete`；值里的 `[~]` 还原成 `%NAME%;value` 形式的追加/前置。
+- **环境变量**：`environment.cmd` 用 `setx` / `reg delete`（`setx` 有 1024 字符上限、展开的是进程环境），`environment.ps1` 用 `[Environment]::GetEnvironmentVariable/SetEnvironmentVariable` 精确读写持久化的 User / Machine 变量，支持 `+-` 仅不存在时创建、`!-` 删除、`[~]` 追加 / 前置，并广播 `WM_SETTINGCHANGE`。
 - **快捷方式**：`[#FileKey]` 通过 `File` / `Component` / `Directory` 还原成真实路径，标准目录（`DesktopFolder` 等）映射为 PowerShell 的 `[Environment]::GetFolderPath(...)`。
-- **`pack.xml`**：`<pack>` 带产品名 / 版本 / GUID / 平台 / 语言 / 安装范围，资源段可直接被 `--config` 读取；自动跳过 pack 自己会生成的 `RegShortcutDir*` 行，避免主键冲突；广告式快捷方式、超出 `1..32767` 的自定义动作类型会给出告警并跳过。
+- **`pack.xml`（无损往返）**：`<properties>` 逐行还原自定义 Property（pack 自动跳过它自己会写的 `ProductName` 等主键）；`<servicecontrols>` 逐位还原 `Event` / `Arguments` / `Wait`，并给 `<service>` 写 `control="none"` 以抑制 pack 默认的 `Event=163`；`<pack>` 带产品名 / 版本 / GUID / 平台 / 语言 / 安装范围。广告式快捷方式、超出 `1..32767` 的自定义动作类型仍会给出告警并跳过；自动跳过 pack 自己会生成的 `RegShortcutDir*` 行，避免主键冲突。
 
 回填（实测逐表一致）：
 
@@ -633,9 +642,9 @@ msitool effects setup.msi C:\out\effects --transform custom.mst --verbose
 msitool pack C:\payload C:\out\app.msi --config C:\out\effects\pack.xml --force
 ```
 
-限制：脚本里的 `[#File]`、条件表达式等 formatted 文本保持原样并写入注释，`[INSTALLFOLDER]` 在 `.cmd` / `.reg` 中按 `Directory` 表推导出可用路径、在 `.ps1` 与 `pack.xml` 中保留原文；`pack.xml` 不重放 UI、Feature、文件树、Transform 与签名；`ServiceControl` 事件在 pack 里归一化为 `163`（原始事件保留在两个 `.cmd` 里）；`Component_` 是源包组件键，新包找不到时 pack 回退到根组件；Binary 型自定义动作的 `Source` 键会被 pack 改成 `<id>Binary`（内容不变）。脚本是审计 / 复现辅助，导入前请人工审阅。
+限制：`pack.xml` 不重放 UI、Feature、文件树、Transform 与签名；`Component_` 是源包组件键，新包找不到时 pack 回退到根组件；Binary 型自定义动作的 `Source` 键会被 pack 改成 `<id>Binary`（内容不变）。静态 formatter 不求值条件、不执行 CustomAction，也不是 `CostFinalize` 的等价物——要 100% 精确只能跑真实安装并做快照 diff。脚本是审计 / 复现辅助，导入前请人工审阅。
 
-`tools/effects_regression.py` 覆盖三种格式、文件编码、脚本内容与 `pack.xml` 往返打包。
+`tools/effects_regression.py` 覆盖三种格式、文件编码、PowerShell / `.reg` 脚本内容、`<properties>` / `<servicecontrols>` 无损往返、`--force` / `--strict` 行为（共 99 项断言）。
 
 ---
 
@@ -717,7 +726,7 @@ MSI SQL 是 SQL 的**子集**（例如没有 `COUNT(*)` 这类聚合函数），
 │   ├── make_ui_art.ps1          生成内置 banner / background / 示例 EULA
 │   ├── pack_regression.ps1      打包回归：全部 UI 模式 + verify + /a + 向导走查
 │   ├── transform_regression.py  transform / apply / mst 回归：生成、应用、往返一致、错误路径
-│   ├── effects_regression.py    effects 回归：三种格式、编码、脚本内容、pack.xml 往返打包
+│   ├── effects_regression.py    effects 回归：三种格式、编码、脚本内容、无损往返、覆盖保护与严格模式
 │   └── ui_walkthrough.py        真实安装向导自动走查（en / zh-CN，per-user）
 ├── build.bat                    MSVC 构建脚本（x64 / x86 / clean）
 ├── CMakeLists.txt               CMake 构建（MSVC）
@@ -823,6 +832,7 @@ build\msitool_x64.exe extract update.msp C:\out\patch --base-msi setup.msi
 :: 6) 安装效果（脚本 + 可回填清单）
 build\msitool_x64.exe effects setup.msi C:\out\effects
 build\msitool_x64.exe effects setup.msi C:\out\effects_scripts --format scripts
+build\msitool_x64.exe effects setup.msi C:\out\effects --strict --force
 build\msitool_x64.exe pack C:\payload C:\out\rebuilt.msi --config C:\out\effects\pack.xml --force
 
 :: 7) transform 侧（生成 → 应用 → 往返比较）
@@ -839,7 +849,7 @@ build\msitool_x64.exe transform C:\out\applied.msi setup2.msi --dry-run   :: 应
 msiexec /a C:\out\app.msi /qn TARGETDIR=C:\out\admin
 ```
 
-安装效果侧的一键回归：`tools/effects_regression.py` 覆盖三种 `--format`、文件编码与脚本内容、`pack.xml` 的 XSD 兼容性，以及 `pack --config` 回填后注册表 / 服务 / 环境变量 / 快捷方式 / 自定义动作逐表一致（默认拿 `build\f_manifest.msi` / `t_ca.msi` / `t_cabin.msi` / `merge_ref.msi` 做样本，73 项断言）。
+安装效果侧的一键回归：`tools/effects_regression.py` 覆盖三种 `--format`、文件编码与脚本内容（含 PowerShell 语法）、`pack.xml` 的 XSD 兼容性、`<properties>` / `<servicecontrols>` 无损往返、`--force` 覆盖保护与 `--strict` 严格模式（默认拿 `build\f_manifest.msi` / `t_ca.msi` / `t_cabin.msi` / `merge_ref.msi` 做样本，99 项断言）。
 
 transform 侧的一键回归：`tools/transform_regression.py` 用 `build\f_minimal.msi` → `build\f_basic.msi` 覆盖 10 组断言（dry-run 不落盘、摘要流标志、`_TransformView` 变更、校验不匹配即失败且不留半成品、往返逐表一致、相同包不写空文件、`.msp` 被拒、未知标志报错、`--no-summary`、`--transform` 视图仍生效）。
 
@@ -930,7 +940,7 @@ python tools\layout_check.py --dir %TEMP%\mst -v
 | `pack`（2.3 GiB 稀疏文件） | 未压缩伴随 layout | `FileSize=0`、`Attributes=8192`、一条空 `Cabinet` 的 `Media` 行；`extract` 从伴随目录完整还原 2,300,000,000 字节 |
 | 纯空目录（0 文件 / 3 目录） | 仅 `CreateFolder` 表 | `MsiVerifyPackage` OK；`msiexec /i` 会真正创建空目录树 |
 | `makecab` 分卷集（400 KB 文件跨 `span1/2/3.cab`） | 3 条相同 `LastSequence` 的 `Media` 行 | `fdintNEXT_CABINET` 串起 3 个 CAB，`extract` 还原出 400,000 字节，sha256 与源文件完全一致 |
-| `effects` 往返（`f_manifest.msi` / `t_ca.msi` / `t_cabin.msi` / WiX `merge_ref.msi`） | 全量清单 + 脚本包 | `.reg` / `.cmd` / `.ps1` / `pack.xml` 全部写出；`pack --config` 回填后 `Registry`(4) / `ServiceInstall` / `ServiceControl` / `Environment` / `Shortcut`(2) / `CustomAction` 逐表还原，`MsiVerifyPackage` OK；Binary 型自定义动作的 DLL 从 `Binary` 流导出为 `binaries\*.bin` 并重新嵌入 |
+| `effects` 往返（`f_manifest.msi` / `t_ca.msi` / `t_cabin.msi` / WiX `merge_ref.msi`） | 全量清单 + 脚本包 | `.reg` / `.cmd` / `.ps1`(2) / `pack.xml` 全部写出；`pack --config` 回填后 `Registry`(4) / `ServiceInstall` / `ServiceControl` / `Environment` / `Shortcut`(2) / `Property`(10) / `CustomAction` 逐表还原，`MsiVerifyPackage` OK；`<servicecontrols>` 连 `Event=170` / `Arguments=--x` / `Wait=0` 与自定义 Property 都逐位保留；Binary 型自定义动作的 DLL 从 `Binary` 流导出为 `binaries\*.bin` 并重新嵌入 |
 | 自生成 transform（`f_minimal.msi` → `f_basic.msi`） | `transform` + `apply` + `mst --base-msi` | 20 KiB `.mst`（9 张表、43 行删除 / 8 行修改）；`apply` 后逐表与 `f_basic.msi` 完全一致（`transform --dry-run` 报「无差异」）；`mst --base-msi` 列出 19 条 `_TransformView` 变更（含 `DELETE` / `DROP` 行） |
 | .NET Desktop Runtime 8.0.11 x64 → 8.0.x x64（各 ~27 MiB） | 真实产品包之间的 diff / apply | 3 秒完成 15 张表、877 新增 / 601 删除 / 7 修改的 diff（含 `_Streams` 负载的 FNV-1a 指纹），104 KiB `.mst`；`apply` 1 秒写出 `MsiVerifyPackage` OK 的新包，产品名 / 版本 / ProductCode 变为目标包；已签名原包被提示需重新签名 |
 | 同一 payload 改一个字节后重新 `pack` | 流名相同、内容不同 | `_Streams` 正确报「修改 1」而非「新增 + 删除」（用 Name 作为行身份 + 内容指纹） |
@@ -975,7 +985,7 @@ python tools\layout_check.py --dir %TEMP%\mst -v
 - 未压缩 administrative image 的源目录结构（source 侧）常与安装布局不同，需保留源结构时用 `--source-layout`。
 - 不校验数字签名，不处理加密/受口令保护的包。`.msp` 可以导出补丁 CAB 负载 / transform / 原始流；QFE 型补丁没有 transform 流时，只能用 CAB 内部名（`F_CENTRAL_*` 之类）命名 `payload\` 里的文件，需要真实目录名时必须提供 `--base-msi`（且补丁需带 transform）。
 - MSI SQL 是子集：`query` 只支持受限的 `SELECT` 语法，聚合函数等常见 SQL 特性不可用。
-- `effects` 是**表级翻译**，不是安装仿真：不执行 CustomAction、不求值条件；`[Property]` 仅在 Property 表有字面值时替换（`.cmd` / `.reg` 里的 `[INSTALLFOLDER]` 额外按 `Directory` 表推导）；`pack.xml` 不重放 UI、Feature、文件树、Transform、签名与 `ServiceControl` 的原始事件位。详见 [安装效果导出](#安装效果导出effects)。
+- `effects` 是**表级翻译**，不是安装仿真：不执行 CustomAction、不求值条件。静态 formatter 能解析 `[Property]` / `[#file]` / `[$component]` / `[%ENV]` / `[INSTALLFOLDER]` / `##` 等，但无法复现 `CostFinalize` 与条件求值；`pack.xml` 不重放 UI、Feature、文件树、Transform 与签名。详见 [安装效果导出](#安装效果导出effects)。
 
 **打包**
 
