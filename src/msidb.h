@@ -97,8 +97,15 @@ public:
     std::wstring resolveTable(const std::wstring& name) const;
     bool tableExists(const std::wstring& name) const;
     bool isPersistent(const std::wstring& table) const;
+    // Works for tables that _Tables hides, such as _Streams / _Storages.
+    bool canOpenTable(const std::wstring& table) const;
     std::vector<std::wstring> primaryKeys(const std::wstring& table) const;
     std::vector<std::wstring> streamNames() const;
+
+    // Whole-table scan used by the transform diff: every cell is rendered as
+    // text, and binary (v*) fields become "v:<size>:<fnv64 hex>" so that a
+    // changed payload is visible even when the row key stays the same.
+    QueryResult scanTable(const std::wstring& table, bool hashStreams = true) const;
 
     // Reads a binary/stream column through MsiRecordReadStream.
     std::vector<unsigned char> readStream(const std::wstring& sql,

@@ -94,7 +94,7 @@ cl /nologo /std:c++17 /EHsc /W4 /O2 /utf-8 ^
    /Isrc /Fobuild\obj\%ARCH%\ /Febuild\msitool_%ARCH%.exe ^
    src\util.cpp src\msidb.cpp src\cab.cpp src\extract.cpp ^
    src\pack.cpp src\pack_util.cpp src\custom_actions.cpp src\xml.cpp src\pack_xml.cpp ^
-   src\pack_ui.cpp src\pack_ui_builtin.cpp src\main.cpp ^
+   src\pack_ui.cpp src\pack_ui_builtin.cpp src\transform.cpp src\main.cpp ^
    src\ui_draw.cpp src\ui_widgets.cpp src\ui_app.cpp ^
    build\obj\%ARCH%\msitool.res ^
    Msi.Lib Cabinet.Lib Msxml6.Lib OleAut32.Lib Shell32.Lib Ole32.Lib User32.Lib Gdi32.Lib Advapi32.Lib Comdlg32.Lib Uuid.Lib ^

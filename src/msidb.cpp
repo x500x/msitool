@@ -309,6 +309,15 @@ bool Db::tableExists(const std::wstring& name) const {
     return !resolveTable(name).empty();
 }
 
+bool Db::canOpenTable(const std::wstring& table) const {
+    Handle view;
+    if (MsiDatabaseOpenViewW(
+            h_.get(), (L"SELECT * FROM " + quoteIdent(table)).c_str(), view.out()) !=
+        ERROR_SUCCESS)
+        return false;
+    return MsiViewExecute(view.get(), 0) == ERROR_SUCCESS;
+}
+
 bool Db::isPersistent(const std::wstring& table) const {
     return MsiDatabaseIsTablePersistentW(h_.get(), table.c_str()) == MSICONDITION_TRUE;
 }
@@ -360,6 +369,79 @@ std::vector<unsigned char> Db::readStream(const std::wstring& sql,
         if (want < kStreamChunk) break;
     }
     return data;
+}
+
+namespace {
+
+// FNV-1a 64 bit: a cheap, stable fingerprint of a binary payload. The diff
+// only needs "same or not", so hashing keeps memory flat for large CABs.
+unsigned long long fnv1a(const void* data, size_t size, unsigned long long hash) {
+    const auto* bytes = static_cast<const unsigned char*>(data);
+    for (size_t i = 0; i < size; ++i) {
+        hash ^= bytes[i];
+        hash *= 1099511628211ull;
+    }
+    return hash;
+}
+
+std::wstring streamFingerprint(MSIHANDLE rec, unsigned field, bool hashContent) {
+    UINT size = MsiRecordDataSize(rec, field);
+    if (!hashContent) return util::fmt(L"v:%u", size);
+
+    unsigned long long hash = 14695981039346656037ull;
+    std::vector<char> buf(kStreamChunk);
+    for (;;) {
+        DWORD want = kStreamChunk;
+        if (MsiRecordReadStream(rec, field, buf.data(), &want) != ERROR_SUCCESS) break;
+        if (want) hash = fnv1a(buf.data(), want, hash);
+        if (want < kStreamChunk) break;
+    }
+    return util::fmt(L"v:%u:%016llX", size, hash);
+}
+
+}  // namespace
+
+QueryResult Db::scanTable(const std::wstring& table, bool hashStreams) const {
+    QueryResult result;
+    Handle view;
+    util::checkMsi(MsiDatabaseOpenViewW(
+                       h_.get(), (L"SELECT * FROM " + quoteIdent(table)).c_str(), view.out()),
+                   L"Cannot open table " + table);
+    util::checkMsi(MsiViewExecute(view.get(), 0), L"Cannot open table " + table);
+
+    Handle names, types;
+    if (MsiViewGetColumnInfo(view.get(), MSICOLINFO_NAMES, names.out()) == ERROR_SUCCESS &&
+        names) {
+        unsigned n = MsiRecordGetFieldCount(names.get());
+        for (unsigned i = 1; i <= n; ++i) result.columns.push_back(recordString(names.get(), i));
+    }
+    if (MsiViewGetColumnInfo(view.get(), MSICOLINFO_TYPES, types.out()) == ERROR_SUCCESS &&
+        types) {
+        unsigned n = MsiRecordGetFieldCount(types.get());
+        for (unsigned i = 1; i <= n; ++i) result.types.push_back(recordString(types.get(), i));
+    }
+    const size_t colCount = std::max(result.columns.size(), result.types.size());
+
+    for (;;) {
+        Handle rec;
+        UINT rc = MsiViewFetch(view.get(), rec.out());
+        if (rc == ERROR_NO_MORE_ITEMS) break;
+        util::checkMsi(rc, L"Cannot fetch row of table " + table);
+
+        std::vector<std::wstring> row(colCount);
+        for (size_t i = 1; i <= colCount; ++i) {
+            std::wstring type = result.types[i - 1];
+            const wchar_t t = type.empty()
+                                  ? L'?'
+                                  : static_cast<wchar_t>(towlower(static_cast<wint_t>(type[0])));
+            if (t == L'v' && !MsiRecordIsNull(rec.get(), static_cast<unsigned>(i)))
+                row[i - 1] = streamFingerprint(rec.get(), static_cast<unsigned>(i), hashStreams);
+            else
+                row[i - 1] = renderField(rec.get(), static_cast<unsigned>(i), type);
+        }
+        result.rows.push_back(std::move(row));
+    }
+    return result;
 }
 
 UINT Db::exportTable(const std::wstring& table,

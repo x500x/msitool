@@ -60,6 +60,8 @@ void out(const std::wstring& s);
 void outLine(const std::wstring& s);
 void errLine(const std::wstring& s);
 void verboseLine(bool verbose, const std::wstring& s);
+// Non-fatal problem: reported on stderr (and the GUI log) but never throws.
+inline void warn(const std::wstring& s) { errLine(L"warning: " + s); }
 
 struct Table {
     std::vector<std::wstring>              headers;

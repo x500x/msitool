@@ -25,6 +25,7 @@ add_executable(msitool WIN32
     src/pack_xml.cpp
     src/pack_ui.cpp
     src/pack_ui_builtin.cpp
+    src/transform.cpp
     src/ui_draw.cpp
     src/ui_widgets.cpp
     src/ui_app.cpp

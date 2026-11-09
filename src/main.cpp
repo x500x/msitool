@@ -2,6 +2,7 @@
 #include "msidb.h"
 #include "extract.h"
 #include "pack.h"
+#include "transform.h"
 #include "ui.h"
 
 #include <stdio.h>
@@ -60,6 +61,9 @@ struct Cli {
     bool                      platformSet = false;
     bool                      scopeSet = false;
     bool                      languageSet = false;
+    int                       mstErrors = 0;             // --errors   (MSITRANSFORM_ERROR_*)
+    int                       mstValidation = 0;         // --validate (MSITRANSFORM_VALIDATE_*)
+    bool                      noSummary = false;         // --no-summary
     std::wstring              baseMsi;                    // extract .msp with a target MSI
     std::vector<std::wstring> transforms;               // --transform (repeatable)
     std::vector<std::wstring> files;                    // --files (repeatable)
@@ -93,21 +97,49 @@ Commands:
                            every file from the package cabinets
   pack <srcdir> <out.msi>  Pack a directory into a self-contained MSI with
                            one or more embedded MSZIP cabinets
+  transform <base.msi> <updated.msi> <out.mst>
+                           Generate a Windows Installer transform (.mst) from
+                           the differences between two packages
+  apply <base.msi> <out.msi> <file.mst...>
+                           Apply one or more transforms to a copy of a package
+                           and commit the result to <out.msi>
+  mst <file.mst>           Describe a transform: summary stream (validation /
+                           error conditions) and its OLE streams. Add
+                           --base-msi <setup.msi> to list the change log the
+                           installer sees (_TransformView). Alias: mstinfo
 
 Options:
   --tsv                    Emit tables as tab-separated values
   -v, --verbose            Verbose progress on stderr
   --flat                   extract: flatten all files into outdir
-  --dry-run                extract: show the plan, write nothing
+  --dry-run                extract: show the plan, write nothing;
+                           transform: only diff the two packages (the output
+                           .mst is optional, nothing is written)
   --skip-existing          extract: do not overwrite existing files
   --source-layout          extract: use the source-image directory tree
                            instead of the installed (target) tree
   --keep-temp              extract: keep staged temporary cabinets
   --transform <file.mst>   apply an MST as a temporary view (repeatable);
                            info/tables/schema/query/list/extract see the
-                           transformed database
+                           transformed database. 'apply' uses it as an input
+                           transform (same as passing it positionally)
+  --errors <flags>         transform/apply: installer error conditions to
+                           suppress, comma separated: addexistingrow,
+                           delmissingrow, addexistingtable, delmissingtable,
+                           updatemissingrow, changecodepage, viewtransform
+                           (or a numeric value such as 0x11)
+  --validate <flags>       transform/apply: properties validated on apply:
+                           language, product, platform, majorversion,
+                           minorversion, updateversion, newlessbaseversion,
+                           newlessequalbaseversion, newequalbaseversion,
+                           newgreaterequalbaseversion, newgreaterbaseversion,
+                           upgradecode (default: none)
+  --no-summary             transform: skip MsiCreateTransformSummaryInfo (the
+                           transform then carries no summary stream)
   --base-msi <file.msi>    extract .msp: apply the patch transforms to this
-                           target MSI and lay out the payload with real names
+                           target MSI and lay out the payload with real names;
+                           mst: view the transform's changes against this
+                           package (read-only, never modified)
   --name <text>            pack: ProductName (default: directory name)
   --version <x.y.z>        pack: ProductVersion (default 1.0.0)
   --manufacturer <text>    pack: Manufacturer (default: msitool)
@@ -155,6 +187,8 @@ Options:
   --force                  pack: overwrite an existing output MSI
   -h, --help               Show this help
 
+)"
+LR"(
 Examples:
   msitool verify setup.msi
   msitool info setup.msi
@@ -177,6 +211,9 @@ Examples:
   msitool pack C:\payload C:\out\app.msi --dump-ui C:\out\wizard-ui
   msitool pack C:\payload C:\out\app.msi --files "app.exe;cfg\app.ini"
   msitool pack C:\payload C:\out\app.msi --files "app.exe" --files tools
+  msitool transform setup.msi setup2.msi custom.mst --validate product,language
+  msitool apply setup.msi setup-custom.msi custom.mst --force
+  msitool mst custom.mst
 
 Notes:
   * Every command preflights the package first (OLE compound-file signature,
@@ -191,6 +228,11 @@ Notes:
     Use --base-msi <target.msi> to lay the patch payload out with real names.
   * --transform <file.mst> applies a transform as a temporary read-only view;
     it never modifies the package on disk. Repeatable.
+  * 'transform' writes a real .mst (MsiDatabaseGenerateTransformW plus
+    MsiCreateTransformSummaryInfoW) by diffing two .msi databases; 'apply'
+    copies the base package, applies the .mst files on a transaction handle
+    and commits (MsiDatabaseCommit), so the base package is never touched.
+    'mst' inspects a .mst without touching any package.
   * --files narrows down what 'pack' installs: the source directory stays the
     package root, so a selection of files under subdir\ still installs into
     <root>\subdir. Without --files the complete tree is packed.
@@ -221,14 +263,18 @@ Cli parseCommandLine(int argc, wchar_t** argv) {
         if (a == L"--all-users") { cli.scope = L"perMachine"; cli.scopeSet = true; continue; }
         if (a == L"--desktop-shortcut") { cli.desktopShortcut = true; continue; }
         if (a == L"--start-menu-shortcut") { cli.startMenuShortcut = true; continue; }
-        if (a == L"--transform" || a == L"--base-msi" || a == L"--files") {
+        if (a == L"--transform" || a == L"--base-msi" || a == L"--files" ||
+            a == L"--errors" || a == L"--validate") {
             if (i + 1 >= argc) util::fail(L"Option " + a + L" requires a value");
             std::wstring v = argv[++i] ? argv[i] : L"";
             if (a == L"--transform") cli.transforms.push_back(v);
             else if (a == L"--files") cli.files.push_back(v);
+            else if (a == L"--errors") cli.mstErrors |= mst::parseErrorFlags(v);
+            else if (a == L"--validate") cli.mstValidation |= mst::parseValidationFlags(v);
             else cli.baseMsi = v;
             continue;
         }
+        if (a == L"--no-summary") { cli.noSummary = true; continue; }
         if (a == L"--name" || a == L"--version" || a == L"--manufacturer" ||
             a == L"--product-code" || a == L"--upgrade-code" ||
             a == L"--platform" || a == L"--language" || a == L"--install-dir" ||
@@ -615,6 +661,204 @@ void cmdPack(const Cli& cli) {
     pack::pack(opt);
 }
 
+// ---- transform (.mst) commands --------------------------------------------
+
+void cmdTransform(const Cli& cli) {
+    mst::GenerateOptions o;
+    o.baseMsi = requireArg(cli, 0, L"base package (.msi)");
+    o.updatedMsi = requireArg(cli, 1, L"updated package (.msi)");
+    // --dry-run only compares the packages, so the output path is optional.
+    if (!cli.dryRun || cli.args.size() > 2)
+        o.outMst = requireArg(cli, 2, L"output transform (.mst)");
+    o.flags.errors = cli.mstErrors;
+    o.flags.validation = cli.mstValidation;
+    o.summaryInfo = !cli.noSummary;
+    o.force = cli.force;
+    o.verbose = cli.verbose;
+    o.dryRun = cli.dryRun;
+
+    mst::GenerateResult r = mst::generate(o);
+
+    if (r.written) {
+        util::outLine(L"Transform : " + r.outMst);
+        util::outLine(L"Size      : " + humanSize(r.size));
+        util::outLine(L"Errors    : " + mst::describeErrorFlags(cli.mstErrors) + L" (suppressed)");
+        util::outLine(L"Validation: " + mst::describeValidationFlags(cli.mstValidation));
+        util::outLine(L"Summary   : " +
+                      std::wstring(cli.noSummary ? L"not written (--no-summary)"
+                                                 : L"written (MsiCreateTransformSummaryInfo)"));
+    } else if (r.identical) {
+        util::outLine(L"Transform : (not written - the packages are identical)");
+        util::outLine(L"Base      : " + util::path::full(o.baseMsi));
+        util::outLine(L"Updated   : " + util::path::full(o.updatedMsi));
+    } else {
+        util::outLine(L"Transform : (dry run - nothing written)");
+        util::outLine(L"Base      : " + util::path::full(o.baseMsi));
+        util::outLine(L"Updated   : " + util::path::full(o.updatedMsi));
+    }
+
+    size_t tables = 0, added = 0, removed = 0, modified = 0, schema = 0;
+    for (const auto& d : r.tables) {
+        if (d.changes() == 0 && !d.schemaChanged) continue;
+        ++tables;
+        added += d.added;
+        removed += d.removed;
+        modified += d.modified;
+        if (d.schemaChanged) ++schema;
+    }
+
+    if (tables == 0) {
+        util::outLine(L"Changes   : none - the two packages have identical tables");
+    } else {
+        util::outLine(util::fmt(L"Changes   : %llu table(s), %llu added row(s), "
+                                L"%llu removed, %llu modified",
+                                static_cast<unsigned long long>(tables),
+                                static_cast<unsigned long long>(added),
+                                static_cast<unsigned long long>(removed),
+                                static_cast<unsigned long long>(modified)));
+        if (schema) util::outLine(L"            " + std::to_wstring(schema) +
+                                  L" table(s) with a different column layout");
+        util::outLine(L"");
+        util::Table t;
+        t.headers = {L"Table", L"Added", L"Removed", L"Modified", L"Schema"};
+        for (const auto& d : r.tables) {
+            if (d.changes() == 0 && !d.schemaChanged) continue;
+            t.rows.push_back({d.table, std::to_wstring(d.added), std::to_wstring(d.removed),
+                              std::to_wstring(d.modified),
+                              d.schemaChanged ? L"changed"
+                                              : (d.onlyBase ? L"only in base"
+                                                            : (d.onlyUpdated ? L"only in updated"
+                                                                             : L""))});
+        }
+        util::printTable(t, cli.tsv);
+    }
+
+    if (r.written)
+        util::outLine(L"Preview   : msitool list " + o.baseMsi + L" properties --transform " +
+                      r.outMst);
+}
+
+void cmdApply(const Cli& cli) {
+    mst::ApplyOptions o;
+    o.baseMsi = requireArg(cli, 0, L"base package (.msi)");
+    o.outMsi = requireArg(cli, 1, L"output package (.msi)");
+    for (size_t i = 2; i < cli.args.size(); ++i) o.transforms.push_back(cli.args[i]);
+    for (const auto& tr : cli.transforms) o.transforms.push_back(tr);
+    o.flags.errors = cli.mstErrors;
+    o.flags.validation = cli.mstValidation;
+    o.force = cli.force;
+    o.verbose = cli.verbose;
+
+    mst::ApplyResult r = mst::apply(o);
+    util::outLine(util::fmt(L"Applied   : %llu transform(s)",
+                            static_cast<unsigned long long>(r.applied)));
+    util::outLine(L"Output    : " + r.outMsi);
+    if (!r.packageKind.empty()) util::outLine(L"Package   : " + r.packageKind);
+
+    // Confirm the committed rows by reopening the written package.
+    try {
+        msi::Db db(r.outMsi);
+        util::Table t;
+        t.headers = {L"Property", L"Value"};
+        for (const wchar_t* key : {L"ProductName", L"ProductVersion", L"ProductCode",
+                                   L"UpgradeCode", L"ProductLanguage"}) {
+            std::wstring v = db.property(key);
+            if (!v.empty()) t.rows.push_back({key, v});
+        }
+        size_t tables = db.tableNames().size();
+        util::outLine(util::fmt(L"Tables    : %llu", static_cast<unsigned long long>(tables)));
+        if (!t.rows.empty()) {
+            util::outLine(L"");
+            util::printTable(t, cli.tsv);
+        }
+    } catch (const util::Error& e) {
+        util::warn(L"cannot reopen " + r.outMsi + L": " + e.message());
+    }
+}
+
+// Table streams inside a transform are stored with obfuscated names; render
+// them as printable text so a terminal never shows mojibake.
+std::wstring escapeName(const std::wstring& name) {
+    std::wstring out;
+    for (wchar_t c : name) {
+        if (c >= 0x20 && c < 0x7F) out.push_back(c);
+        else out += util::fmt(L"\\x%04X", static_cast<unsigned>(c));
+    }
+    return out;
+}
+
+void cmdMstInfo(const Cli& cli) {
+    std::wstring file = requireArg(cli, 0, L"transform path (.mst)");
+    mst::TransformInfo info = mst::inspect(file);
+
+    util::outLine(L"Transform : " + info.path);
+    util::outLine(L"Size      : " + humanSize(info.size));
+    util::outLine(L"Storage   : " + std::wstring(info.oleOk ? L"OLE compound file" : L"not OLE"));
+    if (!info.targetProduct.empty()) {
+        // Revision slot: "<base ProductCode><version>;<new code><version>;<UpgradeCode>"
+        std::vector<std::wstring> parts;
+        std::wstring cur;
+        for (wchar_t c : info.targetProduct) {
+            if (c == L';') { parts.push_back(cur); cur.clear(); }
+            else cur.push_back(c);
+        }
+        parts.push_back(cur);
+        std::wstring line = L"Applies to: " + parts[0];
+        if (parts.size() > 1) line += L"  (transform creates " + parts[1] + L")";
+        if (parts.size() > 2) line += L"  [UpgradeCode " + parts[2] + L"]";
+        util::outLine(line);
+    }
+    util::outLine(L"Errors    : " + mst::describeErrorFlags(info.errorConditions) +
+                  (info.hasSummary ? L"" : L" (no summary stream)"));
+    util::outLine(L"Validation: " + mst::describeValidationFlags(info.validation));
+
+    util::outLine(L"");
+    util::outLine(L"=== SummaryInformation ===");
+    if (info.summary.empty()) {
+        util::outLine(L"(no summary stream; the transform carries no validation or "
+                      L"error conditions)");
+    } else {
+        util::Table t;
+        t.headers = {L"Property", L"Value"};
+        for (const auto& s : info.summary) t.rows.push_back({s.name, s.value});
+        util::printTable(t, cli.tsv);
+    }
+
+    util::outLine(L"");
+    util::outLine(L"=== Changes ===");
+    if (cli.baseMsi.empty()) {
+        util::outLine(util::fmt(L"%llu table stream(s) inside the transform.",
+                                static_cast<unsigned long long>(info.streams.size())));
+        util::outLine(L"Pass --base-msi <setup.msi> to list the change log the installer sees "
+                      L"(_TransformView).");
+    } else {
+        std::vector<mst::ChangeRow> changes = mst::viewTransform(cli.baseMsi, info.path);
+        if (changes.empty()) {
+            util::outLine(L"(the transform makes no change to this base package)");
+        } else {
+            util::Table t;
+            t.headers = {L"Table", L"Row", L"Column", L"New value", L"Current value"};
+            for (const auto& c : changes) {
+                t.rows.push_back({c.table, c.row, c.column, c.data, c.current});
+            }
+            util::printTable(t, cli.tsv);
+            util::outLine(util::fmt(L"%llu change row(s) against %s.",
+                                    static_cast<unsigned long long>(changes.size()),
+                                    cli.baseMsi.c_str()));
+        }
+    }
+
+    if (cli.verbose) {
+        util::outLine(L"");
+        util::outLine(L"=== OLE streams ===");
+        util::Table t;
+        t.headers = {L"Stream", L"Bytes"};
+        for (const auto& s : info.streams)
+            t.rows.push_back({escapeName(s.first), std::to_wstring(s.second)});
+        util::printTable(t, cli.tsv);
+    }
+}
+
 int run(int argc, wchar_t** argv) {
     Cli cli = parseCommandLine(argc, argv);
     if (cli.help || cli.command.empty()) {
@@ -623,9 +867,12 @@ int run(int argc, wchar_t** argv) {
     }
 
     std::wstring cmd = util::toLower(cli.command);
-    // verify and pack must run before Db (which validates an input MSI).
+    // verify, pack and the transform commands validate their own inputs.
     if (cmd == L"verify") return cmdVerify(cli) ? 0 : 1;
     if (cmd == L"pack") { cmdPack(cli); return 0; }
+    if (cmd == L"transform") { cmdTransform(cli); return 0; }
+    if (cmd == L"apply") { cmdApply(cli); return 0; }
+    if (cmd == L"mst" || cmd == L"mstinfo") { cmdMstInfo(cli); return 0; }
 
     std::wstring package = requireArg(cli, 0, L"package path (.msi)");
     msi::Db db(package);  // preflight + MsiOpenDatabase + _Tables check
