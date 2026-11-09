@@ -2487,7 +2487,18 @@ public:
 
     void layoutSettings(const RECT& body) {
         Theme& t = theme();
-        RECT c1 = R(body.left, body.top, W(body), S(144));
+        // Three full-width cards stacked need 144 + 16 + 196 + 16 + 190 px.
+        // On a short window (1160x620 -> body is only ~452 px tall) that
+        // pushed the About card and all of its rows past the bottom edge and
+        // over the status-bar progress. Fall back to a two-column layout:
+        // appearance + shortcuts on the left, About taking the full right
+        // column height.
+        const int gap = S(16);
+        const int stackedNeed = S(144) + gap + S(196) + gap + S(190);
+        const bool twoCol = H(body) < stackedNeed;
+        const int colW = twoCol ? W(body) * 56 / 100 : W(body);
+
+        RECT c1 = R(body.left, body.top, colW, S(144));
         addCard(c1, L"外观", L"Fluent 设计 · 支持系统主题跟随与高 DPI", Ic::Sun);
         int x = c1.left + S(16);
         btnLight_->setRect(R(x, c1.top + S(52), S(150), S(36)));
@@ -2500,7 +2511,7 @@ public:
 
         // Shortcuts: one row per command, recorded in place. The card is
         // fixed-height (4 rows) so the About card below gets all the rest.
-        RECT c2 = R(body.left, c1.bottom + S(16), W(body), S(196));
+        RECT c2 = R(body.left, c1.bottom + gap, colW, S(196));
         addCard(c2, L"快捷键",
                 L"点击右侧按键框重新录制 · Backspace 清除 · Esc 取消",
                 Ic::Terminal);
@@ -2526,26 +2537,47 @@ public:
                  t.fSmall, t.muted,
                  DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 
-        RECT c3 = R(body.left, c2.bottom + S(16), W(body),
-                    std::max(S(190), static_cast<int>(body.bottom - c2.bottom - S(16))));
+        RECT c3 = twoCol
+            ? R(c2.right + gap, body.top, W(body) - colW - gap, H(body))
+            : R(body.left, c2.bottom + gap, W(body),
+                std::max(S(190), static_cast<int>(body.bottom - c2.bottom - gap)));
         addCard(c3, L"关于 msitool",
                 util::fmt(L"版本 %s · %s · 项目主页与构建信息",
                           kAppVersion, kAppLicense),
                 Ic::Info);
         int c3pad = S(16);
-        int leftW = W(c3) * 56 / 100 - c3pad * 2;
-        addLabel(R(c3.left + c3pad, c3.top + S(50), leftW, S(150)),
-                 L"MSVC + C++17 · Windows Installer (Msi) API + cabinet.dll (FDI/FCI)\n"
-                 L"打造的 MSI / MSP 查看、解包与打包工具，命令行模式完全保留。\n\n"
-                 L"UI 层为纯 Win32 API（user32 / gdi32 / shell32 / ole32）自绘：\n"
-                 L"Fluent 亮暗主题、圆角卡片、导航、数据网格、进度与日志。",
+        const int aboutTop = c3.top + S(50);
+        const int aboutH = std::max(S(60),
+                                    std::min(twoCol ? S(112) : S(150),
+                                             H(c3) - S(60)));
+        const int leftW = twoCol ? W(c3) - c3pad * 2
+                                 : W(c3) * 56 / 100 - c3pad * 2;
+        // The right column is much narrower than the full-width About card,
+        // so use a compact blurb there; the long four-line text would wrap
+        // past its rect and paint over the info rows below.
+        addLabel(R(c3.left + c3pad, aboutTop, leftW, aboutH),
+                 twoCol
+                 ? L"MSVC + C++17 · Windows Installer (Msi) API + cabinet.dll (FDI/FCI)\n"
+                   L"查看 / 解包 / 打包 MSI·MSP；纯 Win32 API 自绘 Fluent 界面。\n"
+                   L"命令行模式完全保留，运行时只依赖系统组件。"
+                 : L"MSVC + C++17 · Windows Installer (Msi) API + cabinet.dll (FDI/FCI)\n"
+                   L"打造的 MSI / MSP 查看、解包与打包工具，命令行模式完全保留。\n\n"
+                   L"UI 层为纯 Win32 API（user32 / gdi32 / shell32 / ole32）自绘：\n"
+                   L"Fluent 亮暗主题、圆角卡片、导航、数据网格、进度与日志。",
                  t.fBody, t.subText, DT_LEFT | DT_TOP | DT_WORDBREAK);
 
-        int infoX = c3.left + c3pad + leftW + c3pad;
-        int infoKeyW = S(76);
-        int infoValW = c3.right - c3pad - (infoX + infoKeyW);
+        // One column: description and info rows sit side by side. Two
+        // columns: the description spans the card and the rows go below it.
+        const int infoX = twoCol ? c3.left + c3pad
+                                 : c3.left + c3pad + leftW + c3pad;
+        const int infoKeyW = S(76);
+        const int infoValW = c3.right - c3pad - (infoX + infoKeyW);
         int infoRowH = S(23);
-        int rowY = c3.top + S(46);
+        int rowY = twoCol ? aboutTop + aboutH + S(8) : c3.top + S(46);
+        if (twoCol) {
+            const int room = H(c3) - (rowY - c3.top) - S(12);
+            infoRowH = std::max(S(16), std::min(S(23), room / 6));
+        }
         auto infoRow = [&](const wchar_t* key, const std::wstring& val) {
             addLabel(R(infoX, rowY, infoKeyW, infoRowH), key, t.fMono, t.muted,
                      DT_LEFT | DT_VCENTER | DT_SINGLELINE);
