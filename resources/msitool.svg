@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-label="msitool 应用图标：M 字标与掀开的箱盖">
+  <!-- msitool official application icon (candidate 03, selected).
+       Canonical source for resources/msitool.ico; regenerate with tools/make_icon.py.
+       All shapes are hand-authored paths; no fonts, no external images. -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1175D1"/>
+      <stop offset="0.55" stop-color="#0F5BB6"/>
+      <stop offset="1" stop-color="#0A3280"/>
+    </linearGradient>
+    <clipPath id="tile"><circle cx="128" cy="128" r="120"/></clipPath>
+  </defs>
+  <g clip-path="url(#tile)">
+    <circle cx="128" cy="128" r="120" fill="url(#bg)"/>
+    <circle cx="128" cy="128" r="104" fill="none" stroke="#FFFFFF" stroke-opacity="0.10" stroke-width="2"/>
+    <path d="M4 96 C70 20 180 0 252 40 L252 4 L4 4 Z" fill="#FFFFFF" opacity="0.09"/>
+    <path d="M62 182 V88 L128 156 L194 88 V182" fill="none" stroke="#FFFFFF" stroke-width="22" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M60 88 L34 62" fill="none" stroke="#7CE7FF" stroke-width="14" stroke-linecap="round"/>
+    <path d="M196 88 L222 62" fill="none" stroke="#7CE7FF" stroke-width="14" stroke-linecap="round"/>
+    <rect x="90" y="196" width="76" height="8" rx="4" fill="#7CE7FF"/>
+  </g>
+  <circle cx="128" cy="128" r="119" fill="none" stroke="#FFFFFF" stroke-opacity="0.22" stroke-width="2"/>
+</svg>

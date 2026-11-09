@@ -768,7 +768,25 @@ public:
         wc.lpfnWndProc = App::proc;
         wc.hInstance = inst;
         wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-        wc.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+        /* resources/msitool.rc embeds msitool.ico as RT_GROUP_ICON #1.
+           Explorer shows it for the .exe automatically; load it here too so
+           the title bar, taskbar and Alt-Tab use the same artwork instead of
+           the generic IDI_APPLICATION. LR_SHARED is safe: these are the
+           standard system icon metrics, loaded from a module resource, so
+           Windows owns the handles. */
+        constexpr int kAppIconId = 1;   // keep in sync with resources/msitool.rc
+        HICON iconBig = (HICON)LoadImageW(inst, MAKEINTRESOURCEW(kAppIconId),
+                                          IMAGE_ICON,
+                                          GetSystemMetrics(SM_CXICON),
+                                          GetSystemMetrics(SM_CYICON),
+                                          LR_DEFAULTCOLOR | LR_SHARED);
+        HICON iconSmall = (HICON)LoadImageW(inst, MAKEINTRESOURCEW(kAppIconId),
+                                            IMAGE_ICON,
+                                            GetSystemMetrics(SM_CXSMICON),
+                                            GetSystemMetrics(SM_CYSMICON),
+                                            LR_DEFAULTCOLOR | LR_SHARED);
+        wc.hIcon   = iconBig   ? iconBig   : LoadIconW(nullptr, IDI_APPLICATION);
+        wc.hIconSm = iconSmall ? iconSmall : wc.hIcon;
         wc.hbrBackground = nullptr;
         wc.lpszClassName = L"msitool_main_v1";
         if (!RegisterClassExW(&wc)) return false;
@@ -785,6 +803,8 @@ public:
                                 WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
                                 CW_USEDEFAULT, CW_USEDEFAULT, w, h,
                                 nullptr, nullptr, inst, this);
+        if (iconBig)   SendMessageW(hwnd_, WM_SETICON, ICON_BIG,   (LPARAM)iconBig);
+        if (iconSmall) SendMessageW(hwnd_, WM_SETICON, ICON_SMALL, (LPARAM)iconSmall);
         return hwnd_ != nullptr;
     }
 

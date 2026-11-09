@@ -1,5 +1,10 @@
 #include <windows.h>
 
+/* Application icon: Explorer picks the first RT_GROUP_ICON in the module.
+   src/ui_app.cpp loads resource 1 for the title bar / taskbar as well.
+   Regenerate msitool.ico with: python tools/make_icon.py (source: msitool.svg) */
+1 ICON "msitool.ico"
+
 101 RCDATA "ui\\wizard.layout.xml"
 102 RCDATA "ui\\wizard.en.xml"
 103 RCDATA "ui\\wizard.zh-CN.xml"
