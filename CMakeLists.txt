@@ -18,6 +18,7 @@ add_executable(msitool WIN32
     src/msidb.cpp
     src/cab.cpp
     src/extract.cpp
+    src/effects.cpp
     src/pack.cpp
     src/pack_util.cpp
     src/custom_actions.cpp

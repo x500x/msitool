@@ -6,6 +6,7 @@
 #include "custom_actions.h"
 #include "pack_util.h"
 #include "transform.h"
+#include "effects.h"
 
 #include <objbase.h>
 #include <shobjidl_core.h>
@@ -307,12 +308,12 @@ constexpr int kShortcutCount = static_cast<int>(sizeof(kShortcuts) / sizeof(kSho
 
 enum Page {
     PgHome = 0, PgInfo, PgTables, PgQuery, PgExtract,
-    PgExport, PgPack, PgTransform, PgVerify, PgSettings, PgCount
+    PgExport, PgEffects, PgPack, PgTransform, PgVerify, PgSettings, PgCount
 };
 
 const wchar_t* kPageTitle[PgCount] = {
     L"概览", L"包信息", L"数据表", L"SQL 查询", L"解包",
-    L"导出", L"打包", L"Transform", L"验证", L"设置"
+    L"导出", L"安装效果", L"打包", L"Transform", L"验证", L"设置"
 };
 const wchar_t* kPageSubtitle[PgCount] = {
     L"查看、解包和构建 Windows Installer 包",
@@ -321,6 +322,7 @@ const wchar_t* kPageSubtitle[PgCount] = {
     L"用 MSI SQL 直接查询包内容",
     L"把包里的文件按目录树还原出来",
     L"导出 CAB、表、流和二进制资源",
+    L"注册表 / 服务 / 环境变量脚本与可回填的打包清单",
     L"把一个目录打包成自包含的 MSI",
     L"生成、应用与查看 .mst 差异数据",
     L"检查文件是否为合法的安装包",
@@ -328,7 +330,7 @@ const wchar_t* kPageSubtitle[PgCount] = {
 };
 const Ic kPageIcon[PgCount] = {
     Ic::Home, Ic::Info, Ic::Table, Ic::Query, Ic::Extract,
-    Ic::Export, Ic::Pack, Ic::Bolt, Ic::Shield, Ic::Settings
+    Ic::Export, Ic::Terminal, Ic::Pack, Ic::Bolt, Ic::Shield, Ic::Settings
 };
 
 // ---------------------------------------------------------------------------
@@ -613,6 +615,11 @@ public:
     TextBox* tbExportDir_ = nullptr;
     Button* btnExportBrowse_ = nullptr;
     Button* btnExport_ = nullptr;
+    // install effects ------------------------------------------------------
+    DropDown* ddEffectsMode_ = nullptr;
+    TextBox* tbEffectsDir_ = nullptr;
+    Button* btnEffectsBrowse_ = nullptr;
+    Button* btnEffects_ = nullptr;
     // pack -----------------------------------------------------------------
     int    packTab_ = 0;              // 0 basic, 1 advanced, 2 signing
     Button* btnTabBasic_ = nullptr;
@@ -1190,6 +1197,17 @@ public:
         btnExport_ = makeButton(PgExport, L"开始导出", Ic::Export, true,
                                 [this] { startExport(); });
 
+        // ---- Install effects ---------------------------------------------
+        ddEffectsMode_ = add<DropDown>(PgEffects);
+        ddEffectsMode_->setItems({L"两者（脚本包 + pack.xml 清单）",
+                                  L"仅脚本包（.reg / .cmd / .ps1）",
+                                  L"仅 XML 清单（可回填 --config）"});
+        tbEffectsDir_ = makeText(PgEffects, L"输出目录（留空自动使用 <包名>_effects）");
+        btnEffectsBrowse_ = makeButton(PgEffects, L"浏览", Ic::Folder, false,
+                                       [this] { browseFolderFor(tbEffectsDir_, L"选择导出目录"); });
+        btnEffects_ = makeButton(PgEffects, L"导出安装效果", Ic::Terminal, true,
+                                 [this] { startEffects(); });
+
         // ---- Pack ---------------------------------------------------------
         // The form is split into three tabs so every field stays readable at
         // any window size; the action button lives in the tab bar.
@@ -1522,9 +1540,14 @@ public:
         btnClose_->setRect(R(cx + bw * 3, 0, bw, cap));
         btnMax_->icon = IsZoomed(hwnd_) ? Ic::Restore : Ic::Max;
 
+        // The nav rail grows with the number of pages; on a short window the
+        // row pitch shrinks so the last item never overlaps the footer label.
         int ny = cap + S(74);
+        int navAvail = b.client.bottom - statusH - S(40) - ny;
+        int navDy = std::min(S(44), std::max(S(28), navAvail / PgCount));
         for (int i = 0; i < PgCount; ++i)
-            nav_[i]->setRect(R(S(8), ny + i * S(44), navW - S(16), S(40)));
+            nav_[i]->setRect(R(S(8), ny + i * navDy, navW - S(16),
+                               navDy - S(4)));
 
         progress_->setRect(R(b.client.right - S(220),
                              b.client.bottom - statusH + S(14), S(200), S(6)));
@@ -1565,6 +1588,7 @@ public:
         case PgQuery:    layoutQuery(b.body); break;
         case PgExtract:  layoutExtract(b.body); break;
         case PgExport:   layoutExport(b.body); break;
+        case PgEffects:  layoutEffects(b.body); break;
         case PgPack:     layoutPack(b.body); break;
         case PgTransform: layoutTransform(b.body); break;
         case PgVerify:   layoutVerify(b.body); break;
@@ -1605,6 +1629,7 @@ public:
             struct PageCase { const wchar_t* name; Page page; int tab; };
             static const PageCase pageCases[] = {
                 {L"transform", PgTransform, -1}, {L"export", PgExport, -1},
+                {L"effects", PgEffects, -1},
                 {L"verify", PgVerify, -1},       {L"pack", PgPack, 0},
                 {L"settings", PgSettings, -1},
             };
@@ -1968,6 +1993,31 @@ public:
         addLabel(R(x, y + S(54), w, S(60)),
                  L"完整归档会导出全部 .idt 表、原始流、Binary 条目与 summary.txt；"
                  L"仅导出 CAB 时会附带 manifest.txt。",
+                 t.fSmall, t.muted, DT_LEFT | DT_TOP | DT_WORDBREAK);
+    }
+
+    void layoutEffects(const RECT& body) {
+        Theme& t = theme();
+        int optW = S(430);
+        RECT oc = R(body.left, body.top, optW, H(body));
+        RECT lc = R(oc.right + S(16), body.top, W(body) - optW - S(16), H(body));
+        addCard(oc, L"安装效果导出", L"注册表 / 服务 / 环境变量 / 快捷方式 / 自定义动作",
+                Ic::Terminal);
+        layoutLogCard(lc, S(54));
+        int x = oc.left + S(16), w = W(oc) - S(32);
+        int y = oc.top + S(48);
+        addLabel(R(x, y, w, S(18)), L"导出内容", t.fSmall, t.subText); y += S(20);
+        ddEffectsMode_->setRect(R(x, y, w, S(34))); y += S(34) + S(18);
+        addLabel(R(x, y, w, S(18)), L"输出目录", t.fSmall, t.subText); y += S(20);
+        tbEffectsDir_->setRect(R(x, y, w - S(80), S(32)));
+        btnEffectsBrowse_->setRect(R(x + w - S(72), y, S(72), S(32)));
+        y += S(32) + S(24);
+        btnEffects_->setRect(R(x, y, S(184), S(40)));
+        addLabel(R(x, y + S(54), w, S(150)),
+                 L"脚本包：registry(.reg) / services(.cmd) / environment(.cmd) / "
+                 L"shortcuts(.ps1) / tables.txt / properties.txt / effects.md。\n"
+                 L"XML 清单：pack.xml（含 icons / binaries 资源），可直接用于 "
+                 L"pack --config 回填。\n只读取 MSI 表，不执行安装、不求值条件。",
                  t.fSmall, t.muted, DT_LEFT | DT_TOP | DT_WORDBREAK);
     }
 
@@ -2512,6 +2562,9 @@ public:
         setVisibility();
         layout();
         if (p == PgVerify && !package_.empty()) runVerify();
+        if (p == PgEffects && !package_.empty() &&
+            util::trim(tbEffectsDir_->value()).empty())
+            tbEffectsDir_->setValue(defaultEffectsDir());
     }
 
     // The "current package" bar belongs to the read side of the tool. It is
@@ -2528,8 +2581,8 @@ public:
             bool v = p >= 0 ? (p == page_)
                    : p == -1 ? true
                    : p == -2 ? showsFileBar()
-                   : (page_ == PgExtract || page_ == PgExport || page_ == PgPack ||
-                      page_ == PgTransform);
+                   : (page_ == PgExtract || page_ == PgExport || page_ == PgEffects ||
+                      page_ == PgPack || page_ == PgTransform);
             if (page_ == PgPack && w->tab() >= 0 && w->tab() != packTab_)
                 v = false;
             if (page_ == PgExtract && w->tab() == 1 && !extractAdv_)
@@ -3147,8 +3200,8 @@ public:
 
     // ---- background tasks ------------------------------------------------
     void setBusy(bool busy) {
-        Button* runButtons[] = {btnExtractAll_, btnExtractSel_, btnExport_, btnPack_,
-                                btnOpen_, btnHomeVerify_, btnVerify_};
+        Button* runButtons[] = {btnExtractAll_, btnExtractSel_, btnExport_, btnEffects_,
+                                btnPack_, btnOpen_, btnHomeVerify_, btnVerify_};
         for (Button* b : runButtons) if (b) b->setEnabled(!busy);
         if (gridBrowseDirs_) gridBrowseDirs_->setEnabled(!busy);
         if (gridBrowseFiles_) gridBrowseFiles_->setEnabled(!busy);
@@ -3235,6 +3288,14 @@ public:
         size_t dot = stem.find_last_of(L'.');
         if (dot != std::wstring::npos) stem = stem.substr(0, dot);
         return util::path::join(dir, stem + L"_files");
+    }
+
+    std::wstring defaultEffectsDir() const {
+        std::wstring dir = util::path::dirName(package_);
+        std::wstring stem = util::path::fileName(package_);
+        size_t dot = stem.find_last_of(L'.');
+        if (dot != std::wstring::npos) stem = stem.substr(0, dot);
+        return util::path::join(dir, stem + L"_effects");
     }
 
     void applyDefaultOutDir() {
@@ -3888,6 +3949,28 @@ public:
             if (mode == 0) extract::exportCabs(db, dir, true);
             else extract::exportArchive(db, dir, true);
         }, L"正在导出 " + util::path::fileName(path), L"导出完成");
+    }
+
+    // ---- install effects -------------------------------------------------
+    void startEffects() {
+        if (package_.empty()) { toast(L"请先打开一个包", 1); return; }
+        std::wstring dir = util::trim(tbEffectsDir_->value());
+        if (dir.empty()) dir = defaultEffectsDir();
+        if (dir.empty()) { toast(L"请选择输出目录", 1); return; }
+        tbEffectsDir_->setValue(dir);
+        lastOutputDir_ = util::path::full(dir);
+        effects::Format fmt = effects::Format::All;
+        if (ddEffectsMode_->index == 1) fmt = effects::Format::Scripts;
+        else if (ddEffectsMode_->index == 2) fmt = effects::Format::Manifest;
+        std::wstring path = package_;
+        startTask([path, dir, fmt] {
+            msi::Db db(path);
+            effects::Options o;
+            o.outDir = dir;
+            o.format = fmt;
+            o.verbose = true;
+            effects::exportEffects(db, o);
+        }, L"正在导出安装效果 " + util::path::fileName(path), L"安装效果导出完成");
     }
 
     // ---- transform (.mst) ----------------------------------------------
@@ -4597,6 +4680,10 @@ public:
             field(tbExportDir_, DkOutDir, L"输出目录", {btnExportBrowse_});
             fallback(rc, {}, DkAuto, L"自动分配");
             break;
+        case PgEffects:
+            field(tbEffectsDir_, DkOutDir, L"输出目录", {btnEffectsBrowse_});
+            fallback(rc, {}, DkAuto, L"自动分配");
+            break;
         default:
             fallback(rc, {}, DkAuto, L"自动分配");
             break;
@@ -4900,6 +4987,8 @@ public:
             refreshBrowseList();
         } else if (page_ == PgExport) {
             tbExportDir_->setValue(dir);
+        } else if (page_ == PgEffects) {
+            tbEffectsDir_->setValue(dir);
         }
         lastOutputDir_ = dir;
         addRecentOutDir(dir);

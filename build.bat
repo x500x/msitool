@@ -92,7 +92,7 @@ if errorlevel 1 (
 cl /nologo /std:c++17 /EHsc /W4 /O2 /utf-8 ^
    /DUNICODE /D_UNICODE /D_CRT_SECURE_NO_WARNINGS ^
    /Isrc /Fobuild\obj\%ARCH%\ /Febuild\msitool_%ARCH%.exe ^
-   src\util.cpp src\msidb.cpp src\cab.cpp src\extract.cpp ^
+   src\util.cpp src\msidb.cpp src\cab.cpp src\extract.cpp src\effects.cpp ^
    src\pack.cpp src\pack_util.cpp src\custom_actions.cpp src\xml.cpp src\pack_xml.cpp ^
    src\pack_ui.cpp src\pack_ui_builtin.cpp src\transform.cpp src\main.cpp ^
    src\ui_draw.cpp src\ui_widgets.cpp src\ui_app.cpp ^

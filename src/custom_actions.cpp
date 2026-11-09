@@ -404,7 +404,7 @@ std::wstring customActionsToXml(const std::vector<CustomActionSpec>& rows,
     std::wstring out;
     if (document) {
         out += L"<?xml version=\"1.0\" encoding=\"utf-8\"?>\r\n";
-        out += L"<!-- 由 msitool 自定义动作编辑器生成；可作为 --config 清单使用 -->\r\n";
+        out += L"<!-- 由 msitool 自定义动作编辑器生成；可作为 pack 的 config 清单使用 -->\r\n";
         out += L"<msitool xmlns=\"https://msitool.dev/schema/pack/v1\" "
                L"minVersion=\"1\">\r\n";
     }

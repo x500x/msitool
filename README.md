@@ -21,6 +21,7 @@
 - [图形界面（Fluent UI）](#图形界面fluent-ui)
 - [安装](#安装)
 - [命令参考](#命令参考)
+  - [安装效果导出（`effects`）](#安装效果导出effects)
 - [工作原理](#工作原理)
 - [项目结构](#项目结构)
 - [构建详解](#构建详解)
@@ -43,6 +44,7 @@
 | 包预检 | 打开前校验 OLE 复合文件签名、`MsiOpenDatabaseW`、`_Tables` 结构；`verify` 额外调用 `MsiVerifyPackageW` |
 | 查看 | SummaryInformation、Property、所有表与行数、列定义/类型/主键、任意 MSI SQL 查询 |
 | 导出 | 全部表为 `.idt`、全部 `_Streams` 原始流、`Binary` 条目、`summary.txt`、CAB + `manifest.txt` |
+| 安装效果 | `effects` 把注册表 / 服务 / 环境变量 / 快捷方式 / 自定义动作翻译成 `.reg`、`.cmd`、`.ps1` 脚本和一份可回填 `pack --config` 的 `pack.xml`；命令行与 GUI 均可调用 |
 | 解包 | 还原安装目录树；内嵌 CAB（`_Streams`）、外部 CAB、未压缩 layout、跨 CAB 连续文件（FDI 分卷集）、`.msp` 补丁负载都支持；`--transform` 可查看应用 transform 后的视图；GUI 另提供资源管理器式浏览（目录树 + 文件列表、筛选、右键菜单、双击单文件解包、目录递归解包、自动输出目录） |
 | 打包 | 把目录做成自包含 MSI：FCI 生成一个或多个 MSZIP CAB + Msi API 建库/写流/写摘要，可选安装位置（`--install-dir`）、分卷、空目录、快捷方式（桌面 / 公共桌面 / 开始菜单子目录 / 图标索引 / 广告式）、注册表、服务、环境变量、多 Feature、**XML 清单**、**内置中英多页向导**、**UI 模板导入**、自定义 UI 与数字签名 |
 | Transform | `transform` 用 `MsiDatabaseGenerateTransformW` + `MsiCreateTransformSummaryInfoW` 把两个 MSI 的差异写成真正的 `.mst`（可指定 error / validation 标志，`--dry-run` 只做逐表 diff）；`apply` 复制原包后在事务句柄上 `MsiDatabaseApplyTransformW` + `MsiDatabaseCommit` 落地新包；`mst` 读取摘要流与 `_TransformView` 变更明细；`--transform` 继续支持把 MST 作为只读视图查看 / 解包 |
@@ -128,6 +130,7 @@ build\msitool_x64.exe gui setup.msi         :: 启动 GUI 并直接打开一个�
 | SQL 查询 | MSI SQL 编辑器、示例查询、结果网格与耗时 |
 | 解包 | **整页是文件资源管理器**：命令 / 地址栏（后退、前进、上一级、刷新、可点击面包屑、搜索框、解包全部、解包选中、选项、日志）+ 左侧导航树 + 右侧详细信息列表（文件夹与文件混排、图标、类型列、点击表头排序、双击进入目录 / 双击文件解包、右键菜单）；常驻「解包到」位置条可直接编辑路径、点「浏览…」选目录、从「最近」下拉复用历史目录、点「打开」查看，默认自动填 `<包名>_files`；六个开关、MST transform 与基准 MSI 收进可折叠「选项」，运行日志收进可折叠「日志」抽屉（展开后按窗口高度自适应，约占页面 1/3，最大化时更高） |
 | 导出 | CAB / 完整归档两种模式、运行日志 |
+| 安装效果 | 三种导出内容（两者 / 仅脚本 / 仅 XML 清单）、输出目录（留空自动填 `<包名>_effects`，可拖放）、「导出安装效果」按钮与运行日志；结果文件列表直接回显在日志里 |
 | 打包 | 「基本 / 高级 / 签名 / 快捷方式 / 自定义动作」五个标签页，字段按窗口尺寸自适应两列排布（基本页含源目录、输出 MSI、产品名称、产品版本、安装目录；高级页含 CAB 分卷、XML 清单、UI 模板、UI 语言与安装范围；快捷方式页含主程序、桌面 / 开始菜单勾选与可增删行的内联快捷方式表格——名称 / 位置 / 目标 / 参数 / 图标 / 索引 / 说明；自定义动作页为可视化编辑器——动作列表 + 类型感知属性表单 + 标志位 + 执行序列时间线 + 实时检查 + XML 导入 / 导出，详见 [自定义动作](#自定义动作customactions)）；右上角「开始打包」常驻，完成后自动打开新 MSI；文件 / 文件夹可直接拖入（见 [拖放](#拖放)） |
 | Transform | 原包 / 更新包 / `.mst` / 输出包四个路径 + `--errors` / `--validate` 标志输入，三个动作：生成 MST（逐表 diff 统计）、应用 MST（复制 + 提交成新包）、查看变更（摘要流 + `_TransformView` 明细）；结果与进度走运行日志 |
 | 验证 | 签名 / `MsiOpenDatabase` / `MsiVerifyPackage` / `_Tables` / 媒体检查报告 |
@@ -144,7 +147,7 @@ build\msitool_x64.exe gui setup.msi         :: 启动 GUI 并直接打开一个�
 | 打包 · 配置文件 | 查找目录里的 `pack.xml` / `msitool.xml` / `manifest.xml` | 作为 XML 清单文件；编辑器未编辑过时自动载入其中的自定义动作 |
 | 打包 · UI 模板 | — | `.msi` 作为 UI 模板 |
 | 打包 · 签名证书 | — | `.pfx` / `.p12` |
-| 解包 · 解包到 / 导出 · 输出目录 | 作为输出目录（同时记入「最近」） | 取所在目录 |
+| 解包 · 解包到 / 导出 · 输出目录 / 安装效果 · 输出目录 | 作为输出目录（同时记入「最近」） | 取所在目录 |
 | 打包页空白处 | 源目录 | `.xml` → 清单，`.pfx` → 证书，其余 → 源目录（取所在目录）；`.msi` / `.msp` 不打开，只提示去查看 / 解包页 |
 | 其他页面空白处 | 作为打包源目录并切到「打包」页 | `.xml` → 清单，`.pfx` → 证书，`.msi` / `.msp` → 打开，其余 → 源目录（取所在目录） |
 
@@ -201,6 +204,7 @@ msitool                          :: 不带参数 = 图形界面
 | `list` | `<包> <名称>` | 常用表或任意表；`--tsv` 便于脚本处理 |
 | `cabs` | `<包> <输出目录>` | 导出内嵌/外部 CAB + `manifest.txt` |
 | `export` | `<包> <输出目录>` | 导出全部表 `.idt`、全部流、Binary、`summary.txt` |
+| `effects` | `<包> <输出目录>` | 导出安装效果：注册表 / 服务 / 环境变量 / 快捷方式脚本 + `pack.xml` 清单（别名 `fx`） |
 | `extract` | `<包> <输出目录>` | 解包：还原目录树并解压 CAB 中的文件；`.msp` 导出补丁负载 |
 | `pack` | `<源目录> <输出.msi>` | 打包：目录 → 自包含 MSI（一个或多个内嵌 MSZIP CAB） |
 | `transform` | `<原包.msi> <新包.msi> <输出.mst>` | 生成 transform：比较两个 MSI，按差异写出 `.mst`（`--dry-run` 只比较不写） |
@@ -216,6 +220,7 @@ msitool                          :: 不带参数 = 图形界面
 | `-h`, `--help`, `/?` | 显示帮助 |
 | `-v`, `--verbose` | 详细日志（stderr，前缀 `[v]`） |
 | `--tsv` | 表格以 TSV 输出（单元格内的 tab/换行会转义） |
+| `--format <all\|scripts\|manifest>` | `effects`：写脚本包 + XML 清单 / 仅脚本包 / 仅 XML 清单（默认 `all`） |
 
 ### 解包选项（`extract`）
 
@@ -579,6 +584,59 @@ msitool pack C:\payload C:\out\app.msi --ui custom --config examples\ui-custom.x
 
 > `MsiDatabaseExportW` 导出含二进制列的表（如 `Binary`）时，会在同目录额外生成同名子目录存放流，这是 MSI API 的正常行为。
 
+### 安装效果导出（`effects`）
+
+`list` / `query` / `export` 给你的是 MSI 的**原始表**；`effects` 把「装这个包会改动系统什么」翻译成可读、可执行的脚本，以及一份能直接回填 `pack --config` 的 XML 清单。全程只读数据库：不执行安装、不写注册表、不运行 CustomAction。
+
+```bat
+msitool effects setup.msi C:\out\effects
+msitool effects setup.msi C:\out\effects --format scripts
+msitool effects setup.msi C:\out\effects --format manifest
+msitool effects setup.msi C:\out\effects --transform custom.mst --verbose
+```
+
+`--transform` 与 `info` / `list` / `extract` 一样先叠加只读视图，所以导出的也是 transform 之后的效果。GUI 在「安装效果」页提供同样的三种导出内容与输出目录（留空自动填 `<包名>_effects`）。
+
+| `--format` | 产出 |
+| --- | --- |
+| `all`（默认） | 脚本包 + `pack.xml` + `effects.md` |
+| `scripts` | 仅脚本包与审计文本（仍导出 `icons/` 供 `shortcuts.ps1` 使用） |
+| `manifest` | 仅 `pack.xml` 与其引用的 `icons/` / `binaries/` |
+
+```
+<outdir>\registry.reg               安装侧注册表写入（UTF-16 LE + BOM，regedit 可直接导入）
+<outdir>\registry-uninstall.reg     卸载侧删除（值写 "Name"=-，* 键写 [-Key]）
+<outdir>\services-install.cmd      sc create / sc description / 安装侧 ServiceControl
+<outdir>\services-uninstall.cmd    sc stop / sc delete / 卸载侧 ServiceControl
+<outdir>\environment.cmd           setx / reg delete，[~] 追加写成 %PATH%;...
+<outdir>\shortcuts.ps1             PowerShell + WScript.Shell 重建 .lnk
+<outdir>\custom-actions.txt        CustomAction + 自定义动作序列行（仅审计）
+<outdir>\tables.txt                Registry / ServiceInstall / ServiceControl / Environment / Shortcut / CustomAction 原始表
+<outdir>\properties.txt            Property 表，便于人工解析 [Property]
+<outdir>\icons\<Icon_>.ico        Shortcut.Icon_ 的原始流
+<outdir>\binaries\<Source>.bin    Binary 型自定义动作的 DLL / EXE 流
+<outdir>\pack.xml                  可回填的清单（<registry> / <services> / <environment> / <shortcuts> / <customactions> / <executeSequence>）
+<outdir>\effects.md                统计、文件说明、回填命令与限制清单
+```
+
+关键映射：
+
+- **注册表**：`Root` → 根键，`#` → `dword:`，`#x` → `hex:`，`#%` → `hex(2)`，`[~]` → `hex(7)`，`+` / `-` / `*` → 建键 / 删键 / 卸载删键；`[ProductVersion]` 之类会用 Property 表的字面值替换。
+- **服务**：`ServiceInstall` 没有 ImagePath，工具按 `Component.KeyPath` → `File` → `Directory` 推导出可执行文件；`ServiceType` / `StartType` / `ErrorControl` 映射为 `type=` / `start=` / `error=`。`ServiceControl.Event` 的安装位（1/2/8）与卸载位（16/32/128）分别落到两个 `.cmd`。
+- **环境变量**：`=-` / `+-` / `!-` 前缀与 `*` 系统标志映射为 `setx` / `setx /M` / `reg delete`；值里的 `[~]` 还原成 `%NAME%;value` 形式的追加/前置。
+- **快捷方式**：`[#FileKey]` 通过 `File` / `Component` / `Directory` 还原成真实路径，标准目录（`DesktopFolder` 等）映射为 PowerShell 的 `[Environment]::GetFolderPath(...)`。
+- **`pack.xml`**：`<pack>` 带产品名 / 版本 / GUID / 平台 / 语言 / 安装范围，资源段可直接被 `--config` 读取；自动跳过 pack 自己会生成的 `RegShortcutDir*` 行，避免主键冲突；广告式快捷方式、超出 `1..32767` 的自定义动作类型会给出告警并跳过。
+
+回填（实测逐表一致）：
+
+```bat
+msitool pack C:\payload C:\out\app.msi --config C:\out\effects\pack.xml --force
+```
+
+限制：脚本里的 `[#File]`、条件表达式等 formatted 文本保持原样并写入注释，`[INSTALLFOLDER]` 在 `.cmd` / `.reg` 中按 `Directory` 表推导出可用路径、在 `.ps1` 与 `pack.xml` 中保留原文；`pack.xml` 不重放 UI、Feature、文件树、Transform 与签名；`ServiceControl` 事件在 pack 里归一化为 `163`（原始事件保留在两个 `.cmd` 里）；`Component_` 是源包组件键，新包找不到时 pack 回退到根组件；Binary 型自定义动作的 `Source` 键会被 pack 改成 `<id>Binary`（内容不变）。脚本是审计 / 复现辅助，导入前请人工审阅。
+
+`tools/effects_regression.py` 覆盖三种格式、文件编码、脚本内容与 `pack.xml` 往返打包。
+
 ---
 
 ## 工作原理
@@ -629,6 +687,7 @@ MSI SQL 是 SQL 的**子集**（例如没有 `COUNT(*)` 这类聚合函数），
 │   ├── msidb.h / msidb.cpp      Msi API RAII 封装：包预检、查询、列信息、流、摘要、导出
 │   ├── cab.h / cab.cpp          FDI 解压，回调式直接落盘
 │   ├── extract.h / extract.cpp  表解析、目录树、Media/Sequence 映射、CAB 导出与解包
+│   ├── effects.h / effects.cpp  安装效果导出：脚本包生成、目录重建、pack.xml 往返清单
 │   ├── pack.h / pack.cpp        FCI 多 CAB 压缩 + Msi 建库/建表/写流/签名/摘要
 │   ├── pack_util.h / .cpp       MSI 行 / 标识符 / 标准目录等公共助手
 │   ├── pack_xml.h / .cpp        XML 清单解析、locale 替换、UI 模板导入
@@ -639,7 +698,7 @@ MSI SQL 是 SQL 的**子集**（例如没有 `COUNT(*)` 这类聚合函数），
 │   ├── ui.h                     UI 层接口：主题、GDI 绘制器、控件声明
 │   ├── ui_draw.cpp              主题 / DPI / 双缓冲绘制 / 矢量图标
 │   ├── ui_widgets.cpp           自绘控件：按钮、输入框、下拉、网格、日志、进度、导航
-│   ├── ui_app.cpp               主窗口、十个页面、业务逻辑与后台任务
+│   ├── ui_app.cpp               主窗口、十一个页面、业务逻辑与后台任务
 │   └── main.cpp                 入口：无参数进 GUI，带参数进 CLI（全部命令）
 ├── resources/
 │   ├── msitool.rc               RCDATA 资源清单
@@ -658,6 +717,7 @@ MSI SQL 是 SQL 的**子集**（例如没有 `COUNT(*)` 这类聚合函数），
 │   ├── make_ui_art.ps1          生成内置 banner / background / 示例 EULA
 │   ├── pack_regression.ps1      打包回归：全部 UI 模式 + verify + /a + 向导走查
 │   ├── transform_regression.py  transform / apply / mst 回归：生成、应用、往返一致、错误路径
+│   ├── effects_regression.py    effects 回归：三种格式、编码、脚本内容、pack.xml 往返打包
 │   └── ui_walkthrough.py        真实安装向导自动走查（en / zh-CN，per-user）
 ├── build.bat                    MSVC 构建脚本（x64 / x86 / clean）
 ├── CMakeLists.txt               CMake 构建（MSVC）
@@ -687,9 +747,9 @@ build.bat clean      :: 清理
 rc /nologo /fo build\obj\x64\msitool.res resources\msitool.rc
 cl /std:c++17 /EHsc /W4 /O2 /utf-8 /DUNICODE /D_UNICODE ^
    /Isrc /Fobuild\obj\x64\ /Febuild\msitool_x64.exe ^
-   src\util.cpp src\msidb.cpp src\cab.cpp src\extract.cpp ^
-   src\pack.cpp src\pack_util.cpp src\xml.cpp src\pack_xml.cpp ^
-   src\pack_ui.cpp src\pack_ui_builtin.cpp src\main.cpp ^
+   src\util.cpp src\msidb.cpp src\cab.cpp src\extract.cpp src\effects.cpp ^
+   src\pack.cpp src\pack_util.cpp src\custom_actions.cpp src\xml.cpp src\pack_xml.cpp ^
+   src\pack_ui.cpp src\pack_ui_builtin.cpp src\transform.cpp src\main.cpp ^
    src\ui_draw.cpp src\ui_widgets.cpp src\ui_app.cpp ^
    build\obj\x64\msitool.res ^
    Msi.Lib Cabinet.Lib Msxml6.Lib OleAut32.Lib Shell32.Lib Ole32.Lib ^
@@ -760,7 +820,12 @@ build\msitool_x64.exe extract setup.msi C:\out\files --transform custom.mst
 build\msitool_x64.exe extract update.msp C:\out\patch
 build\msitool_x64.exe extract update.msp C:\out\patch --base-msi setup.msi
 
-:: 6) transform 侧（生成 → 应用 → 往返比较）
+:: 6) 安装效果（脚本 + 可回填清单）
+build\msitool_x64.exe effects setup.msi C:\out\effects
+build\msitool_x64.exe effects setup.msi C:\out\effects_scripts --format scripts
+build\msitool_x64.exe pack C:\payload C:\out\rebuilt.msi --config C:\out\effects\pack.xml --force
+
+:: 7) transform 侧（生成 → 应用 → 往返比较）
 build\msitool_x64.exe transform setup.msi setup2.msi C:\out\diff.mst --force
 build\msitool_x64.exe transform setup.msi setup2.msi --dry-run
 build\msitool_x64.exe mst C:\out\diff.mst --base-msi setup.msi
@@ -773,6 +838,8 @@ build\msitool_x64.exe transform C:\out\applied.msi setup2.msi --dry-run   :: 应
 ```bat
 msiexec /a C:\out\app.msi /qn TARGETDIR=C:\out\admin
 ```
+
+安装效果侧的一键回归：`tools/effects_regression.py` 覆盖三种 `--format`、文件编码与脚本内容、`pack.xml` 的 XSD 兼容性，以及 `pack --config` 回填后注册表 / 服务 / 环境变量 / 快捷方式 / 自定义动作逐表一致（默认拿 `build\f_manifest.msi` / `t_ca.msi` / `t_cabin.msi` / `merge_ref.msi` 做样本，73 项断言）。
 
 transform 侧的一键回归：`tools/transform_regression.py` 用 `build\f_minimal.msi` → `build\f_basic.msi` 覆盖 10 组断言（dry-run 不落盘、摘要流标志、`_TransformView` 变更、校验不匹配即失败且不留半成品、往返逐表一致、相同包不写空文件、`.msp` 被拒、未知标志报错、`--no-summary`、`--transform` 视图仍生效）。
 
@@ -863,6 +930,7 @@ python tools\layout_check.py --dir %TEMP%\mst -v
 | `pack`（2.3 GiB 稀疏文件） | 未压缩伴随 layout | `FileSize=0`、`Attributes=8192`、一条空 `Cabinet` 的 `Media` 行；`extract` 从伴随目录完整还原 2,300,000,000 字节 |
 | 纯空目录（0 文件 / 3 目录） | 仅 `CreateFolder` 表 | `MsiVerifyPackage` OK；`msiexec /i` 会真正创建空目录树 |
 | `makecab` 分卷集（400 KB 文件跨 `span1/2/3.cab`） | 3 条相同 `LastSequence` 的 `Media` 行 | `fdintNEXT_CABINET` 串起 3 个 CAB，`extract` 还原出 400,000 字节，sha256 与源文件完全一致 |
+| `effects` 往返（`f_manifest.msi` / `t_ca.msi` / `t_cabin.msi` / WiX `merge_ref.msi`） | 全量清单 + 脚本包 | `.reg` / `.cmd` / `.ps1` / `pack.xml` 全部写出；`pack --config` 回填后 `Registry`(4) / `ServiceInstall` / `ServiceControl` / `Environment` / `Shortcut`(2) / `CustomAction` 逐表还原，`MsiVerifyPackage` OK；Binary 型自定义动作的 DLL 从 `Binary` 流导出为 `binaries\*.bin` 并重新嵌入 |
 | 自生成 transform（`f_minimal.msi` → `f_basic.msi`） | `transform` + `apply` + `mst --base-msi` | 20 KiB `.mst`（9 张表、43 行删除 / 8 行修改）；`apply` 后逐表与 `f_basic.msi` 完全一致（`transform --dry-run` 报「无差异」）；`mst --base-msi` 列出 19 条 `_TransformView` 变更（含 `DELETE` / `DROP` 行） |
 | .NET Desktop Runtime 8.0.11 x64 → 8.0.x x64（各 ~27 MiB） | 真实产品包之间的 diff / apply | 3 秒完成 15 张表、877 新增 / 601 删除 / 7 修改的 diff（含 `_Streams` 负载的 FNV-1a 指纹），104 KiB `.mst`；`apply` 1 秒写出 `MsiVerifyPackage` OK 的新包，产品名 / 版本 / ProductCode 变为目标包；已签名原包被提示需重新签名 |
 | 同一 payload 改一个字节后重新 `pack` | 流名相同、内容不同 | `_Streams` 正确报「修改 1」而非「新增 + 删除」（用 Name 作为行身份 + 内容指纹） |
@@ -886,6 +954,7 @@ python tools\layout_check.py --dir %TEMP%\mst -v
 - [x] ~~`pack`：多 CAB 分卷、> 2 GiB 文件、`CreateFolders` 保留空目录~~
 - [x] ~~`pack`：快捷方式、注册表、服务、环境变量、UI、数字签名、多个 Feature~~
 - [x] ~~`extract`：跨 CAB 连续文件（FDI `fdintNEXT_CABINET`）、应用 transform 后的视图、`.msp` 解包~~
+- [x] ~~`effects`：注册表 / 服务 / 环境变量 / 快捷方式脚本 + 可回填 `pack.xml`，命令行与 GUI~~
 - [x] ~~`transform` / `apply` / `mst`：生成 `.mst`、把 MST 落盘合成新包、查看 `_TransformView` 变更明细~~
 - [ ] 工程：自动化单元测试 + GitHub Actions CI（MSVC x64/x86）
 
@@ -906,6 +975,7 @@ python tools\layout_check.py --dir %TEMP%\mst -v
 - 未压缩 administrative image 的源目录结构（source 侧）常与安装布局不同，需保留源结构时用 `--source-layout`。
 - 不校验数字签名，不处理加密/受口令保护的包。`.msp` 可以导出补丁 CAB 负载 / transform / 原始流；QFE 型补丁没有 transform 流时，只能用 CAB 内部名（`F_CENTRAL_*` 之类）命名 `payload\` 里的文件，需要真实目录名时必须提供 `--base-msi`（且补丁需带 transform）。
 - MSI SQL 是子集：`query` 只支持受限的 `SELECT` 语法，聚合函数等常见 SQL 特性不可用。
+- `effects` 是**表级翻译**，不是安装仿真：不执行 CustomAction、不求值条件；`[Property]` 仅在 Property 表有字面值时替换（`.cmd` / `.reg` 里的 `[INSTALLFOLDER]` 额外按 `Directory` 表推导）；`pack.xml` 不重放 UI、Feature、文件树、Transform、签名与 `ServiceControl` 的原始事件位。详见 [安装效果导出](#安装效果导出effects)。
 
 **打包**
 

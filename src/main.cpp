@@ -3,6 +3,7 @@
 #include "extract.h"
 #include "pack.h"
 #include "transform.h"
+#include "effects.h"
 #include "ui.h"
 
 #include <stdio.h>
@@ -36,6 +37,7 @@ struct Cli {
     std::wstring              installDir;                // --install-dir
     int                       language = 1033;
     std::wstring              configFile;
+    std::wstring              effectsFormat = L"all";   // --format for 'effects'
     std::wstring              uiTemplate;
     std::wstring              uiLocale;
     std::wstring              dumpUiDir;
@@ -93,6 +95,9 @@ Commands:
   cabs <outdir>            Export embedded/external CABs + manifest.txt
   export <outdir>          Export all tables as .idt, all raw streams,
                            Binary entries and summary.txt
+  effects <outdir>         Export install effects: registry (.reg), service
+                           (.cmd), environment (.cmd), shortcut (.ps1) scripts
+                           and a pack.xml manifest for --config (alias: fx)
   extract <outdir>         Unpack: rebuild the directory tree and decompress
                            every file from the package cabinets
   pack <srcdir> <out.msi>  Pack a directory into a self-contained MSI with
@@ -118,6 +123,8 @@ Options:
   --skip-existing          extract: do not overwrite existing files
   --source-layout          extract: use the source-image directory tree
                            instead of the installed (target) tree
+  --format <all|scripts|manifest>
+                           effects: what to write (default: all)
   --keep-temp              extract: keep staged temporary cabinets
   --transform <file.mst>   apply an MST as a temporary view (repeatable);
                            info/tables/schema/query/list/extract see the
@@ -197,6 +204,8 @@ Examples:
   msitool list setup.msi files --tsv
   msitool cabs setup.msi C:\out\cabs
   msitool export setup.msi C:\out\archive
+  msitool effects setup.msi C:\out\effects
+  msitool effects setup.msi C:\out\effects --format manifest
   msitool extract setup.msi C:\out\files --verbose
   msitool extract setup.msi C:\out\files --transform custom.mst
   msitool extract update.msp C:\out\patch
@@ -278,7 +287,8 @@ Cli parseCommandLine(int argc, wchar_t** argv) {
         if (a == L"--name" || a == L"--version" || a == L"--manufacturer" ||
             a == L"--product-code" || a == L"--upgrade-code" ||
             a == L"--platform" || a == L"--language" || a == L"--install-dir" ||
-            a == L"--config" || a == L"--cab-size" || a == L"--large-files" ||
+            a == L"--config" || a == L"--format" ||
+            a == L"--cab-size" || a == L"--large-files" ||
             a == L"--ui" || a == L"--ui-template" || a == L"--ui-locale" ||
             a == L"--main-exe" ||
             a == L"--dump-ui" || a == L"--sign-cert" || a == L"--sign-password" ||
@@ -293,6 +303,7 @@ Cli parseCommandLine(int argc, wchar_t** argv) {
             else if (a == L"--platform") { cli.platform = v; cli.platformSet = true; }
             else if (a == L"--install-dir") { cli.installDir = v; cli.installDirSet = true; }
             else if (a == L"--config") cli.configFile = v;
+            else if (a == L"--format") cli.effectsFormat = v;
             else if (a == L"--ui-template") { cli.uiTemplate = v; cli.uiTemplateSet = true; }
             else if (a == L"--ui-locale") cli.uiLocale = v;
             else if (a == L"--main-exe") cli.mainExe = v;
@@ -893,6 +904,12 @@ int run(int argc, wchar_t** argv) {
         extract::exportCabs(db, requireArg(cli, 1, L"output directory"), cli.verbose);
     } else if (cmd == L"export") {
         extract::exportArchive(db, requireArg(cli, 1, L"output directory"), cli.verbose);
+    } else if (cmd == L"effects" || cmd == L"fx" || cmd == L"install-effects") {
+        effects::Options o;
+        o.outDir = requireArg(cli, 1, L"output directory");
+        o.format = effects::parseFormat(cli.effectsFormat);
+        o.verbose = cli.verbose;
+        effects::exportEffects(db, o);
     } else {
         util::fail(L"Unknown command '" + cli.command + L"'. Run 'msitool --help'.");
     }
